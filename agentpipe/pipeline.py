@@ -280,12 +280,16 @@ class Pipeline:
     def sync_links(self, gh: GitHub, issues: dict) -> None:
         """Mirror plan edges as GitHub's native blocked-by links (only when they changed)."""
         st = self.state
+        todo = []
         for key, issue in issues.items():
             if issue["state"].upper() != "OPEN" or key not in self.tasks:
                 continue
             want = sorted(issues[b]["number"] for b in self.plan.get(key).blocked_by if b in issues)
-            if st.data["links"].get(key) == want:
-                continue
+            if st.data["links"].get(key) != want:
+                todo.append((key, issue, want))
+        if todo:
+            self.log(f"linking blocked-by for {len(todo)} issue(s)")
+        for key, issue, want in todo:
             have = gh.blocked_by(issue["number"])
             for n in set(want) - set(have):
                 gh.add_blocked_by(issue["number"], self.db_id(gh, n))

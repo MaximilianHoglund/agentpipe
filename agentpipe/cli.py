@@ -25,7 +25,8 @@ def main(argv: list[str] | None = None) -> int:
     for name, help_ in (("plan", "infer the dependency plan and print it (no GitHub writes)"),
                         ("sync", "create/update issues, statuses and blocked-by links"),
                         ("status", "show the queue by status"),
-                        ("run", "run the dispatcher: implement, review, merge")):
+                        ("run", "run the dispatcher: implement, review, merge"),
+                        ("watch", "live view of the dispatcher and what each running agent is doing")):
         p = sub.add_parser(name, help=help_)
         p.add_argument("target")
         if name == "plan":
@@ -36,6 +37,11 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--implementers", type=int)
             p.add_argument("--reviewers", type=int)
             p.add_argument("--once", action="store_true", help="exit when no job is running")
+        if name == "watch":
+            p.add_argument("--follow", metavar="KEY", help="stream one task's agent in full, e.g. project-foundation/1.1")
+            p.add_argument("--events", type=int, default=8, help="recent events shown per agent")
+            p.add_argument("--interval", type=float, default=2.0, help="seconds between refreshes")
+            p.add_argument("--once", action="store_true", help="print one snapshot and exit")
     args = ap.parse_args(argv)
     cfg = config_mod.load(args.config)
 
@@ -86,6 +92,18 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{s} ({len(items)})")
                 for line in items if s != Status.FINISHED.value else items[-5:]:
                     print(f"  {line}")
+        return 0
+
+    if args.cmd == "watch":
+        from agentpipe import watch
+        try:
+            if args.follow:
+                watch.follow(target.work_dir, target.project_dir, args.follow)
+            else:
+                watch.watch(target.name, target.work_dir, target.project_dir,
+                            interval=args.interval, events=args.events, once=args.once)
+        except KeyboardInterrupt:
+            pass
         return 0
 
     if args.cmd == "run":
