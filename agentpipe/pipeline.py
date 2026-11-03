@@ -854,6 +854,7 @@ class Pipeline:
             pdir = rv / self.t.project_dir
             history = review.review_history(self.gh.comments(pr["number"]))
             round_ = review.rounds_used(history) + 1
+            self.log(f"phase {t.key}: test gate")
             gate = self.run_gate(pdir, slot, self.t.test, self.t.test_timeout)
             if not gate.ok:
                 v = {"verdict": review.TESTS_FAILED, "summary": f"`{self.t.test}` failed on this commit.",
@@ -882,6 +883,7 @@ class Pipeline:
             diff_path = rv.parent / f"{t.slug}.diff"
             # Paths relative to the project dir, which is where the mutation tool runs.
             diff_path.write_text(self.git.diff(pdir, self.base_ref(), relative=True), encoding="utf-8")
+            self.log(f"phase {t.key}: mutation testing")
             m = self.run_gate(pdir, slot, self.t.mutation.replace("{diff}", str(diff_path)),
                               self.t.mutation_timeout)
             self.git.restore(rv)  # an in-place run killed mid-mutant must not leave a mutated file
@@ -904,6 +906,7 @@ class Pipeline:
             pr_summary=pr["body"].split("## Summary", 1)[-1].strip()[:6000],
             test_cmd=self.t.test, mutation_section=mutation_section, prior_section=prior,
             context_list=self.context_list())
+        self.log(f"phase {t.key}: agent (reviewer)")
         for attempt in range(2):
             res = self.claude.run(prompt, pdir, self.agent_def("reviewer"), review.REVIEW_SCHEMA,
                                   log_name=f"{t.slug}-review-{pr['headRefOid'][:8]}-{attempt}",
@@ -932,6 +935,7 @@ class Pipeline:
                 self.gh.comment(pr["number"], review.render_review(v, pr["headRefOid"], 0, self.cfg.max_rounds))
                 self.gh.set_status(issue, Status.CHANGES_REQUESTED, Status.APPROVED)
                 return
+            self.log(f"phase {t.key}: test gate (after merging {self.base_ref()})")
             gate = self.run_gate(wt / self.t.project_dir, slot, self.t.test, self.t.test_timeout)
             if not gate.ok:
                 history = review.review_history(self.gh.comments(pr["number"]))

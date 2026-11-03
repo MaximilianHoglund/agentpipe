@@ -73,5 +73,29 @@ def test_render_shows_live_agent_and_link_progress(tmp_path, monkeypatch):
     os.utime(tr, (now, now))
     text = watch.render("t", work, ".", color=False, now=now)
     assert "blocked-by links synced for 1 of 2 tasks" in text
-    assert "[impl-0] implement c/1.1 (#5), 60s, 1 tool calls, 0 errors" in text
+    assert "[impl-0] implement c/1.1 (#5), 60s: agent, 1 tool calls, 0 errors" in text
+    assert "last activity 0s ago" in text and "STALLED" not in text
     assert "Edit: src/a.rs" in text
+
+
+def test_steps_without_an_agent_show_progress_and_flag_stalls(tmp_path, monkeypatch):
+    monkeypatch.setattr(watch, "PROJECTS", tmp_path / "projects")
+    work = tmp_path / "work"
+    (work / "logs").mkdir(parents=True)
+    now = time.time()
+    t0 = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - 1200))
+    (work / "logs" / "pipeline.log").write_text(
+        f"{t0} [t] running (pid 1); x\n{t0} [t] start review c/1.1 (#5) on review-0\n"
+        f"{t0} [t] phase c/1.1: test gate\n{t0} [t] start implement c/1.2 (#6) on impl-0\n", encoding="utf-8")
+    mo = work / "review" / "c-1_1" / "mutants.out"
+    mo.mkdir(parents=True)
+    (mo / "caught.txt").write_text("a\nb\n")
+    (mo / "missed.txt").write_text("c\n")
+    (mo / "outcomes.json").write_text(json.dumps({"total_mutants": 5}))
+    text = watch.render("t", work, ".", color=False, now=now)
+    assert "review c/1.1 (#5), 20m: mutation testing 3/5 mutants, 1 missed" in text
+    # The implement job logged nothing since its start 20 minutes ago.
+    assert "implement c/1.2 (#6), 20m: setting up (worktree, prompt)" in text
+    assert "POSSIBLY STALLED" in text
+    st = watch.parse_log((work / "logs" / "pipeline.log").read_text().splitlines())
+    assert {j.key: j.phase for j in st.jobs}["c/1.1"] == "test gate"

@@ -24,6 +24,7 @@ PROJECTS = Path.home() / ".claude" / "projects"
 
 _LINE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[[^\]]+\] (.*)$")
 _START_RE = re.compile(r"^start (\w+) (\S+) \(#(\d+)\) on (\S+)$")
+_PHASE_RE = re.compile(r"^phase (\S+): (.*)$")
 _END_RE = re.compile(r"^(?:done (\w+) (\S+)|(\w+) (\S+) crashed: .*)$")
 
 
@@ -34,6 +35,8 @@ class Job:
     issue: int
     slot: str
     started: float  # epoch seconds
+    phase: str = ""  # latest "phase <key>: ..." line, e.g. "mutation testing"
+    phase_at: float = 0.0
 
 
 @dataclass
@@ -60,6 +63,8 @@ def parse_log(lines: list[str], recent: int = 6) -> LogState:
         elif s := _START_RE.match(msg):
             kind, key, issue, slot = s.groups()
             jobs[key] = Job(kind, key, int(issue), slot, last_time)
+        elif (ph := _PHASE_RE.match(msg)) and ph.group(1) in jobs:
+            jobs[ph.group(1)].phase, jobs[ph.group(1)].phase_at = ph.group(2), last_time
         elif e := _END_RE.match(msg):
             jobs.pop(e.group(2) or e.group(4), None)
     return LogState(list(jobs.values()), tail[-recent:], last_time)
@@ -226,19 +231,91 @@ def render(target: str, work_dir: Path, project_dir: str, *, events: int = 8,
         cwd = job_cwd(work_dir, project_dir, job)
         path = live_transcript(cwd, job.started)
         head = f"[{job.slot}] {job.kind} {job.key} (#{job.issue}), {_ago(now - job.started)}"
-        if path is None:
-            out.append(_c("head", f"\n{head}", color))
-            out.append(_c("dim", "  no agent transcript yet: setting up the worktree, or running the test gate", color))
+        if path is None or (job.phase and not job.phase.startswith("agent")):
+            # Not in an agent (yet): say which step, how far along, and when it last did anything.
+            what, progress, active = job_step(work_dir, cwd, job)
+            out.append(_c("head", f"\n{head}: {what}{progress}", color))
+            out.append("  " + _activity(now, active, color))
             continue
         tr = parse_transcript(path.read_text(encoding="utf-8", errors="replace").splitlines())
-        idle = now - path.stat().st_mtime
         denied = f", {tr.denied} DENIED" if tr.denied else ""
-        out.append(_c("head", f"\n{head}, {tr.tool_calls} tool calls, {tr.errors} errors{denied}, "
-                              f"last activity {_ago(idle)} ago", color))
+        out.append(_c("head", f"\n{head}: agent, {tr.tool_calls} tool calls, {tr.errors} errors{denied}", color))
+        out.append("  " + _activity(now, path.stat().st_mtime, color, tr))
         out.append(_c("dim", f"  {path}", color))
         for ev in tr.events[-events:]:
             out.append(f"  {ev.when} " + _c(ev.kind, _short(ev.text, width - 12), color))
     return "\n".join(out)
+
+
+STALL_AFTER = 900  # seconds without any sign of life before a job is flagged
+
+
+def _newest_mtime(*paths: Path) -> float | None:
+    """Newest modification time among ``paths`` and, for directories, their direct children."""
+    best = None
+    for p in paths:
+        try:
+            items = [p, *p.iterdir()] if p.is_dir() else [p]
+        except OSError:
+            continue
+        for q in items:
+            try:
+                m = q.stat().st_mtime
+            except OSError:
+                continue
+            best = m if best is None or m > best else best
+    return best
+
+
+def mutation_progress(cwd: Path, since: float) -> tuple[str, float | None] | None:
+    """(" 78/79 mutants, 3 missed", last activity) from cargo-mutants' output, if it's running."""
+    out = cwd / "mutants.out"
+    active = _newest_mtime(out, out / "log")
+    if active is None or active < since:
+        return None
+    counts = {}
+    for name in ("caught", "missed", "timeout", "unviable"):
+        try:
+            counts[name] = len((out / f"{name}.txt").read_text(encoding="utf-8").splitlines())
+        except OSError:
+            counts[name] = 0
+    try:
+        total = json.loads((out / "outcomes.json").read_text(encoding="utf-8")).get("total_mutants")
+    except (OSError, ValueError):
+        total = None
+    text = f" {sum(counts.values())}/{total or '?'} mutants, {counts['missed']} missed"
+    if counts["timeout"]:
+        text += f", {counts['timeout']} timed out"
+    return text, active
+
+
+def job_step(work_dir: Path, cwd: Path, job: Job) -> tuple[str, str, float | None]:
+    """(step, progress, last activity) for a job that is not running an agent right now."""
+    target = work_dir / "target" / job.slot
+    build = _newest_mtime(target, target / "debug", target / "debug" / "deps")
+    if job.kind == "review" and (m := mutation_progress(cwd, job.started)):
+        return "mutation testing", m[0], m[1]
+    if job.phase:
+        return job.phase, "", max(filter(None, (build, job.phase_at)), default=None)
+    if job.kind in ("review", "merge"):
+        # Old dispatchers log no phases; a review without an agent or mutants is in its gate.
+        return "test gate", "", max(filter(None, (build, job.started)), default=None)
+    return "setting up (worktree, prompt)", "", job.started
+
+
+def _activity(now: float, active: float | None, color: bool, tr=None) -> str:
+    if active is None:
+        return _c("dim", "no activity seen yet", color)
+    idle = now - active
+    text = f"last activity {_ago(idle)} ago"
+    if idle < STALL_AFTER:
+        return _c("done", text, color)
+    hint = ""
+    if tr is not None:
+        last = next((e for e in reversed(tr.events) if e.kind == "tool"), None)
+        if last:
+            hint = f"; a long command may still be running: {_short(last.text, 80)}"
+    return _c("error", f"{text}: POSSIBLY STALLED{hint}", color)
 
 
 def follow(work_dir: Path, project_dir: str, key: str, *, color: bool = True, poll: float = 1.0) -> None:
