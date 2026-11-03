@@ -14,33 +14,23 @@ sync_seconds = 600        # how often tasks.md is re-read and issues reconciled
 limit_backoff_seconds = 1800  # pause after a usage/capacity limit
 agent_timeout = 14400     # hard cap on one agent run
 
+# Every agent may use Bash and PowerShell, unrestricted (Max, 2026-11-03).
+
 [agents.planner]
 model = "claude-opus-5-5"
 max_turns = 60
-tools = ["Read", "Glob", "Grep"]
+tools = ["Read", "Glob", "Grep", "Bash", "PowerShell"]
 
 [agents.implementer]
 model = "claude-opus-5-5"
 max_turns = 250
-tools = [
-  "Read", "Edit", "Write", "Glob", "Grep", "mcp__serena",
-  "Bash(cargo:*)", "Bash(rustfmt:*)", "Bash(uv:*)", "Bash(py:*)", "Bash(python:*)",
-  "Bash(git add:*)", "Bash(git commit:*)", "Bash(git status:*)", "Bash(git diff:*)",
-  "Bash(git log:*)", "Bash(git show:*)", "Bash(git rm:*)", "Bash(git mv:*)",
-  "Bash(git merge:*)", "Bash(git restore:*)", "Bash(ls:*)",
-  "Bash(pwsh -NoProfile -File scripts/check.ps1:*)",
-]
+tools = ["Read", "Edit", "Write", "Glob", "Grep", "mcp__serena", "Bash", "PowerShell"]
 
 [agents.reviewer]
 model = "claude-opus-5-5"
 max_turns = 150
 # Edit is for test probes (deliberate breaks) in its disposable checkout.
-tools = [
-  "Read", "Edit", "Glob", "Grep", "mcp__serena",
-  "Bash(cargo:*)", "Bash(uv:*)", "Bash(py:*)",
-  "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Bash(git status:*)",
-  "Bash(git checkout --:*)", "Bash(git restore:*)", "Bash(ls:*)",
-]
+tools = ["Read", "Edit", "Glob", "Grep", "mcp__serena", "Bash", "PowerShell"]
 
 # ---------------------------------------------------------------- targets
 # changes: a list of OpenSpec change names, or "*" for every non-archived change.
@@ -90,10 +80,6 @@ context = ["docs/design.md", "docs/decisions.md", "docs/roadmap.md", "docs/agent
 # Godot 4.7.2 in self-contained mode, with export templates, preinstalled off the repo.
 # PATH: agents' Git Bash otherwise can't find pwsh (a Store app alias in WindowsApps).
 env = { GODOT = "E:/Programs/Godot/4.7.2/Godot_v4.7.2-stable_win64_console.exe", PATH = "C:/Users/Max/AppData/Local/Microsoft/WindowsApps;{PATH}" }
-extra_tools = [
-  "Bash(E:/Programs/Godot/4.7.2/Godot_v4.7.2-stable_win64_console.exe:*)",
-  "Bash(pwsh -NoProfile -File scripts/*)",
-]
 
 [[targets.arpg.milestones]]
 tag = "step-1-watchable-combat"
