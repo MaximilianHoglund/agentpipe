@@ -16,9 +16,9 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from agentpipe import proc, review, syncplan
+from agentpipe import milestones, proc, review, syncplan
 from agentpipe.claude import Claude, ClaudeResult
-from agentpipe.config import Agent, Config, Target
+from agentpipe.config import Agent, Config, Milestone, Target
 from agentpipe.deps import PLAN_SCHEMA, Plan, PlanError, key_sort, validate_plan
 from agentpipe.git import Git
 from agentpipe.github import GitHub
@@ -27,6 +27,11 @@ from agentpipe.status import (TASK_MARKER, TICKET_CHANGE, TICKET_MARKER, Status,
 from agentpipe.tasks import Task, fingerprint, mark_done, parse_tasks
 
 IMPL_KINDS = {"implement", "revise"}
+RELEASE_KEY = "milestone"  # job key and slot of the milestone release job
+
+
+def fence(text: str) -> str:
+    return "\n\n```\n" + text + "\n```"
 
 
 @dataclass
@@ -79,7 +84,7 @@ class Pipeline:
         self.last_sync = 0.0
         self.jobs: dict[str, Job] = {}
         self.reviewed: dict[int, str] = {}  # PR number -> head sha already reviewed
-        self.pool = ThreadPoolExecutor(max_workers=cfg.max_implementers + cfg.max_reviewers + 1)
+        self.pool = ThreadPoolExecutor(max_workers=cfg.max_implementers + cfg.max_reviewers + 2)
         self.stopping = False
 
     def log(self, msg: str) -> None:
@@ -320,6 +325,8 @@ class Pipeline:
                 self.sync()
             except LimitHit as e:
                 return self.pause(str(e))
+            if self.t.milestones and RELEASE_KEY not in self.jobs:
+                self.check_milestones()
         issues = {k: i for k, i in self.issues_by_key(self.gh.list_issues()).items()
                   if i["state"].upper() == "OPEN" and k in self.tasks}
         prs = {}
@@ -682,6 +689,87 @@ class Pipeline:
             if self.git.git("push", "origin", f"HEAD:refs/heads/{self.t.base}", cwd=self.base_wt, check=False).ok:
                 return
         self.log(f"could not push the tick for {t.key}; the next sync will retry via Close")
+
+    # ------------------------------------------------------------------ milestones
+    def release_state(self, m: Milestone) -> dict:
+        with self.state.lock:
+            return self.state.data.setdefault("releases", {}).setdefault(m.tag, {"tried": []})
+
+    def check_milestones(self) -> None:
+        """Start a release when the next milestone's changes are all done on the base branch.
+
+        It is cut from the commit that ticked the milestone's last task, so later work that
+        landed afterwards stays out. If that fails, the base branch head is tried once it moves.
+        """
+        m = milestones.next_due(self.t.milestones, self.git.remote_tags(), self.base_wt)
+        if m is None:
+            return
+        cut = self.git.git("log", "-1", "--format=%H", self.base_ref(), "--",
+                           *milestones.task_paths(m)).out.strip()
+        head = self.git.git("rev-parse", self.base_ref()).out.strip()
+        rs = self.release_state(m)
+        sha = next((s for s in (cut, head) if s and s not in rs["tried"]), None)
+        if sha is None:
+            return
+        self.log(f"milestone {m.tag} complete; releasing {sha[:8]} to {self.t.release_branch}")
+        fut = self.pool.submit(self.job_release, m, sha)
+        self.jobs[RELEASE_KEY] = Job("release", RELEASE_KEY, RELEASE_KEY, fut)
+
+    def job_release(self, m: Milestone, sha: str) -> None:
+        rs = self.release_state(m)
+        rs["tried"].append(sha)
+        self.state.save()
+        wt = self.t.work_dir / RELEASE_KEY
+        rel = self.t.release_branch
+        try:
+            self.git.git("fetch", "origin", "--prune", "--tags", "--force")
+            self.git.worktree_detached(wt, f"origin/{rel}")
+            msg = f"Release {m.title} ({m.tag})"
+            if not self.git.git("merge", "--no-ff", "-m", msg, sha, cwd=wt, check=False).ok:
+                self.git.merge_abort(wt)
+                return self.release_failed(m, sha, f"`{self.t.base}` at {sha[:8]} does not merge cleanly "
+                                           f"into `{rel}`. Merge `{rel}` into `{self.t.base}` to resolve it.")
+            pdir = wt / self.t.project_dir
+            gate = self.run_gate(pdir, RELEASE_KEY, self.t.test, self.t.test_timeout)
+            if not gate.ok:
+                return self.release_failed(m, sha, f"`{self.t.test}` fails on the merge:" + fence(gate.tail(4000)))
+            assets: list[str] = []
+            if self.t.release_build:
+                b = self.run_gate(pdir, RELEASE_KEY, self.t.release_build, self.t.test_timeout)
+                if not b.ok:
+                    return self.release_failed(m, sha, f"`{self.t.release_build}` fails:" + fence(b.tail(4000)))
+            for g in self.t.release_assets:
+                assets += sorted(str(p) for p in pdir.glob(g) if p.is_file())
+            if self.t.release_assets and not assets:
+                return self.release_failed(m, sha, f"No file matched `release_assets` {self.t.release_assets}.")
+            i = self.t.milestones.index(m)
+            prev = self.t.milestones[i - 1].tag if i else None
+            log = self.git.git("log", "--oneline", "--no-merges", "--invert-grep", "--grep=^Tick ",
+                               "-200", f"{prev}..{sha}" if prev else sha, cwd=wt).out
+            self.git.git("push", "origin", f"HEAD:refs/heads/{rel}", cwd=wt)
+            self.git.git("tag", "-a", "-f", m.tag, "-m", msg, cwd=wt)
+            self.git.git("push", "origin", f"refs/tags/{m.tag}", cwd=wt)
+            self.gh.create_release(m.tag, m.title, milestones.notes(m, self.t.base, prev, log), assets)
+            rs["released"] = sha
+            self.state.save()
+            self.log(f"released {m.tag} on {rel} ({len(assets)} asset(s))")
+        except Exception as e:  # noqa: BLE001 - every failure must reach a human
+            self.release_failed(m, sha, "The release job crashed:" +
+                                fence("".join(traceback.format_exception(e))[-3000:]))
+        finally:
+            self.git.worktree_remove(wt)
+
+    def release_failed(self, m: Milestone, sha: str, why: str) -> None:
+        rs = self.release_state(m)
+        text = (f"Releasing **{m.title}** (`{m.tag}`) from {sha[:8]} failed. {why}\n\n"
+                f"The pipeline retries from the head of `{self.t.base}` once it moves.")
+        if rs.get("issue"):
+            self.gh.comment(rs["issue"], review.bot(text))
+        else:
+            rs["issue"] = self.gh.create_issue(f"Milestone {m.tag} release blocked", text,
+                                               Status.NEEDS_DECISION)
+        self.state.save()
+        self.log(f"release {m.tag} failed: {why.splitlines()[0][:120]}")
 
     def gh_issue_labels(self, number: int) -> list[str]:
         for i in self.gh.list_issues():

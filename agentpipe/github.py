@@ -106,6 +106,12 @@ class GitHub:
         # the commit the pipeline tested.
         self._gh("pr", "merge", str(number), "-R", self.repo, "--squash", "--match-head-commit", head_sha)
 
+    # -- releases ---------------------------------------------------------
+    def create_release(self, tag: str, title: str, notes: str, assets: list[str]) -> None:
+        """Publish a release for an already pushed tag, attaching ``assets`` (file paths)."""
+        self._gh("release", "create", tag, *assets, "-R", self.repo, "--verify-tag",
+                 "--title", title, "--notes-file", "-", input=notes)
+
 
 class DryRunGitHub(GitHub):
     """Reads hit GitHub; writes are printed instead of performed."""
@@ -155,3 +161,6 @@ class DryRunGitHub(GitHub):
 
     def merge_pr(self, number, head_sha):
         self._log(f"[dry-run] merge PR #{number} at {head_sha[:8]}")
+
+    def create_release(self, tag, title, notes, assets):
+        self._log(f"[dry-run] release {tag}: {title} ({len(assets)} asset(s))")

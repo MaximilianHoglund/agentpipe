@@ -36,6 +36,26 @@ uv run agentpipe status dota
 `run` also syncs every `sync_seconds`, so `sync` on its own is only for looking first.
 Ctrl-C stops scheduling and waits for running agents; everything resumes on restart.
 
+Optional per target: `extra_tools` (added to the implementer's and reviewer's allowed tools)
+and `env` (extra environment variables; `{NAME}` in a value expands to the inherited value).
+
+## Milestone releases
+
+A target can work on a development branch (`base = "dev"`) and release to another
+(`release_branch = "main"`). Each `[[targets.<name>.milestones]]` names a tag, a title and the
+OpenSpec changes it needs. After every sync, if the next unreleased milestone has all its
+changes ticked off (or archived) on `base`, the dispatcher:
+
+1. finds the commit that ticked its last task, so later work stays out of the release;
+2. merges it into `release_branch` with `--no-ff` and runs the test gate on the merge;
+3. optionally runs `release_build` and collects `release_assets` (globs, project-relative);
+4. pushes the release branch and an annotated tag, then creates a GitHub release.
+
+Milestones are released strictly in order, and a pushed tag marks one as done. If the merge,
+gate or build fails, it files one `needs decision` issue (later failures comment on it) and
+retries from the head of `base` once that moves. Humans commit fixes to `base`, not to the
+release branch.
+
 ## Statuses (issue labels)
 
 | Label | Meaning | Who moves it on |

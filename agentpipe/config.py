@@ -16,6 +16,13 @@ class Agent:
 
 
 @dataclass
+class Milestone:
+    tag: str  # git tag and GitHub release name, e.g. "step-1-watchable-combat"
+    title: str
+    changes: list[str]  # OpenSpec changes that must all be ticked off
+
+
+@dataclass
 class Target:
     name: str
     repo_root: Path
@@ -33,6 +40,12 @@ class Target:
     extra_tools: list[str] = field(default_factory=list)
     # Extra environment variables for this target's agents, gate and mutation runs.
     env: dict[str, str] = field(default_factory=dict)
+    # Milestone releases: when every change of the next milestone is done on `base`,
+    # merge it into `release_branch`, tag it and publish a GitHub release.
+    release_branch: str = ""
+    milestones: list[Milestone] = field(default_factory=list)
+    release_build: str = ""  # optional command run in the merged checkout before tagging
+    release_assets: list[str] = field(default_factory=list)  # globs (project-relative) to attach
 
     @property
     def changes_dir(self) -> Path:
@@ -96,7 +109,17 @@ def load(path: Path) -> Config:
             mutation_timeout=t.get("mutation_timeout", 3600),
             extra_tools=list(t.get("extra_tools", [])),
             env={k: str(v) for k, v in t.get("env", {}).items()},
+            release_branch=t.get("release_branch", ""),
+            milestones=[Milestone(m["tag"], m.get("title", m["tag"]), list(m["changes"]))
+                        for m in t.get("milestones", [])],
+            release_build=t.get("release_build", ""),
+            release_assets=list(t.get("release_assets", [])),
         )
+        tg = targets[name]
+        if tg.milestones and not tg.release_branch:
+            raise ValueError(f"target {name}: milestones need release_branch")
+        if tg.release_branch and tg.release_branch == tg.base:
+            raise ValueError(f"target {name}: release_branch must differ from base ({tg.base})")
     return Config(
         targets=targets,
         claude_bin=os.path.expanduser(data.get("claude_bin", "claude")),

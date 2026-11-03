@@ -72,6 +72,13 @@ test_timeout = 5400
 [targets.arpg]
 repo_root = "E:/Source/arpg-manager"
 github_repo = "MaximilianHoglund/arpg-manager"
+# Agents work on dev; each finished roadmap step is merged into main, tagged and released
+# for a human to play and test.
+base = "dev"
+release_branch = "main"
+# Once project-foundation 4.1 lands an export script, build the .exe into each release, e.g.:
+# release_build = "pwsh -NoProfile -File scripts/export.ps1"
+# release_assets = ["build/windows/*.exe", "build/windows/*.pck"]
 changes = "*"
 project_dir = "."
 # There is no Cargo workspace until project-foundation lands; the first PRs create it.
@@ -87,3 +94,28 @@ extra_tools = [
   "Bash(E:/Programs/Godot/4.7.2/Godot_v4.7.2-stable_win64_console.exe:*)",
   "Bash(pwsh -NoProfile -File scripts/*)",
 ]
+
+[[targets.arpg.milestones]]
+tag = "step-1-watchable-combat"
+title = "Step 1: Watchable combat"
+changes = ["project-foundation", "combat-simulation", "strategy-rules", "run-viewer-and-reports"]
+
+[[targets.arpg.milestones]]
+tag = "step-2-gear"
+title = "Step 2: Gear"
+changes = ["items-and-equipment", "loot-filter", "save-system"]
+
+[[targets.arpg.milestones]]
+tag = "step-3-skills"
+title = "Step 3: Skills"
+changes = ["skill-gems", "monster-variety"]
+
+[[targets.arpg.milestones]]
+tag = "step-4-full-loop"
+title = "Step 4: The full loop"
+changes = ["map-progression", "map-juicing", "crafting", "character-progression"]
+
+[[targets.arpg.milestones]]
+tag = "step-5-long-term-balance"
+title = "Step 5: Long-term balance"
+changes = ["balance-and-content"]

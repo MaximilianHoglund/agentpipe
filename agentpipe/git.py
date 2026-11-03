@@ -41,6 +41,11 @@ class Git:
         return self.git("rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}",
                         check=False).ok
 
+    def remote_tags(self) -> set[str]:
+        out = self.git("ls-remote", "--tags", "origin").out
+        return {line.split("refs/tags/", 1)[1].removesuffix("^{}")
+                for line in out.splitlines() if "refs/tags/" in line}
+
     def head(self, wt: Path) -> str:
         return self.git("rev-parse", "HEAD", cwd=wt).out.strip()
 
