@@ -62,7 +62,19 @@ class State:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
-            os.replace(tmp, self.path)
+            replace_retrying(tmp, self.path)
+
+
+def replace_retrying(src: Path, dst: Path, attempts: int = 50, delay: float = 0.1) -> None:
+    """os.replace, retried: on Windows it fails with access denied while any other
+    process (agentpipe watch, an editor, antivirus) has ``dst`` open, even just to read."""
+    for i in range(attempts):
+        try:
+            return os.replace(src, dst)
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(delay)
 
 
 class Pipeline:

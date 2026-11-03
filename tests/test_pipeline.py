@@ -1,5 +1,6 @@
 """Scheduler and ticket handling against an in-memory GitHub; jobs are recorded, not run."""
 
+import os
 import time
 from pathlib import Path
 
@@ -191,3 +192,22 @@ def test_first_sync_starts_agents_before_creating_blocked_issues(pl):
     # Both ready tasks start while only their two issues exist; the blocked ones come after.
     assert seen == [("c/1.3", 2), ("c/1.4", 2)]
     assert len(gh.issues) == 4
+
+
+def test_state_save_retries_while_the_file_is_held_open(tmp_path, monkeypatch):
+    from agentpipe import pipeline as pmod
+    real, calls = os.replace, []
+
+    def flaky(src, dst):
+        calls.append(1)
+        if len(calls) < 3:
+            raise PermissionError(5, "Access is denied")
+        real(src, dst)
+
+    monkeypatch.setattr(pmod.os, "replace", flaky)
+    st = pmod.State(tmp_path / "state.json")
+    st.data["paused_until"] = 1.0
+    monkeypatch.setattr(pmod.time, "sleep", lambda s: None)
+    st.save()
+    assert len(calls) == 3
+    assert '"paused_until": 1.0' in (tmp_path / "state.json").read_text(encoding="utf-8")
