@@ -71,3 +71,16 @@ def test_human_clearing_a_flag_is_respected_on_later_syncs():
     # Without the clear, the planner's verdict would put it back.
     assert syncplan.compute(tasks, plan, issues, set(), set()) == [
         syncplan.SetStatus("c/1.2", 1, S.PENDING_IMPLEMENTATION, S.NEEDS_DECISION, "needs an API key")]
+
+
+def test_ready_actions_come_before_blocked_and_human_ones():
+    tasks = parse_tasks("c", "- [ ] 1.1 a\n- [ ] 1.2 b\n- [ ] 1.3 c\n- [ ] 1.4 d\n")
+    plan = Plan("fp", {"c/1.1": TaskDeps(["c/1.4"]), "c/1.2": TaskDeps([], False, "ask"),
+                       "c/1.3": TaskDeps(), "c/1.4": TaskDeps()})
+    issues = {"c/1.4": issue(9, S.BLOCKED_BY_TASK)}
+    assert syncplan.compute(tasks, plan, issues, set(), set()) == [
+        syncplan.Create("c/1.3", S.PENDING_IMPLEMENTATION),
+        syncplan.SetStatus("c/1.4", 9, S.BLOCKED_BY_TASK, S.PENDING_IMPLEMENTATION),
+        syncplan.Create("c/1.1", S.BLOCKED_BY_TASK),
+        syncplan.Create("c/1.2", S.NEEDS_DECISION, "ask"),
+    ]

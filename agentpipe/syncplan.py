@@ -76,7 +76,13 @@ def compute(tasks: list[Task], plan: Plan, issues: dict[str, dict],
             actions.append(Create(t.key, new, reason))
         elif issue["state"].upper() == "OPEN" and (cur is None or cur in GRAPH_OWNED) and new != cur:
             actions.append(SetStatus(t.key, issue["number"], cur, new, reason))
-    return actions
+    # Ready work first, so agents can start while the rest is still being applied.
+    return sorted(actions, key=lambda a: not makes_ready(a))
+
+
+def makes_ready(action) -> bool:
+    """True for an action that leaves a task in pending implementation."""
+    return getattr(action, "status", getattr(action, "new", None)) is Status.PENDING_IMPLEMENTATION
 
 
 def _status_for(t: Task, plan: Plan, done: set[str], cleared: set[str]) -> Status:

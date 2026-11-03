@@ -168,7 +168,9 @@ class Pipeline:
                 self.log(f"plan rejected: {errors}")
         raise PlanError(f"planner failed twice: {errors}")
 
-    def sync(self, gh: GitHub | None = None) -> list:
+    def sync(self, gh: GitHub | None = None, on_ready=None) -> list:
+        """Reconcile GitHub with tasks.md. ``on_ready`` runs once every ready task has
+        its issue, before the slower rest (blocked issues, links), so agents start early."""
         gh = gh or self.gh
         self.refresh_base()
         tasks = self.load_tasks()
@@ -183,7 +185,12 @@ class Pipeline:
         issues = self.issues_by_key(gh.list_issues())
         st = self.state
         actions = syncplan.compute(tasks, plan, issues, set(st.data["flagged"]), set(st.data["cleared"]))
+        pending_ready = on_ready is not None
         for a in actions:
+            if pending_ready and not syncplan.makes_ready(a):
+                st.save()
+                on_ready()
+                pending_ready = False
             self.apply(gh, a, issues)
         st.save()
         self.load_tickets(issues)
@@ -322,11 +329,15 @@ class Pipeline:
             return
         if time.time() - self.last_sync >= self.cfg.sync_seconds or not self.tasks:
             try:
-                self.sync()
+                self.sync(on_ready=self.schedule)
             except LimitHit as e:
                 return self.pause(str(e))
             if self.t.milestones and RELEASE_KEY not in self.jobs:
                 self.check_milestones()
+        self.schedule()
+
+    def schedule(self) -> None:
+        """Fill free implementer, reviewer and merge slots from GitHub's current state."""
         issues = {k: i for k, i in self.issues_by_key(self.gh.list_issues()).items()
                   if i["state"].upper() == "OPEN" and k in self.tasks}
         prs = {}

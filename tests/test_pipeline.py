@@ -171,3 +171,23 @@ def test_paused_pipeline_starts_nothing(pl):
     p.state.data["paused_until"] = time.time() + 60
     p.tick()
     assert p.started == []
+
+
+def test_first_sync_starts_agents_before_creating_blocked_issues(pl):
+    p, gh = pl
+    tasks = list(p.tasks.values())
+    deps = {"c/1.1": TaskDeps(["c/1.4"]), "c/1.2": TaskDeps(["c/1.4"]),
+            "c/1.3": TaskDeps(), "c/1.4": TaskDeps()}
+    p.tasks = {}
+    p.last_sync = 0
+    p.refresh_base = lambda: None
+    p.load_tasks = lambda: tasks
+    p.make_plan = lambda tasks, fp: Plan(fp, deps)
+    p.sync_links = lambda gh, issues: None
+    seen = []
+    p.start = lambda kind, key, slot, issue, pr: (seen.append((key, len(gh.issues))),
+                                                  p.jobs.__setitem__(key, _Job(kind, slot)))
+    p.tick()
+    # Both ready tasks start while only their two issues exist; the blocked ones come after.
+    assert seen == [("c/1.3", 2), ("c/1.4", 2)]
+    assert len(gh.issues) == 4
