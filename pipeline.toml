@@ -130,8 +130,8 @@ test = "cargo test --workspace"
 # gate on the base branch. Keep them valid in all three shells.
 preflight = ["cargo --version"]
 preflight_gate = true
-mutation = "cargo mutants --in-place --in-diff {diff} --baseline skip --timeout 300 --no-shuffle"
-mutation_timeout = 3600
+mutation = "cargo mutants --in-place --in-diff {diff} --baseline skip --timeout 60 --no-shuffle"
+mutation_timeout = 1800
 
 [targets.riftbound]
 repo_root = "E:/Source/Claude"
@@ -161,8 +161,8 @@ project_dir = "."
 # Godot checks); else cargo test once 1.1 creates the workspace; else pass, so tasks
 # merged before the workspace exists (e.g. 1.2's setup scripts) aren't failed for it.
 test = '''pwsh -NoProfile -Command "if (Test-Path scripts/check.ps1) { & ./scripts/check.ps1; exit $LASTEXITCODE } elseif (Test-Path Cargo.toml) { cargo test --workspace; exit $LASTEXITCODE } else { Write-Output 'No Cargo.toml or scripts/check.ps1 yet: nothing to gate.'; exit 0 }"'''
-mutation = '''pwsh -NoProfile -Command "if (Test-Path Cargo.toml) { cargo mutants --in-place --in-diff '{diff}' --baseline skip --timeout 300 --no-shuffle } else { Write-Output 'No Cargo.toml yet: no mutation run.' }"'''
-mutation_timeout = 3600
+mutation = '''pwsh -NoProfile -Command "if (Test-Path Cargo.toml) { cargo mutants --in-place --in-diff '{diff}' --baseline skip --timeout 60 --no-shuffle } else { Write-Output 'No Cargo.toml yet: no mutation run.' }"'''
+mutation_timeout = 1800
 context = ["docs/design.md", "docs/decisions.md", "docs/roadmap.md", "docs/agent-environment.md"]
 # Godot 4.7.2 in self-contained mode, with export templates, preinstalled off the repo.
 # PATH: agents' Git Bash otherwise can't find pwsh (a Store app alias in WindowsApps).
