@@ -98,6 +98,7 @@ class Transcript:
     events: list[Event] = field(default_factory=list)
     tool_calls: int = 0
     errors: int = 0
+    denied: int = 0
 
 
 def _short(value, width: int) -> str:
@@ -123,6 +124,13 @@ def _local(ts: str) -> str:
         return "--:--:--"
 
 
+_DENIED_RE = re.compile(r"^Permission to use \w+ (?:with command .* )?has been denied")
+
+
+def _last_tool(tr: Transcript) -> str:
+    return next((e.text for e in reversed(tr.events) if e.kind == "tool"), "a tool call")
+
+
 def parse_transcript(lines: list[str]) -> Transcript:
     tr = Transcript()
     for raw in lines:
@@ -145,16 +153,20 @@ def parse_transcript(lines: list[str]) -> Transcript:
             elif t == "text" and c.get("text", "").strip() and d["type"] == "assistant":
                 tr.events.append(Event(when, "text", c["text"]))
             elif t == "tool_result" and c.get("is_error"):
-                tr.errors += 1
                 body = c.get("content")
                 if isinstance(body, list):
                     body = " ".join(x.get("text", "") for x in body if isinstance(x, dict))
-                tr.events.append(Event(when, "error", str(body)))
+                if _DENIED_RE.search(str(body)):
+                    tr.denied += 1
+                    tr.events.append(Event(when, "denied", "DENIED " + _last_tool(tr)))
+                else:
+                    tr.errors += 1
+                    tr.events.append(Event(when, "error", str(body)))
     return tr
 
 
 # ---------------------------------------------------------------- rendering
-_COLORS = {"tool": "36", "text": "0", "error": "31", "done": "32", "dim": "2", "head": "1"}
+_COLORS = {"tool": "36", "text": "0", "error": "31", "denied": "33", "done": "32", "dim": "2", "head": "1"}
 
 
 def _c(kind: str, s: str, color: bool) -> str:
@@ -212,7 +224,8 @@ def render(target: str, work_dir: Path, project_dir: str, *, events: int = 8,
             continue
         tr = parse_transcript(path.read_text(encoding="utf-8", errors="replace").splitlines())
         idle = now - path.stat().st_mtime
-        out.append(_c("head", f"\n{head}, {tr.tool_calls} tool calls, {tr.errors} errors, "
+        denied = f", {tr.denied} DENIED" if tr.denied else ""
+        out.append(_c("head", f"\n{head}, {tr.tool_calls} tool calls, {tr.errors} errors{denied}, "
                               f"last activity {_ago(idle)} ago", color))
         out.append(_c("dim", f"  {path}", color))
         for ev in tr.events[-events:]:

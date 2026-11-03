@@ -86,7 +86,7 @@ class Pipeline:
         wd = target.work_dir
         self.base_wt = wd / "base"
         self.logs = wd / "logs"
-        self.claude = Claude(cfg.claude_bin, self.logs, cfg.agent_timeout)
+        self.claude = Claude(cfg.claude_bin, self.logs, cfg.agent_timeout, on_denials=self.log_denials)
         self.state = State(wd / "state.json")
         self.plan_path = wd / "plan.json"
         self._log = log
@@ -105,6 +105,13 @@ class Pipeline:
         self.logs.mkdir(parents=True, exist_ok=True)
         with open(self.logs / "pipeline.log", "a", encoding="utf-8") as f:
             f.write(time.strftime("%Y-%m-%d ") + line + "\n")
+
+    def log_denials(self, run: str, denials: list[dict]) -> None:
+        """One dispatcher line per run with denied tool calls; `agentpipe denials` has the detail."""
+        from agentpipe.denials import describe
+        shown = "; ".join(describe(d, 80) for d in denials[:3])
+        more = f" (+{len(denials) - 3} more)" if len(denials) > 3 else ""
+        self.log(f"{len(denials)} tool call(s) denied in {run}: {shown}{more}")
 
     # ------------------------------------------------------------------ paths
     def base_ref(self) -> str:
@@ -167,7 +174,7 @@ class Pipeline:
         for attempt in range(2):
             p = prompt if not errors else prompt + f"\n\nYour previous answer was rejected: {errors}\nFix every problem."
             res = self.claude.run(p, self.base_wt, self.cfg.agents["planner"], PLAN_SCHEMA,
-                                  log_name=f"plan-{fp}-{attempt}")
+                                  log_name=f"plan-{fp.split(':')[0]}-{attempt}")
             if res.limited:
                 raise LimitHit(res.text)
             if not res.ok:

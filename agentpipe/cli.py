@@ -26,7 +26,8 @@ def main(argv: list[str] | None = None) -> int:
                         ("sync", "create/update issues, statuses and blocked-by links"),
                         ("status", "show the queue by status"),
                         ("run", "run the dispatcher: implement, review, merge"),
-                        ("watch", "live view of the dispatcher and what each running agent is doing")):
+                        ("watch", "live view of the dispatcher and what each running agent is doing"),
+                        ("denials", "review tool calls agents were refused, grouped, with the reason")):
         p = sub.add_parser(name, help=help_)
         p.add_argument("target")
         if name == "plan":
@@ -42,6 +43,9 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--events", type=int, default=8, help="recent events shown per agent")
             p.add_argument("--interval", type=float, default=2.0, help="seconds between refreshes")
             p.add_argument("--once", action="store_true", help="print one snapshot and exit")
+        if name == "denials":
+            p.add_argument("--hours", type=float, help="only runs from the last N hours")
+            p.add_argument("--examples", type=int, default=2, help="example commands per group")
     args = ap.parse_args(argv)
     cfg = config_mod.load(args.config)
 
@@ -92,6 +96,15 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{s} ({len(items)})")
                 for line in items if s != Status.FINISHED.value else items[-5:]:
                     print(f"  {line}")
+        return 0
+
+    if args.cmd == "denials":
+        from agentpipe import denials
+        since = __import__("time").time() - args.hours * 3600 if args.hours else 0.0
+        # Every agent shares [permissions] deny; per-agent extras are unioned in.
+        deny = sorted({r for a in cfg.agents.values() for r in a.deny})
+        allowed = {t for a in cfg.agents.values() for t in a.tools if "(" not in t}
+        print(denials.report(denials.scan(target.work_dir / "logs", deny, since, allowed), examples=args.examples))
         return 0
 
     if args.cmd == "watch":

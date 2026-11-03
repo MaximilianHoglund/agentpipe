@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from agentpipe import proc
@@ -27,6 +27,7 @@ class ClaudeResult:
     limited: bool
     cost_usd: float = 0.0
     subtype: str = ""
+    denials: list[dict] = field(default_factory=list)  # [{tool_name, tool_input, ...}]
 
 
 def parse_output(stdout: str, stderr: str, code: int) -> ClaudeResult:
@@ -54,12 +55,14 @@ def parse_output(stdout: str, stderr: str, code: int) -> ClaudeResult:
         limited=limited,
         cost_usd=float(data.get("total_cost_usd") or 0.0),
         subtype=str(data.get("subtype", "")),
+        denials=list(data.get("permission_denials") or []),
     )
 
 
 class Claude:
-    def __init__(self, bin: str, log_dir: Path, timeout: int, run=proc.run):
+    def __init__(self, bin: str, log_dir: Path, timeout: int, run=proc.run, on_denials=None):
         self.bin = bin
+        self.on_denials = on_denials  # called with (log_name, denials) after a run that had any
         self.log_dir = log_dir
         self.timeout = timeout
         self._run = run
@@ -77,7 +80,16 @@ class Claude:
             cmd += ["--allowedTools", *agent.tools]
         # The prompt goes on stdin: --allowedTools is variadic and would swallow it.
         r = self._run(cmd, cwd, input=prompt, env=env, timeout=self.timeout, check=False)
+        # Windows treats ':' in a file name as an alternate data stream; keep names plain.
+        log_name = safe_name(log_name)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         (self.log_dir / f"{log_name}.prompt.md").write_text(prompt, encoding="utf-8")
         (self.log_dir / f"{log_name}.out.json").write_text(r.out + "\n" + r.err, encoding="utf-8")
-        return parse_output(r.out, r.err, r.code)
+        res = parse_output(r.out, r.err, r.code)
+        if res.denials and self.on_denials:
+            self.on_denials(log_name, res.denials)
+        return res
+
+
+def safe_name(name: str) -> str:
+    return re.sub(r"[^\w.-]", "_", name)
