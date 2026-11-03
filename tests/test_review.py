@@ -67,12 +67,15 @@ def test_human_comments_exclude_pipeline_comments():
 def test_prompts_render_without_missing_variables():
     common = dict(key="k", text="t", test_cmd="cargo test", context_list="x", spec_ref="s",
                   open_tickets="none", project_dir=".")
-    review.prompt("implementer", **common, section="s", issue=1, blockers="none", worktree="w", human_input="")
+    review.prompt("implementer", **common, section="s", issue=1, blockers="none", worktree="w", human_input="",
+                  batch_section="", prior_work="")
     review.prompt("revise", key="k", round=1, max_rounds=3, feedback="f", merge_note="", test_cmd="c")
     review.prompt("reviewer", **common, pr=1, head="h", base_ref="origin/main", diffstat="d",
-                  pr_summary="p", mutation_section="", prior_section="")
+                  pr_summary="p", mutation_section="", prior_section="", batch_section="")
     review.prompt("planner", repo_root="r", target="t", project_dir=".", context_list="c",
-                  changes_list="c", open_tasks="o", done_tasks="d")
+                  changes_list="c", open_tasks="o", done_tasks="d", existing_section="",
+                  answer_rule="r", max_batch=4)
+    review.prompt("preflight", shells="Bash", commands="- `x`")
 
 
 def test_status_labels_and_markers():

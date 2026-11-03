@@ -183,7 +183,7 @@ def test_first_sync_starts_agents_before_creating_blocked_issues(pl):
     p.last_sync = 0
     p.refresh_base = lambda: None
     p.load_tasks = lambda: tasks
-    p.make_plan = lambda tasks, fp: Plan(fp, deps)
+    p.make_plan = lambda tasks, fp, old=None: Plan(fp, deps)
     p.sync_links = lambda gh, issues: None
     seen = []
     p.start = lambda kind, key, slot, issue, pr: (seen.append((key, len(gh.issues))),

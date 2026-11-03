@@ -24,6 +24,26 @@ TICKETS_PROPERTY = {
     },
 }
 
+PREFLIGHT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "tool": {"type": "string"},
+                    "command": {"type": "string"},
+                    "exit_code": {"type": "integer"},
+                    "output": {"type": "string"},
+                },
+                "required": ["tool", "command", "exit_code"],
+            },
+        }
+    },
+    "required": ["results"],
+}
+
 IMPLEMENTER_SCHEMA = {
     "type": "object",
     "properties": {

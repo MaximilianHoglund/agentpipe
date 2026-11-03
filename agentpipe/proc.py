@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+TIMEOUT_CODE = 124
+
+
 @dataclass
 class Result:
     code: int
@@ -38,7 +41,7 @@ def run(cmd, cwd: Path | None = None, *, input: str | None = None, env=None,
         r = Result(p.returncode, p.stdout or "", p.stderr or "")
     except subprocess.TimeoutExpired as e:
         out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-        r = Result(124, out, f"timed out after {timeout}s")
+        r = Result(TIMEOUT_CODE, out, f"timed out after {timeout}s")
     if check and not r.ok:
         raise CommandError(cmd, r)
     return r

@@ -17,12 +17,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agentpipe import milestones, proc, review, syncplan
-from agentpipe.claude import Claude, ClaudeResult
+from agentpipe.claude import CAPPED, MAX_TURNS, Claude, ClaudeResult
 from agentpipe.config import Agent, Config, Milestone, Target
-from agentpipe.deps import PLAN_SCHEMA, Plan, PlanError, key_sort, validate_plan
+from agentpipe.deps import (PLAN_SCHEMA, Plan, PlanError, key_sort, merge_plans, stale_keys, text_hash,
+                            validate_plan)
 from agentpipe.git import Git
 from agentpipe.github import GitHub
-from agentpipe.status import (TASK_MARKER, TICKET_CHANGE, TICKET_MARKER, Status,
+from agentpipe.status import (GRAPH_OWNED, TASK_MARKER, TICKET_CHANGE, TICKET_MARKER, Status,
                               status_from_labels, task_key_from_body)
 from agentpipe.tasks import Task, fingerprint, mark_done, parse_tasks
 
@@ -40,6 +41,14 @@ class Job:
     key: str
     slot: str
     future: Future
+
+
+class CappedRun(RuntimeError):
+    """An agent run hit its turn cap or timeout."""
+
+    def __init__(self, result):
+        super().__init__(result.subtype)
+        self.result = result
 
 
 class State:
@@ -86,7 +95,15 @@ class Pipeline:
         wd = target.work_dir
         self.base_wt = wd / "base"
         self.logs = wd / "logs"
-        self.claude = Claude(cfg.claude_bin, self.logs, cfg.agent_timeout, on_denials=self.log_denials)
+        wd.mkdir(parents=True, exist_ok=True)
+        mcp = wd / "mcp.json"
+        mcp.write_text(json.dumps({"mcpServers": cfg.mcp_servers}, indent=2), encoding="utf-8")
+        self.claude = Claude(cfg.claude_bin, self.logs, cfg.agent_timeout, on_denials=self.log_denials,
+                             mcp_config=mcp)
+        # Agents start only once the environment checks pass (see preflight).
+        self.env_ok = not (target.preflight or target.preflight_gate)
+        self.last_preflight = 0.0
+        self.issue_map: dict[str, dict] = {}  # open issues by key, as of the last schedule()
         self.state = State(wd / "state.json")
         self.plan_path = wd / "plan.json"
         self._log = log
@@ -158,18 +175,19 @@ class Pipeline:
             tasks += parse_tasks(change, path.read_text(encoding="utf-8"))
         return tasks
 
-    def make_plan(self, tasks: list[Task], fp: str) -> Plan:
-        open_t = [t for t in tasks if not t.done]
-        done_t = [t for t in tasks if t.done]
-        changes = sorted({t.change for t in tasks})
-        prompt = review.prompt(
-            "planner",
-            repo_root=self.base_wt, target=self.t.name, project_dir=self.t.project_dir,
-            context_list="\n".join(f"- `{c}`" for c in self.t.context) or "(no extra context docs)",
-            changes_list="\n".join(f"- `{c}`" for c in changes),
-            open_tasks="\n".join(f"- {t.key} | {t.section} | {t.text}" for t in open_t) or "(none)",
-            done_tasks="\n".join(f"- {t.key} | {t.text}" for t in done_t) or "(none)",
-        )
+    def make_plan(self, tasks: list[Task], fp: str, old: Plan | None = None) -> Plan:
+        """Plan the target's tasks. With an ``old`` plan, only new or reworded tasks (and
+        batches they touch) go to the planner, unless so much changed that a full plan is
+        as cheap; everything else is kept as it was."""
+        stale, removed = stale_keys(tasks, old) if old else (set(), set())
+        open_keys = {t.key for t in tasks if not t.done}
+        incremental = old is not None and len(stale) <= max(10, len(open_keys) // 2)
+        if incremental and not stale:
+            # Only removals, or only done tasks changed: no planner needed.
+            return validate_plan(tasks, merge_plans(old, {"tasks": []}, stale, removed), fp, self.cfg.max_batch)
+        plan_t = [t for t in tasks if t.key in stale] if incremental else [t for t in tasks if not t.done]
+        self.log(f"planning {len(plan_t)} task(s)" + (f" incrementally ({len(open_keys)} open)" if incremental else ""))
+        prompt = self.planner_prompt(tasks, plan_t, old if incremental else None, removed)
         errors = ""
         for attempt in range(2):
             p = prompt if not errors else prompt + f"\n\nYour previous answer was rejected: {errors}\nFix every problem."
@@ -180,12 +198,45 @@ class Pipeline:
             if not res.ok:
                 errors = f"run failed: {res.text[:500]}"
                 continue
+            raw = merge_plans(old, res.structured, stale, removed) if incremental else res.structured
             try:
-                return validate_plan(tasks, res.structured, fp)
+                return validate_plan(tasks, raw, fp, self.cfg.max_batch)
             except PlanError as e:
                 errors = str(e)
                 self.log(f"plan rejected: {errors}")
         raise PlanError(f"planner failed twice: {errors}")
+
+    def planner_prompt(self, tasks: list[Task], plan_t: list[Task], old: Plan | None, removed: set[str]) -> str:
+        def line(t: Task) -> str:
+            return f"- {t.key} | {t.section} | {t.text}"
+
+        planned = {t.key for t in plan_t}
+        existing = ""
+        if old is not None:
+            rows = []
+            for t in sorted((t for t in tasks if not t.done and t.key not in planned), key=lambda t: key_sort(t.key)):
+                d = old.get(t.key)
+                extra = (f" [batch {d.batch}]" if d.batch else "") + ("" if d.autonomous else " [needs human]")
+                rows.append(f"{line(t)} <- {', '.join(d.blocked_by) or '-'}{extra}")
+            gone = f"\nRemoved since the last plan: {', '.join(sorted(removed, key=key_sort))}\n" if removed else ""
+            existing = (
+                "\n## Already planned (kept as is)\n\nThese open tasks keep their entries; each line ends "
+                "`<- blockers [batch]`. They are valid blockers for the tasks above. Return an entry for "
+                "one of them only if a task above must change it (e.g. it must now wait for a new task); "
+                "a returned entry replaces the old one whole. You may add a task above to an existing "
+                "batch by giving it that batch id.\n\n" + ("\n".join(rows) or "(none)") + "\n" + gone)
+        rule = ('Every task under "Open tasks to plan" must appear exactly once.' if old is None else
+                'Every task under "Open tasks to plan" must appear exactly once; add entries for '
+                "already-planned tasks only to change them.")
+        return review.prompt(
+            "planner",
+            repo_root=self.base_wt, target=self.t.name, project_dir=self.t.project_dir,
+            context_list="\n".join(f"- `{c}`" for c in self.t.context) or "(no extra context docs)",
+            changes_list="\n".join(f"- `{c}`" for c in sorted({t.change for t in tasks})),
+            open_tasks="\n".join(line(t) for t in plan_t) or "(none)",
+            done_tasks="\n".join(f"- {t.key} | {t.text}" for t in tasks if t.done) or "(none)",
+            existing_section=existing, answer_rule=rule, max_batch=self.cfg.max_batch,
+        )
 
     def sync(self, gh: GitHub | None = None, on_ready=None) -> list:
         """Reconcile GitHub with tasks.md. ``on_ready`` runs once every ready task has
@@ -195,9 +246,12 @@ class Pipeline:
         tasks = self.load_tasks()
         fp = fingerprint(tasks) + ":" + ",".join(sorted({t.change for t in tasks}))
         plan = Plan.load(self.plan_path)
+        if plan is not None and not plan.texts:
+            # A plan from before per-task hashes: treat its tasks as unchanged.
+            plan.texts = {t.key: text_hash(t) for t in tasks if t.key in plan.tasks}
+            plan.save(self.plan_path)
         if plan is None or plan.fingerprint != fp:
-            self.log(f"planning {sum(not t.done for t in tasks)} open tasks")
-            plan = self.make_plan(tasks, fp)
+            plan = self.make_plan(tasks, fp, plan)
             plan.save(self.plan_path)
         self.tasks = {t.key: t for t in tasks}
         self.plan = plan
@@ -350,6 +404,10 @@ class Pipeline:
             return
         if time.time() < self.state.data["paused_until"]:
             return
+        try:
+            self.check_environment()
+        except LimitHit as e:
+            return self.pause(str(e))
         if time.time() - self.last_sync >= self.cfg.sync_seconds or not self.tasks:
             try:
                 self.sync(on_ready=self.schedule)
@@ -359,10 +417,71 @@ class Pipeline:
                 self.check_milestones()
         self.schedule()
 
+    def check_environment(self) -> None:
+        """Run preflight at start, then once per sync interval while it fails."""
+        if self.env_ok or time.time() - self.last_preflight < self.cfg.sync_seconds:
+            return
+        self.last_preflight = time.time()
+        self.refresh_base()
+        problems = self.preflight()
+        if problems:
+            self.log(f"preflight FAILED, starting no agents until it passes (rechecked every "
+                     f"{self.cfg.sync_seconds}s):\n" + "\n".join(f"  - {p}" for p in problems))
+        else:
+            self.env_ok = True
+            self.log("preflight passed")
+
+    def preflight(self) -> list[str]:
+        """Problems that would make every agent run fail; empty when the environment is fine.
+
+        Each check costs nothing next to an agent run that discovers the same problem the
+        hard way: commands from the dispatcher's shell, the same commands through an
+        agent's own Bash/PowerShell tools (catches PATH and permission gaps), and
+        optionally the gate on the base branch."""
+        problems = []
+        cwd = self.base_wt / self.t.project_dir
+        env = self.env("preflight")
+        for c in self.t.preflight:
+            r = proc.run(c, cwd, env=env, timeout=600, check=False, shell=True)
+            if not r.ok:
+                problems.append(f"`{c}` exits {r.code} in the dispatcher's shell: {r.tail(300)}")
+        if self.t.preflight:
+            agent = self.agent_def("preflight")
+            shells = [s for s in ("Bash", "PowerShell") if s in agent.tools]
+            prompt = review.prompt("preflight", shells=" and ".join(shells),
+                                   commands="\n".join(f"- `{c}`" for c in self.t.preflight))
+            res = self.claude.run(prompt, cwd, agent, review.PREFLIGHT_SCHEMA,
+                                  log_name=f"preflight-{time.strftime('%Y%m%d-%H%M%S')}", env=env)
+            if res.limited:
+                raise LimitHit(res.text)
+            if res.denials:
+                from agentpipe.denials import describe
+                problems.append("agent tool calls denied: " + "; ".join(describe(d, 120) for d in res.denials))
+            if not res.ok:
+                problems.append(f"the preflight agent failed ({res.subtype}): {res.text[:300]}")
+            else:
+                seen = set()
+                for r in res.structured.get("results", []):
+                    seen.add((r.get("tool"), r.get("command")))
+                    if r.get("exit_code") != 0:
+                        problems.append(f"`{r.get('command')}` exits {r.get('exit_code')} in the agent's "
+                                        f"{r.get('tool')} tool: {str(r.get('output', ''))[:200]}")
+                missing = [f"{s}: {c}" for s in shells for c in self.t.preflight if (s, c) not in seen]
+                if missing:
+                    problems.append("the preflight agent did not report " + "; ".join(missing))
+        if self.t.preflight_gate:
+            g = self.run_gate(cwd, "preflight", self.t.test, self.t.test_timeout)
+            if not g.ok:
+                problems.append(f"the gate `{self.t.test}` fails on {self.base_ref()}: {g.tail(500)}")
+        return problems
+
     def schedule(self) -> None:
         """Fill free implementer, reviewer and merge slots from GitHub's current state."""
+        if not self.env_ok:
+            return
         issues = {k: i for k, i in self.issues_by_key(self.gh.list_issues()).items()
                   if i["state"].upper() == "OPEN" and k in self.tasks}
+        self.issue_map = issues
         prs = {}
         for pr in self.gh.list_prs():
             if key := task_key_from_body(pr["body"]):
@@ -511,13 +630,89 @@ class Pipeline:
         body = "\n\n".join(f"**{c['user']}** ({c['created_at']}):\n{c['body']}" for c in notes)
         return "## Input from humans (authoritative; it overrides the spec where they conflict)\n\n" + body
 
+    # ------------------------------------------------------------------ batches
+    def batch(self, t: Task) -> list[Task]:
+        """The tasks ``t``'s job covers, leader first: fixed when its first run starts, so a
+        re-plan midway can't change what the open PR is for."""
+        keys = self.state.task(t.key).get("batch") or [t.key]
+        return [self.tasks[k] for k in keys if k in self.tasks] or [t]
+
+    def record_batch(self, t: Task) -> None:
+        st = self.state.task(t.key)
+        if "batch" in st or not self.plan:
+            return
+        done = {k for k, x in self.tasks.items() if x.done}
+        members = [t.key]
+        for k in self.plan.batch_of(t.key, done)[1:]:
+            i = self.issue_map.get(k)
+            # Only followers nobody else is working on: one already claimed keeps its own job.
+            if i and status_from_labels(i["labels"]) in GRAPH_OWNED and k not in self.jobs:
+                members.append(k)
+        st["batch"] = members
+        st["batch_issues"] = {k: self.issue_map[k]["number"] for k in members[1:]}
+        self.state.save()
+        if len(members) > 1:
+            issue = self.issue_map.get(t.key, {}).get("number")
+            for k in members[1:]:
+                self.gh.comment(st["batch_issues"][k], review.bot(
+                    f"Batched: done together with **{t.key}** (#{issue}) in one PR; this issue closes when it merges."))
+            self.log(f"{t.key}: batch of {len(members)}: {', '.join(members)}")
+
+    def batch_section(self, t: Task) -> str:
+        tasks = self.batch(t)
+        if len(tasks) == 1:
+            return ""
+        nums = self.state.task(t.key).get("batch_issues", {})
+        rows = "\n".join(f"- **{x.key}** — {x.text} (section: {x.section}"
+                         + (f"; issue #{nums[x.key]})" if x.key in nums else ")") for x in tasks)
+        return ("**This is a batch.** These small tasks are done together, on one branch, in one PR, "
+                "and reviewed as one; the task above is the first of them. All of them must be "
+                "complete:\n\n" + rows + "\n")
+
+    # ------------------------------------------------------------------ sessions
+    def resumable(self, t: Task) -> str | None:
+        """The agent session to resume, or None. An old session would be re-cached in full
+        and carries stale context, so past resume_within_seconds a run starts fresh."""
+        st = self.state.task(t.key)
+        s = st.get("session")
+        if s and time.time() - st.get("session_at", 0) <= self.cfg.resume_within_seconds:
+            return s
+        return None
+
+    def prior_work(self, t: Task, pr: dict | None) -> str:
+        """For a fresh session on a task with history: what is already there."""
+        if self.resumable(t):
+            return ""
+        wt = self.wt(t)
+        exists = (wt / ".git").exists()
+        ahead = self.git.commits_ahead(wt, self.base_ref()) if exists else 0
+        dirty = exists and not self.git.is_clean(wt)
+        if not (pr or ahead or dirty):
+            return ""
+        parts = ["## Earlier work on this task\n\nAn earlier session worked on this branch; continue "
+                 "from it instead of starting over."]
+        if ahead:
+            parts.append(f"It has {ahead} commit(s) on top of `{self.base_ref()}` "
+                         f"(`git log {self.base_ref()}..HEAD`).")
+        if dirty:
+            parts.append("The worktree also holds uncommitted changes from an interrupted run "
+                         "(`git status`): keep what belongs to the task.")
+        if pr:
+            parts.append(f"Its PR is #{pr['number']}; its description:\n\n"
+                         + pr["body"].split("## Summary", 1)[-1].strip()[:3000])
+        return "\n\n".join(parts) + "\n"
+
     def impl_prompt(self, t: Task, issue: int, pr: dict | None) -> str:
-        blockers = self.plan.get(t.key).blocked_by if self.plan else []
+        tasks = self.batch(t)
+        inside = {x.key for x in tasks}
+        blockers = sorted({b for x in tasks for b in (self.plan.get(x.key).blocked_by if self.plan else [])
+                           if b not in inside}, key=key_sort)
         return review.prompt(
             "implementer", key=t.key, text=t.text, section=t.section, issue=issue,
             blockers=", ".join(blockers) or "none", worktree=self.wt(t), project_dir=self.t.project_dir,
             spec_ref=self.spec_ref(t), context_list=self.context_list(),
-            human_input=self.human_input(issue, pr), test_cmd=self.t.test, open_tickets=self.open_tickets())
+            human_input=self.human_input(issue, pr), test_cmd=self.t.test, open_tickets=self.open_tickets(),
+            batch_section=self.batch_section(t), prior_work=self.prior_work(t, pr))
 
     def ensure_worktree(self, t: Task) -> Path:
         wt = self.wt(t)
@@ -534,9 +729,10 @@ class Pipeline:
         st["runs"] = n
         res = self.claude.run(prompt, self.wt(t) / self.t.project_dir, self.agent_def("implementer"),
                               review.IMPLEMENTER_SCHEMA, log_name=f"{t.slug}-{tag}-{n}",
-                              resume=st.get("session"), env=self.env(slot))
+                              resume=self.resumable(t), env=self.env(slot))
         if res.session_id:
             st["session"] = res.session_id
+            st["session_at"] = time.time()
         self.state.save()
         if res.limited:
             raise LimitHit(res.text)
@@ -544,12 +740,12 @@ class Pipeline:
 
     def job_implement(self, t: Task, issue: int, pr: dict | None, slot: str) -> None:
         old = status_from_labels(self.gh_issue_labels(issue))
-        wt = self.ensure_worktree(t)
+        self.ensure_worktree(t)
+        self.record_batch(t)
         if old is not Status.IN_PROGRESS:
             self.gh.set_status(issue, Status.IN_PROGRESS, old)
-        st = self.state.task(t.key)
         full = self.impl_prompt(t, issue, pr)
-        if st.get("session"):
+        if self.resumable(t):
             prompt = ("You were interrupted, or a human answered your question. Continue the task "
                       "and finish with the structured output. Your full instructions, with any new "
                       "human input, follow.\n\n" + full)
@@ -573,17 +769,32 @@ class Pipeline:
             "revise", key=t.key, round=review.rounds_used(history), max_rounds=self.cfg.max_rounds,
             feedback=last["body"] if last else "(no review found)", merge_note=merge_note,
             test_cmd=self.t.test)
-        if not self.state.task(t.key).get("session"):
+        if not self.resumable(t):
             prompt = self.impl_prompt(t, issue, pr) + "\n\n---\n\n" + prompt
         else:
             prompt += "\n\n" + self.human_input(issue, pr)
         res = self.agent(t, prompt, slot, "revise")
         self.deliver(t, issue, pr, res, slot, Status.CHANGES_REQUESTED)
 
+    def capped(self, t: Task, issue: int, cur: Status, res: ClaudeResult, role: str) -> None:
+        """A run that hit its turn cap or timeout: stop instead of paying for it again."""
+        st = self.state.task(t.key)
+        st.pop("session", None)  # a requeue starts fresh, from what is committed
+        self.state.save()
+        a = self.agent_def(role)
+        what = (f"its {a.max_turns}-turn cap" if res.subtype == MAX_TURNS
+                else f"the {self.cfg.agent_timeout // 60}-minute timeout")
+        self.to_decision(issue, cur, (
+            f"The {role} hit {what} without finishing. Rather than spend another run like it: split the "
+            f"task in tasks.md if it is too big for one session, or requeue it to continue in a fresh "
+            f"session from what is committed."))
+
     def deliver(self, t: Task, issue: int, pr: dict | None, res: ClaudeResult, slot: str,
                 cur: Status) -> None:
         """After an implementer turn: check the result, sync with base, push, open the PR."""
         wt = self.wt(t)
+        if res.subtype in CAPPED:
+            return self.capped(t, issue, cur, res, "implementer")
         if not res.ok:
             raise RuntimeError(f"implementer run failed ({res.subtype}): {res.text[:1000]}")
         out = res.structured
@@ -612,11 +823,17 @@ class Pipeline:
                 self.to_decision(issue, cur, "Could not resolve merge conflicts with the base branch.")
                 return
         self.git.push(wt, t.branch)
-        body = (f"{TASK_MARKER.format(key=t.key)}\nCloses #{issue}\n\n**{t.key}** — {t.text}\n\n"
+        tasks = self.batch(t)
+        nums = self.state.task(t.key).get("batch_issues", {})
+        closes = "\n".join([f"Closes #{issue}"] + [f"Closes #{nums[x.key]}" for x in tasks[1:] if x.key in nums])
+        listing = "\n".join(f"**{x.key}** — {x.text}" for x in tasks)
+        body = (f"{TASK_MARKER.format(key=t.key)}\n{closes}\n\n{listing}\n\n"
                 f"## Summary\n\n{out['summary']}\n\n## Tests\n\n{out['tests']}\n")
         if pr is None:
-            n = self.gh.create_pr(t.branch, self.t.base, f"{t.key}: {t.text}"[:120], body)
-            self.log(f"PR #{n} opened for {t.key}")
+            title = (f"{t.key}: {t.text}" if len(tasks) == 1 else
+                     f"{t.change} {', '.join(x.id for x in tasks)}: {t.text}")
+            n = self.gh.create_pr(t.branch, self.t.base, title[:120], body)
+            self.log(f"PR #{n} opened for {t.key}" + (f" (batch of {len(tasks)})" if len(tasks) > 1 else ""))
         else:
             self.gh.comment(pr["number"], review.bot(f"**Revised.**\n\n{out['summary']}\n\n**Tests:** {out['tests']}"))
         self.gh.set_status(issue, Status.PENDING_APPROVAL, cur)
@@ -642,7 +859,10 @@ class Pipeline:
                 v = {"verdict": review.TESTS_FAILED, "summary": f"`{self.t.test}` failed on this commit.",
                      "findings": [], "probes": [], "details": gate.tail(6000)}
             else:
-                v = self.reviewer_verdict(t, pr, rv, pdir, slot, history)
+                try:
+                    v = self.reviewer_verdict(t, pr, rv, pdir, slot, history)
+                except CappedRun as e:
+                    return self.capped(t, issue, Status.PENDING_APPROVAL, e.result, "reviewer")
             self.gh.comment(pr["number"], review.render_review(v, sha, round_, self.cfg.max_rounds))
             self.reviewed[pr["number"]] = sha
             if v["verdict"] == review.APPROVE:
@@ -677,6 +897,7 @@ class Pipeline:
                          c["body"] for c in self.gh.comments(pr["number"])[-3:]))
         prompt = review.prompt(
             "reviewer", pr=pr["number"], key=t.key, text=t.text, spec_ref=self.spec_ref(t),
+            batch_section=self.batch_section(t),
             open_tickets=self.open_tickets(),
             head=pr["headRefOid"][:10], project_dir=self.t.project_dir, base_ref=self.base_ref(),
             diffstat=self.git.diff(rv, self.base_ref(), stat=True).strip()[-4000:],
@@ -689,6 +910,8 @@ class Pipeline:
                                   env=self.env(slot))
             if res.limited:
                 raise LimitHit(res.text)
+            if res.subtype in CAPPED:
+                raise CappedRun(res)
             if res.ok:
                 self.file_tickets(f"the review of PR #{pr['number']} ({t.key})", res.structured.get("tickets"))
                 return review.normalize_verdict(res.structured)
@@ -721,26 +944,35 @@ class Pipeline:
                 return
             self.git.push(wt, t.branch)
         self.gh.merge_pr(pr["number"], self.git.head(wt))
-        self.log(f"merged PR #{pr['number']} ({t.key})")
+        tasks = self.batch(t)
+        self.log(f"merged PR #{pr['number']} ({', '.join(x.key for x in tasks)})")
         self.gh.set_status(issue, Status.FINISHED, Status.APPROVED)
         self.gh.close_issue(issue)  # "Closes #n" normally does this; harmless if already closed
+        for k, n in self.state.task(t.key).get("batch_issues", {}).items():
+            self.gh.set_status(n, Status.FINISHED, Status.BLOCKED_BY_TASK)
+            self.gh.close_issue(n)
         if t.change != TICKET_CHANGE:
-            self.commit_to_base(t, f"Tick {t.key} in tasks.md")
+            self.commit_to_base(tasks, f"Tick {', '.join(x.key for x in tasks)} in tasks.md")
         self.git.worktree_remove(wt)
         self.git.delete_branch(t.branch)
         self.git.delete_remote_branch(t.branch)
         with self.state.lock:
-            self.state.data["tasks"].pop(t.key, None)
+            for x in tasks:
+                self.state.data["tasks"].pop(x.key, None)
         self.state.save()
         self.last_sync = 0.0  # dependents may be unblocked now
 
-    def commit_to_base(self, t: Task, message: str) -> None:
+    def commit_to_base(self, tasks: list[Task], message: str) -> None:
+        """Tick ``tasks`` (all of one change: a batch never mixes changes) in one commit."""
+        t = tasks[0]
         rel = self.t.changes_dir / t.change / "tasks.md"
         for _ in range(3):
             self.refresh_base()
             path = self.base_wt / rel
             text = path.read_text(encoding="utf-8")
-            new = mark_done(text, t.id)
+            new = text
+            for x in tasks:
+                new = mark_done(new, x.id)
             if new == text:
                 return
             path.write_text(new, encoding="utf-8")

@@ -18,6 +18,12 @@ LIMIT_RE = re.compile(
 )
 
 
+# Subtypes meaning the run hit a cap: it is too big or stuck, and retrying would spend as much again.
+MAX_TURNS = "error_max_turns"
+TIMEOUT = "timeout"
+CAPPED = {MAX_TURNS, TIMEOUT}
+
+
 @dataclass
 class ClaudeResult:
     ok: bool
@@ -42,6 +48,8 @@ def parse_output(stdout: str, stderr: str, code: int) -> ClaudeResult:
                 continue
     if data is None:
         msg = (stderr or stdout or f"exit {code}").strip()
+        if code == proc.TIMEOUT_CODE:
+            return ClaudeResult(False, None, msg, None, False, subtype=TIMEOUT)
         return ClaudeResult(False, None, msg, None, bool(LIMIT_RE.search(msg)))
     text = str(data.get("result", ""))
     is_error = bool(data.get("is_error")) or data.get("subtype") != "success"
@@ -60,8 +68,12 @@ def parse_output(stdout: str, stderr: str, code: int) -> ClaudeResult:
 
 
 class Claude:
-    def __init__(self, bin: str, log_dir: Path, timeout: int, run=proc.run, on_denials=None):
+    def __init__(self, bin: str, log_dir: Path, timeout: int, run=proc.run, on_denials=None,
+                 mcp_config: Path | None = None):
         self.bin = bin
+        # Agents get only these MCP servers, not the user's own (connectors, browser, ...):
+        # fewer tool definitions per turn, and no mail or drive access for unattended runs.
+        self.mcp_config = mcp_config
         self.on_denials = on_denials  # called with (log_name, denials) after a run that had any
         self.log_dir = log_dir
         self.timeout = timeout
@@ -74,6 +86,8 @@ class Claude:
                "--json-schema", json.dumps(schema)]
         if resume:
             cmd += ["--resume", resume]
+        if self.mcp_config:
+            cmd += ["--strict-mcp-config", "--mcp-config", str(self.mcp_config)]
         if agent.deny:
             cmd += ["--disallowedTools", *agent.deny]
         if agent.tools:

@@ -27,7 +27,7 @@ $open_tasks
 Done:
 
 $done_tasks
-
+$existing_section
 ## Decide, for every open task
 
 1. **blocked_by**: the *direct* prerequisites only — tasks whose output this task
@@ -44,6 +44,17 @@ $done_tasks
    or it depends on hardware or accounts the agent does not have. Then give
    **human_reason**: one sentence stating exactly what a human must provide or
    decide. Partially written tasks whose remaining step is such a run count too.
+3. **batch** (optional): give 2 to $max_batch tasks the same short id (e.g. `b-config`)
+   to have one agent do them in one PR. Every task costs a full agent session and a
+   full review, so batch tasks that are each small (roughly under 100 changed lines)
+   and belong together: same change, usually the same section, touching the same
+   files, where reviewing them apart would mean re-reading the same code. Typical:
+   a type and its tests, a CLI flag and its docs, a run of small fixtures. Do not
+   batch a task that is large, risky or a natural unit on its own, tasks that could
+   otherwise run in parallel on independent parts, or non-autonomous tasks. A batch
+   waits for every member's outside blockers, so don't batch a task whose blockers
+   would hold up the others for long. Most tasks stay unbatched.
 
-Every open task must appear exactly once. The dependency graph must have no cycles.
+$answer_rule
+The dependency graph must have no cycles, also when each batch is counted as one task.
 Return only the structured output.

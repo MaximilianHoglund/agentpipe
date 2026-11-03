@@ -10,6 +10,7 @@ work comes back to you. Nobody is watching, so do not ask questions in prose.
 
 Blockers already merged: $blockers
 
+$batch_section
 ## Context
 
 - Worktree root: `$worktree`. You are in the project dir `$project_dir` inside it.
@@ -18,12 +19,13 @@ Blockers already merged: $blockers
 - The repo's CLAUDE.md files apply and override general habits.
 - Do **not** edit `tasks.md`; the pipeline ticks it after merge.
 
+$prior_work
 $human_input
 
 ## The standard the reviewer enforces
 
 **Reuse before you write.** Before adding a type, helper, parser or abstraction, search
-the codebase (Grep, or Serena symbol search) for one that already does it or nearly
+the codebase (Grep) for one that already does it or nearly
 does. Extend or generalise the existing one rather than writing a parallel version.
 Copy-pasted logic, near-duplicate functions and re-implemented utilities are rejected.
 

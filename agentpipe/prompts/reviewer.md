@@ -8,6 +8,7 @@ blocking finding must name a concrete defect and the change that fixes it.
 PR #$pr for task **$key** — $text
 ($spec_ref)
 
+$batch_section
 You are in a disposable checkout of the PR head (`$head`), project dir `$project_dir`.
 The base is `$base_ref`. See the change with `git diff $base_ref...HEAD` and
 `git log $base_ref..HEAD`. Changed files:
@@ -31,8 +32,8 @@ $prior_section
 1. Read the task and its spec (above), and every spec scenario in scope.
    Also: $context_list. The repo's CLAUDE.md rules are requirements.
 2. Read the whole diff, then the surrounding code it touches.
-3. Check each criterion below. For reuse, actually search: Grep and Serena symbol
-   search for existing functions, types and helpers that the new code duplicates.
+3. Check each criterion below. For reuse, actually search: Grep
+   for existing functions, types and helpers that the new code duplicates.
 4. Probe the tests. For the most important behaviours, make a small deliberate break
    in the implementation (flip a comparison, drop a branch, return early, change a
    boundary), run the relevant tests, record whether they caught it (mark a break `equivalent` if it cannot change observable behaviour), then restore the

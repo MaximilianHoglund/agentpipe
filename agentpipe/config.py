@@ -48,6 +48,10 @@ class Target:
     milestones: list[Milestone] = field(default_factory=list)
     release_build: str = ""  # optional command run in the merged checkout before tagging
     release_assets: list[str] = field(default_factory=list)  # globs (project-relative) to attach
+    # Checked before any agent runs (dispatcher start, then each sync while failing):
+    # each command must exit 0 from the dispatcher's shell and from an agent's Bash tool.
+    preflight: list[str] = field(default_factory=list)
+    preflight_gate: bool = False  # also run `test` on the base branch
 
     @property
     def changes_dir(self) -> Path:
@@ -77,7 +81,22 @@ class Config:
     sync_seconds: int = 600
     limit_backoff_seconds: int = 1800
     agent_timeout: int = 4 * 3600
+    # Resume an agent's last session only if it ended this recently; an older one is
+    # re-cached in full and carries stale context, so start fresh with a summary instead.
+    resume_within_seconds: int = 3000
+    max_batch: int = 4  # most tasks the planner may put in one batch (one PR); 1 turns batching off
+    mcp_servers: dict = field(default_factory=dict)  # the only MCP servers agents get
     extra: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # The preflight agent only runs the targets' check commands, so a small model will
+        # do; it gets the implementer's tools and denials, since those are what it checks.
+        impl = self.agents.get("implementer")
+        pre = self.agents.get("preflight")
+        if impl and pre is None:
+            self.agents["preflight"] = Agent("claude-haiku-5-5", 20, list(impl.tools), list(impl.deny))
+        elif impl and pre and not pre.tools:
+            pre.tools = list(impl.tools)
 
 
 def load(path: Path) -> Config:
@@ -118,6 +137,8 @@ def load(path: Path) -> Config:
                         for m in t.get("milestones", [])],
             release_build=t.get("release_build", ""),
             release_assets=list(t.get("release_assets", [])),
+            preflight=list(t.get("preflight", [])),
+            preflight_gate=bool(t.get("preflight_gate", False)),
         )
         tg = targets[name]
         if tg.milestones and not tg.release_branch:
@@ -136,4 +157,7 @@ def load(path: Path) -> Config:
         sync_seconds=run.get("sync_seconds", 600),
         limit_backoff_seconds=run.get("limit_backoff_seconds", 1800),
         agent_timeout=run.get("agent_timeout", 4 * 3600),
+        resume_within_seconds=run.get("resume_within_seconds", 3000),
+        max_batch=run.get("max_batch", 4),
+        mcp_servers=dict(data.get("mcp_servers", {})),
     )

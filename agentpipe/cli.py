@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
         p = sub.add_parser(name, help=help_)
         p.add_argument("target")
         if name == "plan":
-            p.add_argument("--force", action="store_true", help="re-plan even if tasks are unchanged")
+            p.add_argument("--force", action="store_true", help="re-plan every open task from scratch")
         if name == "sync":
             p.add_argument("--dry-run", action="store_true", help="print GitHub writes instead of making them")
         if name == "run":
@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
         fp = fingerprint(tasks) + ":" + ",".join(sorted({t.change for t in tasks}))
         plan = Plan.load(pl.plan_path)
         if args.force or plan is None or plan.fingerprint != fp:
-            plan = pl.make_plan(tasks, fp)
+            plan = pl.make_plan(tasks, fp, None if args.force else plan)
             plan.save(pl.plan_path)
         print_plan(tasks, plan)
         print(f"\nsaved to {pl.plan_path}")
@@ -161,5 +161,6 @@ def print_plan(tasks, plan: Plan) -> None:
     for t in sorted((t for t in tasks if not t.done), key=lambda t: key_sort(t.key)):
         d = plan.get(t.key)
         flag = "" if d.autonomous else f"  [needs decision: {d.human_reason}]"
+        flag += f"  [batch {d.batch}]" if d.batch else ""
         blockers = ", ".join(d.blocked_by) or "-"
         print(f"{t.key:40} <- {blockers}{flag}")
