@@ -211,3 +211,38 @@ def test_state_save_retries_while_the_file_is_held_open(tmp_path, monkeypatch):
     st.save()
     assert len(calls) == 3
     assert '"paused_until": 1.0' in (tmp_path / "state.json").read_text(encoding="utf-8")
+
+
+def test_stop_file_drains_running_jobs_then_exits(pl):
+    p, gh = pl
+    p.cfg.poll_seconds = 0
+    lines, ticks = [], []
+    p._log = lines.append
+
+    class Done:
+        def __init__(self):
+            self.n = 0
+
+        def done(self):
+            self.n += 1
+            return self.n > 2  # still running for two more ticks after the stop request
+
+    def tick():
+        ticks.append(1)
+        if len(ticks) == 1:
+            p.jobs["c/1.1"] = type("J", (), {"kind": "implement", "slot": "impl-0", "future": Done()})()
+            p.stop_file.write_text("", encoding="utf-8")
+        elif p.jobs["c/1.1"].future.done():
+            p.jobs.clear()
+
+    p.tick = tick
+    p.run_forever()
+    assert any("stop requested" in l and "1 running job" in l for l in lines)
+    assert lines[-1].endswith("stopped")
+    assert not p.stop_file.exists() and not p.pid_file.exists()
+
+
+def test_is_alive_tells_live_from_dead_pids():
+    from agentpipe import service
+    assert service.is_alive(os.getpid())
+    assert not service.is_alive(2 ** 22 + 3)

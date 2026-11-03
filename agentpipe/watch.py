@@ -55,7 +55,7 @@ def parse_log(lines: list[str], recent: int = 6) -> LogState:
         stamp, msg = m.groups()
         last_time = time.mktime(time.strptime(stamp, "%Y-%m-%d %H:%M:%S"))
         tail.append(f"{stamp[11:]} {msg}")
-        if msg.startswith("running;"):
+        if msg.startswith("running;") or msg.startswith("running (pid"):
             jobs.clear()  # a (re)started dispatcher has no jobs yet
         elif s := _START_RE.match(msg):
             kind, key, issue, slot = s.groups()
@@ -182,6 +182,14 @@ def _ago(seconds: float) -> str:
     return f"{seconds // 3600}h{seconds % 3600 // 60:02d}m"
 
 
+def _dispatcher_state(work_dir: Path) -> str:
+    from agentpipe import service
+    pid = service.running_pid(work_dir)
+    if pid is None:
+        return "NOT RUNNING (start: agentpipe start <target>; crashes: logs/dispatcher.out)"
+    return f"stopping, pid {pid}" if (work_dir / "stop").exists() else f"running, pid {pid}"
+
+
 def _state_notes(work_dir: Path, now: float) -> list[str]:
     """Progress the log doesn't show: a usage-limit pause, and blocked-by linking."""
     notes = []
@@ -207,7 +215,7 @@ def render(target: str, work_dir: Path, project_dir: str, *, events: int = 8,
     st = parse_log(lines)
     out = [_c("head", f"agentpipe watch {target} - {time.strftime('%H:%M:%S', time.localtime(now))}", color)]
     quiet = f", quiet for {_ago(now - st.last_time)}" if st.last_time else ""
-    out.append(_c("head", f"\nDispatcher (pipeline.log{quiet})", color))
+    out.append(_c("head", f"\nDispatcher: {_dispatcher_state(work_dir)} (pipeline.log{quiet})", color))
     out += [f"  {_short(line, width - 2)}" for line in st.recent] or ["  (no log yet)"]
     out += [f"  {line}" for line in _state_notes(work_dir, now)]
 

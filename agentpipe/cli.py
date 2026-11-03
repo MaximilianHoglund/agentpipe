@@ -26,6 +26,8 @@ def main(argv: list[str] | None = None) -> int:
                         ("sync", "create/update issues, statuses and blocked-by links"),
                         ("status", "show the queue by status"),
                         ("run", "run the dispatcher: implement, review, merge"),
+                        ("start", "start the dispatcher hidden in the background"),
+                        ("stop", "stop the background dispatcher once running agents finish"),
                         ("watch", "live view of the dispatcher and what each running agent is doing"),
                         ("denials", "review tool calls agents were refused, grouped, with the reason")):
         p = sub.add_parser(name, help=help_)
@@ -43,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--events", type=int, default=8, help="recent events shown per agent")
             p.add_argument("--interval", type=float, default=2.0, help="seconds between refreshes")
             p.add_argument("--once", action="store_true", help="print one snapshot and exit")
+        if name == "stop":
+            p.add_argument("--now", action="store_true", help="kill it and its agents instead of waiting")
         if name == "denials":
             p.add_argument("--hours", type=float, help="only runs from the last N hours")
             p.add_argument("--examples", type=int, default=2, help="example commands per group")
@@ -96,6 +100,30 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{s} ({len(items)})")
                 for line in items if s != Status.FINISHED.value else items[-5:]:
                     print(f"  {line}")
+        return 0
+
+    if args.cmd in ("start", "stop"):
+        from agentpipe import service
+        pid = service.running_pid(target.work_dir)
+        if args.cmd == "start":
+            if pid:
+                print(f"{target.name}: dispatcher already running (pid {pid})")
+                return 1
+            pid = service.start(target.name, target.work_dir, args.config.resolve())
+            print(f"{target.name}: dispatcher started hidden (pid {pid}); "
+                  f"follow it with: agentpipe watch {target.name}")
+            print(f"  console output and crashes: {target.work_dir / 'logs' / 'dispatcher.out'}")
+            return 0
+        if not pid:
+            print(f"{target.name}: no dispatcher running")
+            return 1
+        if args.now:
+            service.kill(pid)
+            print(f"{target.name}: killed dispatcher {pid} and its agents")
+        else:
+            service.request_stop(target.work_dir)
+            print(f"{target.name}: stop requested; dispatcher {pid} exits once running agents finish "
+                  f"(watch shows progress; --now kills it)")
         return 0
 
     if args.cmd == "denials":

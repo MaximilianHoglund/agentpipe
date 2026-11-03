@@ -461,19 +461,45 @@ class Pipeline:
             f"should resume from (usually `{Status.PENDING_IMPLEMENTATION.label}`)."))
         self.log(f"#{number} -> needs decision: {why.splitlines()[0][:120]}")
 
+    @property
+    def stop_file(self) -> Path:
+        """`agentpipe stop` creates this; the dispatcher then drains its jobs and exits."""
+        return self.t.work_dir / "stop"
+
+    @property
+    def pid_file(self) -> Path:
+        return self.t.work_dir / "dispatcher.pid"
+
     def run_forever(self, once: bool = False) -> None:
+        self.stop_file.unlink(missing_ok=True)  # a stale request must not stop a new run
+        self.pid_file.write_text(str(os.getpid()), encoding="utf-8")
         self.gh.ensure_labels()
-        self.log(f"running; implementers={self.cfg.max_implementers} reviewers={self.cfg.max_reviewers}")
+        self.log(f"running (pid {os.getpid()}); implementers={self.cfg.max_implementers} "
+                 f"reviewers={self.cfg.max_reviewers}")
         try:
             while True:
+                if not self.stopping and self.stop_file.exists():
+                    self.stopping = True
+                    self.log(f"stop requested: starting nothing new, waiting for {len(self.jobs)} running job(s)")
                 self.tick()
-                if once and not self.jobs:
+                if (once or self.stopping) and not self.jobs:
                     break
-                time.sleep(self.cfg.poll_seconds if not once else 5)
+                # Sleep in short steps so a stop request is noticed within seconds.
+                deadline = time.time() + (self.cfg.poll_seconds if not once else 5)
+                while time.time() < deadline and (self.stopping or not self.stop_file.exists()):
+                    time.sleep(min(2.0, max(deadline - time.time(), 0)))
+            self.log("stopped")
         except KeyboardInterrupt:
             self.stopping = True
             self.log("stopping: waiting for running agents (Ctrl-C again to abandon; work resumes on restart)")
             self.pool.shutdown(wait=True, cancel_futures=True)
+        except Exception as e:
+            # Hidden runs have no console, so the traceback must reach pipeline.log.
+            self.log(f"dispatcher crashed: {e!r}\n" + traceback.format_exc())
+            raise
+        finally:
+            self.stop_file.unlink(missing_ok=True)
+            self.pid_file.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------ jobs
     def human_input(self, issue: int, pr: dict | None) -> str:
