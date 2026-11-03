@@ -1,0 +1,88 @@
+"""Git operations on the target repo and the pipeline's worktrees."""
+
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+
+from agentpipe import proc
+
+
+class Git:
+    def __init__(self, repo: Path, run=proc.run):
+        self.repo = repo
+        self._run = run
+
+    def git(self, *args: str, cwd: Path | None = None, check: bool = True) -> proc.Result:
+        return self._run(["git", *args], cwd or self.repo, check=check)
+
+    def fetch(self) -> None:
+        self.git("fetch", "origin", "--prune")
+
+    def worktree_add(self, path: Path, branch: str, start: str) -> None:
+        """Create (or reset) ``branch`` at ``start`` and check it out at ``path``."""
+        self.worktree_remove(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.git("worktree", "add", "-B", branch, str(path), start)
+
+    def worktree_detached(self, path: Path, ref: str) -> None:
+        self.worktree_remove(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.git("worktree", "add", "--detach", str(path), ref)
+
+    def worktree_remove(self, path: Path) -> None:
+        if path.exists():
+            self.git("worktree", "remove", "--force", str(path), check=False)
+            if path.exists():  # not a registered worktree, or Windows held a file
+                shutil.rmtree(path, ignore_errors=True)
+        self.git("worktree", "prune", check=False)
+
+    def remote_branch_exists(self, branch: str) -> bool:
+        return self.git("rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}",
+                        check=False).ok
+
+    def head(self, wt: Path) -> str:
+        return self.git("rev-parse", "HEAD", cwd=wt).out.strip()
+
+    def commits_ahead(self, wt: Path, base_ref: str) -> int:
+        return int(self.git("rev-list", "--count", f"{base_ref}..HEAD", cwd=wt).out.strip())
+
+    def is_clean(self, wt: Path) -> bool:
+        return self.git("status", "--porcelain", cwd=wt).out.strip() == ""
+
+    def contains(self, wt: Path, ref: str) -> bool:
+        """True if ``ref`` is already an ancestor of HEAD."""
+        return self.git("merge-base", "--is-ancestor", ref, "HEAD", cwd=wt, check=False).ok
+
+    def merge(self, wt: Path, ref: str) -> bool:
+        """Merge ``ref`` into HEAD. On conflict the merge is left in progress and False returned."""
+        return self.git("merge", "--no-edit", ref, cwd=wt, check=False).ok
+
+    def merge_abort(self, wt: Path) -> None:
+        self.git("merge", "--abort", cwd=wt, check=False)
+
+    def merging(self, wt: Path) -> bool:
+        return self.git("rev-parse", "--verify", "--quiet", "MERGE_HEAD", cwd=wt, check=False).ok
+
+    def push(self, wt: Path, branch: str) -> None:
+        self.git("push", "origin", f"HEAD:refs/heads/{branch}", cwd=wt)
+
+    def delete_remote_branch(self, branch: str) -> None:
+        self.git("push", "origin", "--delete", branch, check=False)
+
+    def delete_branch(self, branch: str) -> None:
+        self.git("branch", "-D", branch, check=False)
+
+    def diff(self, wt: Path, base_ref: str, stat: bool = False, relative: bool = False) -> str:
+        """Diff of HEAD against its merge base with ``base_ref``.
+
+        ``relative`` limits it to ``wt`` (which may be a subdirectory of a worktree)
+        and makes paths relative to it, as tools run from a project dir expect.
+        """
+        args = ["diff", f"{base_ref}...HEAD"] + (["--stat"] if stat else []) + (["--relative"] if relative else [])
+        return self.git(*args, cwd=wt).out
+
+    def restore(self, wt: Path) -> None:
+        """Discard every change and untracked file, back to HEAD."""
+        self.git("reset", "--hard", "--quiet", cwd=wt)
+        self.git("clean", "-fdq", cwd=wt)

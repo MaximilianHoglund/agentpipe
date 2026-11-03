@@ -1,0 +1,89 @@
+# agentpipe configuration. Launch one target at a time:  agentpipe run <target>
+
+claude_bin = "~/.local/bin/claude.exe"
+gh_bin = "E:/Programs/GitHubCLI/bin/gh.exe"
+# Worktrees, logs, plans, state and cargo target dirs, one folder per target.
+work_root = "E:/Source/.pipeline"
+
+[run]
+max_implementers = 2      # parallel implementer agents (each builds in its own cargo target dir)
+max_reviewers = 1
+max_rounds = 3            # rejections before a task goes to "needs decision"
+poll_seconds = 60         # how often GitHub is checked
+sync_seconds = 600        # how often tasks.md is re-read and issues reconciled
+limit_backoff_seconds = 1800  # pause after a usage/capacity limit
+agent_timeout = 14400     # hard cap on one agent run
+
+[agents.planner]
+model = "claude-opus-5-5"
+max_turns = 60
+tools = ["Read", "Glob", "Grep"]
+
+[agents.implementer]
+model = "claude-opus-5-5"
+max_turns = 250
+tools = [
+  "Read", "Edit", "Write", "Glob", "Grep", "mcp__serena",
+  "Bash(cargo:*)", "Bash(rustfmt:*)", "Bash(uv:*)", "Bash(py:*)", "Bash(python:*)",
+  "Bash(git add:*)", "Bash(git commit:*)", "Bash(git status:*)", "Bash(git diff:*)",
+  "Bash(git log:*)", "Bash(git show:*)", "Bash(git rm:*)", "Bash(git mv:*)",
+  "Bash(git merge:*)", "Bash(git restore:*)", "Bash(ls:*)",
+  "Bash(pwsh -NoProfile -File scripts/check.ps1:*)",
+]
+
+[agents.reviewer]
+model = "claude-opus-5-5"
+max_turns = 150
+# Edit is for test probes (deliberate breaks) in its disposable checkout.
+tools = [
+  "Read", "Edit", "Glob", "Grep", "mcp__serena",
+  "Bash(cargo:*)", "Bash(uv:*)", "Bash(py:*)",
+  "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Bash(git status:*)",
+  "Bash(git checkout --:*)", "Bash(git restore:*)", "Bash(ls:*)",
+]
+
+# ---------------------------------------------------------------- targets
+# changes: a list of OpenSpec change names, or "*" for every non-archived change.
+# test: the gate. It must exit 0 before review and again after merging the base branch.
+# mutation (optional): extra evidence for the reviewer; {diff} is the PR's diff, relative
+#   to project_dir. cargo-mutants runs --in-place in the reviewer's throwaway checkout, so it
+#   reuses the gate's warm build and never copies the tree to %TEMP% (C:). The gate has just
+#   passed on the same commit, hence --baseline skip; --timeout caps each mutant instead.
+
+[targets.dota]
+repo_root = "E:/Source/Claude"
+github_repo = "MaximilianHoglund/PoEEyes"
+changes = ["dota2-draft-helper"]
+project_dir = "dota"
+test = "cargo test --workspace"
+mutation = "cargo mutants --in-place --in-diff {diff} --baseline skip --timeout 300 --no-shuffle"
+mutation_timeout = 3600
+
+[targets.riftbound]
+repo_root = "E:/Source/Claude"
+github_repo = "MaximilianHoglund/PoEEyes"
+changes = ["riftbound-footage-replay", "riftbound-full-card-database", "riftbound-gui",
+           "riftbound-learned-agent", "riftbound-opponent-modelling"]
+project_dir = "riftbound"
+test = "pwsh -NoProfile -File scripts/check.ps1 -Fast"
+test_timeout = 5400
+# No mutation run: the gate alone takes long here, and in-place mutants run serially.
+
+[targets.arpg]
+repo_root = "E:/Source/arpg-manager"
+github_repo = "MaximilianHoglund/arpg-manager"
+changes = "*"
+project_dir = "."
+# There is no Cargo workspace until project-foundation lands; the first PRs create it.
+# Once project-foundation 3.3 adds scripts/check.ps1 (Rust and Godot checks), the gate uses it.
+test = 'pwsh -NoProfile -Command "if (Test-Path scripts/check.ps1) { & ./scripts/check.ps1 } else { cargo test --workspace }; exit $LASTEXITCODE"'
+mutation = "cargo mutants --in-place --in-diff {diff} --baseline skip --timeout 300 --no-shuffle"
+mutation_timeout = 3600
+context = ["docs/design.md", "docs/decisions.md", "docs/roadmap.md", "docs/agent-environment.md"]
+# Godot 4.7.2 in self-contained mode, with export templates, preinstalled off the repo.
+# PATH: agents' Git Bash otherwise can't find pwsh (a Store app alias in WindowsApps).
+env = { GODOT = "E:/Programs/Godot/4.7.2/Godot_v4.7.2-stable_win64_console.exe", PATH = "C:/Users/Max/AppData/Local/Microsoft/WindowsApps;{PATH}" }
+extra_tools = [
+  "Bash(E:/Programs/Godot/4.7.2/Godot_v4.7.2-stable_win64_console.exe:*)",
+  "Bash(pwsh -NoProfile -File scripts/*)",
+]
