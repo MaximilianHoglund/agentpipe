@@ -14,7 +14,50 @@ sync_seconds = 600        # how often tasks.md is re-read and issues reconciled
 limit_backoff_seconds = 1800  # pause after a usage/capacity limit
 agent_timeout = 14400     # hard cap on one agent run
 
-# Every agent may use Bash and PowerShell, unrestricted (Max, 2026-11-03).
+# Every agent may use Bash and PowerShell (Max, 2026-11-03), minus [permissions] deny.
+
+[permissions]
+# Denied for every agent; deny beats allow. Claude Code checks each part of a compound
+# command (a && b, a; b) and resolves PowerShell aliases (ri, rm, del -> Remove-Item).
+# These are guardrails against mistakes, not a sandbox: an interpreter one-liner
+# (python -c "os.system(...)") still gets past them.
+# Agents never need any of this: the dispatcher pushes, opens PRs, merges, tags and
+# manages worktrees and branches; agents commit on the branch they are given.
+deny = [
+  # GitHub and remotes: gh is logged in as Max, so it could close, merge or delete.
+  "Bash(gh:*)", "PowerShell(gh:*)",
+  "Bash(git push:*)", "PowerShell(git push:*)",
+  "Bash(git remote:*)", "PowerShell(git remote:*)",
+  "Bash(git config:*)", "PowerShell(git config:*)",
+  # Branches, worktrees, tags and history (git restore covers undoing a file).
+  "Bash(git checkout:*)", "PowerShell(git checkout:*)",
+  "Bash(git switch:*)", "PowerShell(git switch:*)",
+  "Bash(git branch:*)", "PowerShell(git branch:*)",
+  "Bash(git worktree:*)", "PowerShell(git worktree:*)",
+  "Bash(git tag:*)", "PowerShell(git tag:*)",
+  "Bash(git reset --hard:*)", "PowerShell(git reset --hard:*)",
+  "Bash(git clean:*)", "PowerShell(git clean:*)",
+  "Bash(git rebase:*)", "PowerShell(git rebase:*)",
+  "Bash(git filter-branch:*)", "Bash(git update-ref:*)", "Bash(git reflog:*)",
+  "Bash(git stash drop:*)", "Bash(git stash clear:*)",
+  # Recursive deletes. Single files: plain rm, or git rm.
+  "Bash(rm -r:*)", "Bash(rm -rf:*)", "Bash(rm -fr:*)", "Bash(rm -R:*)", "Bash(rm -Rf:*)",
+  "Bash(rm --recursive:*)", "PowerShell(Remove-Item:*)", "Bash(rd:*)", "Bash(rmdir /s:*)",
+  # Processes and the machine: the dispatcher and other sessions run on this desktop.
+  "Bash(kill:*)", "Bash(pkill:*)", "Bash(killall:*)", "Bash(taskkill:*)",
+  "PowerShell(Stop-Process:*)", "PowerShell(taskkill:*)",
+  "Bash(shutdown:*)", "PowerShell(shutdown:*)", "PowerShell(Stop-Computer:*)", "PowerShell(Restart-Computer:*)",
+  "Bash(format:*)", "Bash(diskpart:*)", "Bash(reg:*)", "PowerShell(reg:*)",
+  "PowerShell(Set-ExecutionPolicy:*)", "PowerShell(Remove-ItemProperty:*)",
+  # System-wide installs.
+  "Bash(winget:*)", "PowerShell(winget:*)", "Bash(choco:*)", "PowerShell(choco:*)",
+  "Bash(npm install -g:*)", "Bash(npm i -g:*)",
+  # Wrappers that hide a command from the checks above.
+  "Bash(bash -c:*)", "Bash(sh -c:*)", "Bash(eval:*)", "Bash(cmd:*)", "Bash(cmd.exe:*)",
+  "Bash(powershell:*)", "Bash(pwsh -c:*)", "Bash(pwsh -Command:*)",
+  "PowerShell(Invoke-Expression:*)", "PowerShell(iex:*)", "PowerShell(Start-Process:*)",
+  "PowerShell(cmd:*)", "PowerShell(bash:*)",
+]
 
 [agents.planner]
 model = "claude-opus-5-5"

@@ -36,7 +36,7 @@ $prior_section
 4. Probe the tests. For the most important behaviours, make a small deliberate break
    in the implementation (flip a comparison, drop a branch, return early, change a
    boundary), run the relevant tests, record whether they caught it (mark a break `equivalent` if it cannot change observable behaviour), then restore the
-   file with `git checkout -- <file>`. Do at least three probes, aimed at edge cases.
+   file with `git restore <file>`. Do at least three probes, aimed at edge cases.
    An uncaught break is strong evidence of a coverage gap.
 
 ## Criteria (category in brackets)

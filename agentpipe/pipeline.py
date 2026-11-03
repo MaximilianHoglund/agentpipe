@@ -118,7 +118,7 @@ class Pipeline:
         a = self.cfg.agents[role]
         if role == "planner" or not self.t.extra_tools:
             return a
-        return Agent(a.model, a.max_turns, a.tools + self.t.extra_tools)
+        return Agent(a.model, a.max_turns, a.tools + self.t.extra_tools, a.deny)
 
     def env(self, slot: str) -> dict:
         env = dict(os.environ)

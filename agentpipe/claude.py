@@ -71,6 +71,8 @@ class Claude:
                "--json-schema", json.dumps(schema)]
         if resume:
             cmd += ["--resume", resume]
+        if agent.deny:
+            cmd += ["--disallowedTools", *agent.deny]
         if agent.tools:
             cmd += ["--allowedTools", *agent.tools]
         # The prompt goes on stdin: --allowedTools is variadic and would swallow it.

@@ -13,6 +13,8 @@ class Agent:
     model: str
     max_turns: int
     tools: list[str]
+    # Denied even though the tool is allowed; deny wins over allow in Claude Code.
+    deny: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -82,8 +84,10 @@ def load(path: Path) -> Config:
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     run = data.get("run", {})
     work_root = Path(os.path.expanduser(data.get("work_root", "E:/Source/.pipeline")))
+    shared_deny = list(data.get("permissions", {}).get("deny", []))
     agents = {
-        name: Agent(a["model"], a.get("max_turns", 100), list(a.get("tools", [])))
+        name: Agent(a["model"], a.get("max_turns", 100), list(a.get("tools", [])),
+                    shared_deny + list(a.get("deny", [])))
         for name, a in data.get("agents", {}).items()
     }
     for required in ("planner", "implementer", "reviewer"):
