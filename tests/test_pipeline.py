@@ -1,5 +1,6 @@
 """Scheduler and ticket handling against an in-memory GitHub; jobs are recorded, not run."""
 
+import dataclasses
 import os
 import time
 from pathlib import Path
@@ -329,3 +330,18 @@ def test_clean_workspace_crates_cleans_only_members(pl, tmp_path, monkeypatch):
     calls.clear()
     p.clean_workspace_crates(tmp_path, "impl-0")  # no Cargo.toml: nothing to do
     assert calls == []
+
+
+def test_approved_ticket_waits_for_the_tasks_it_names(pl):
+    p, gh = pl
+    n = gh.add(TICKET_MARKER + "\nNeeds c/1.2 first.", S.PENDING_IMPLEMENTATION, extra=("kind: defect",))
+    p.state.data["tickets"] = [n]
+    p.load_tickets(p.issues_by_key(gh.list_issues()))
+    key = f"ticket/{n}"
+    p.tick()
+    assert key not in {k for _, k, _ in p.started}
+    assert p.state.task(key)["waits_for"] == ["c/1.2"]
+    p.tasks["c/1.2"] = dataclasses.replace(p.tasks["c/1.2"], done=True)
+    p.started.clear(); p.jobs.clear()
+    p.tick()
+    assert ("implement", key, "impl-0") in p.started or ("implement", key, "impl-1") in p.started

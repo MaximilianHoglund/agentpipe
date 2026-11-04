@@ -26,6 +26,7 @@ from agentpipe.github import GitHub
 from agentpipe.status import (GRAPH_OWNED, TASK_MARKER, TICKET_CHANGE, TICKET_MARKER, Status,
                               status_from_labels, task_key_from_body)
 from agentpipe.tasks import Task, fingerprint, mark_done, parse_tasks
+from agentpipe.tickets import ticket_blockers
 
 IMPL_KINDS = {"implement", "revise"}
 RELEASE_KEY = "milestone"  # job key and slot of the milestone release job
@@ -309,6 +310,21 @@ class Pipeline:
                 self.tasks[key] = Task(TICKET_CHANGE, str(i["number"]), i["title"], False, kind, 0)
                 self.ticket_bodies[key] = i["body"]
 
+    def ticket_waits_for(self, key: str) -> list[str]:
+        """Unfinished tasks an approved, not yet started ticket needs; logged once per change."""
+        if not key.startswith(TICKET_CHANGE + "/") or self.state.task(key).get("runs"):
+            return []
+        task_keys = {k for k in self.tasks if not k.startswith(TICKET_CHANGE + "/")}
+        needs = ticket_blockers(self.ticket_bodies.get(key, ""), task_keys)
+        waiting = sorted((k for k in needs if not self.tasks[k].done), key=key_sort)
+        st = self.state.task(key)
+        if st.get("waits_for") != waiting:
+            st["waits_for"] = waiting
+            self.state.save()
+            if waiting:
+                self.log(f"{key} waits for {', '.join(waiting)} to merge")
+        return waiting
+
     def open_tickets(self) -> str:
         titles = [f"#{t.id} {t.text}" for k, t in self.tasks.items() if k.startswith(TICKET_CHANGE + "/")]
         return ("\n" + "\n".join(f"- {x}" for x in titles)) if titles else "none"
@@ -520,6 +536,8 @@ class Pipeline:
             status = status_from_labels(issues[key]["labels"])
             kind = "revise" if status is Status.CHANGES_REQUESTED else "implement"
             if kind == "revise" and key not in prs:
+                continue
+            if kind == "implement" and self.ticket_waits_for(key):
                 continue
             self.start(kind, key, free_impl.pop(0), issues[key], prs.get(key))
         for key in by_status(Status.PENDING_APPROVAL):

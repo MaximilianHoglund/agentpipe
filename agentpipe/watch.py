@@ -16,6 +16,7 @@ import calendar
 import json
 import os
 import re
+import textwrap
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -109,6 +110,18 @@ class Transcript:
 def _short(value, width: int) -> str:
     s = " ".join(str(value).split())
     return s if len(s) <= width else s[: width - 1] + "…"
+
+
+MAX_WRAPPED_LINES = 6  # a heredoc or long script would otherwise fill the screen
+
+
+def _wrap(value, width: int, indent: str) -> list[str]:
+    """Wrap one entry to the screen; continuation lines are indented under its text."""
+    lines = textwrap.wrap(" ".join(str(value).split()), max(20, width - len(indent)),
+                          break_long_words=True, break_on_hyphens=False) or [""]
+    if len(lines) > MAX_WRAPPED_LINES:
+        lines = lines[:MAX_WRAPPED_LINES - 1] + [lines[MAX_WRAPPED_LINES - 1] + " …"]
+    return lines
 
 
 def _tool_summary(name: str, inp: dict) -> str:
@@ -221,7 +234,8 @@ def render(target: str, work_dir: Path, project_dir: str, *, events: int = 8,
     out = [_c("head", f"agentpipe watch {target} - {time.strftime('%H:%M:%S', time.localtime(now))}", color)]
     quiet = f", quiet for {_ago(now - st.last_time)}" if st.last_time else ""
     out.append(_c("head", f"\nDispatcher: {_dispatcher_state(work_dir)} (pipeline.log{quiet})", color))
-    out += [f"  {_short(line, width - 2)}" for line in st.recent] or ["  (no log yet)"]
+    out += [f"  {part}" for line in st.recent for part in _wrap(line, width - 1, "  ")] \
+        or ["  (no log yet)"]
     out += [f"  {line}" for line in _state_notes(work_dir, now)]
 
     out.append(_c("head", f"\nRunning jobs: {len(st.jobs)}", color))
@@ -243,7 +257,9 @@ def render(target: str, work_dir: Path, project_dir: str, *, events: int = 8,
         out.append("  " + _activity(now, path.stat().st_mtime, color, tr))
         out.append(_c("dim", f"  {path}", color))
         for ev in tr.events[-events:]:
-            out.append(f"  {ev.when} " + _c(ev.kind, _short(ev.text, width - 12), color))
+            pad = "  " + " " * (len(ev.when) + 1)
+            for i, part in enumerate(_wrap(ev.text, width - 1, pad)):
+                out.append((f"  {ev.when} " if i == 0 else pad) + _c(ev.kind, part, color))
     return "\n".join(out)
 
 
