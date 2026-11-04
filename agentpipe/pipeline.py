@@ -100,7 +100,7 @@ class Pipeline:
         mcp = wd / "mcp.json"
         mcp.write_text(json.dumps({"mcpServers": cfg.mcp_servers}, indent=2), encoding="utf-8")
         self.claude = Claude(cfg.claude_bin, self.logs, cfg.agent_timeout, on_denials=self.log_denials,
-                             mcp_config=mcp)
+                             mcp_config=mcp, on_rate=self.note_rate)
         # Agents start only once the environment checks pass (see preflight).
         self.env_ok = not (target.preflight or target.preflight_gate)
         self.last_preflight = 0.0
@@ -586,10 +586,30 @@ class Pipeline:
             self.state.save()
 
     def pause(self, why: str) -> None:
-        until = time.time() + self.cfg.limit_backoff_seconds
-        self.state.data["paused_until"] = until
+        now = time.time()
+        # A known window reset beats a guess; the backoff covers capacity errors with none.
+        resets = [w.get("resetsAt", 0) for w in (self.state.data.get("rate") or {}).values()
+                  if isinstance(w, dict) and (w.get("status") != "allowed" or w.get("utilization", 0) >= 1)]
+        until = max([now + self.cfg.limit_backoff_seconds] + [r + 60 for r in resets if r > now])
+        with self.state.lock:
+            self.state.data["paused_until"] = max(until, self.state.data["paused_until"])
         self.state.save()
         self.log(f"usage limit hit, pausing until {time.strftime('%H:%M', time.localtime(until))}: {why[:200]}")
+
+    def note_rate(self, windows: dict) -> None:
+        """Record the usage windows an agent run reported, and throttle near a limit."""
+        now = time.time()
+        with self.state.lock:
+            self.state.data["rate"] = {**windows, "_at": now}
+            for name, cap in self.cfg.throttle.items():
+                w = windows.get(name) or {}
+                used, resets = float(w.get("utilization") or 0), float(w.get("resetsAt") or 0)
+                if used >= cap and resets > now and resets + 60 > self.state.data["paused_until"]:
+                    self.state.data["paused_until"] = resets + 60
+                    self.log(f"usage {name} at {used:.0%} (throttle {cap:.0%}): starting nothing new "
+                             f"until it resets at {time.strftime('%a %H:%M', time.localtime(resets))}; "
+                             "running jobs finish")
+        self.state.save()
 
     def needs_review(self, pr: dict) -> bool:
         sha = pr["headRefOid"]

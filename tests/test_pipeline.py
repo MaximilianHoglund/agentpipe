@@ -345,3 +345,20 @@ def test_approved_ticket_waits_for_the_tasks_it_names(pl):
     p.started.clear(); p.jobs.clear()
     p.tick()
     assert ("implement", key, "impl-0") in p.started or ("implement", key, "impl-1") in p.started
+
+
+def test_usage_near_a_limit_pauses_new_work_until_the_window_resets(pl):
+    p, gh = pl
+    soon = time.time() + 3600
+    p.note_rate({"five_hour": {"utilization": 0.5, "resetsAt": soon, "status": "allowed"}})
+    assert p.state.data["paused_until"] == 0.0
+    p.note_rate({"five_hour": {"utilization": 0.86, "resetsAt": soon, "status": "allowed"}})
+    assert p.state.data["paused_until"] == soon + 60
+    task_issue(gh, "c/1.1", S.PENDING_IMPLEMENTATION)
+    p.tick()
+    assert p.started == []  # paused: nothing new starts
+    # A hard limit pauses until the known reset, not just the fixed backoff.
+    later = time.time() + 4 * 3600
+    p.state.data["rate"] = {"five_hour": {"utilization": 1.0, "resetsAt": later, "status": "rejected"}}
+    p.pause("You've hit your 5-hour limit")
+    assert p.state.data["paused_until"] == later + 60

@@ -36,23 +36,35 @@ class ClaudeResult:
     cost_usd: float = 0.0
     subtype: str = ""
     denials: list[dict] = field(default_factory=list)  # [{tool_name, tool_input, ...}]
+    # The account's usage windows as of this run (stream-json `rate_limit_event`), e.g.
+    # {"five_hour": {"utilization": 0.82, "resetsAt": 1793797800, "status": "allowed"}, ...}
+    rate: dict | None = None
 
 
 def parse_output(stdout: str, stderr: str, code: int) -> ClaudeResult:
-    data = None
-    for line in reversed(stdout.strip().splitlines()):
+    data = last_json = rate = None
+    for line in stdout.strip().splitlines():
         line = line.strip()
-        if line.startswith("{"):
-            try:
-                data = json.loads(line)
-                break
-            except json.JSONDecodeError:
-                continue
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        last_json = obj
+        if obj.get("type") == "result":
+            data = obj
+        elif obj.get("type") == "rate_limit_event":
+            info = obj.get("rate_limit_info") or {}
+            rate = info.get("unifiedWindows") or rate
+    data = data or last_json  # plain --output-format json, or a run cut short
     if data is None:
         msg = (stderr or stdout or f"exit {code}").strip()
         if code == proc.TIMEOUT_CODE:
-            return ClaudeResult(False, None, msg, None, False, subtype=TIMEOUT)
-        return ClaudeResult(False, None, msg, None, bool(LIMIT_RE.search(msg)))
+            return ClaudeResult(False, None, msg, None, False, subtype=TIMEOUT, rate=rate)
+        return ClaudeResult(False, None, msg, None, bool(LIMIT_RE.search(msg)), rate=rate)
     text = str(data.get("result", ""))
     is_error = bool(data.get("is_error")) or data.get("subtype") != "success"
     structured = data.get("structured_output")
@@ -66,13 +78,15 @@ def parse_output(stdout: str, stderr: str, code: int) -> ClaudeResult:
         cost_usd=float(data.get("total_cost_usd") or 0.0),
         subtype=str(data.get("subtype", "")),
         denials=list(data.get("permission_denials") or []),
+        rate=rate,
     )
 
 
 class Claude:
     def __init__(self, bin: str, log_dir: Path, timeout: int, run=proc.run, on_denials=None,
-                 mcp_config: Path | None = None):
+                 mcp_config: Path | None = None, on_rate=None):
         self.bin = bin
+        self.on_rate = on_rate  # called with ClaudeResult.rate after a run that reported it
         # Agents get only these MCP servers, not the user's own (connectors, browser, ...):
         # fewer tool definitions per turn, and no mail or drive access for unattended runs.
         self.mcp_config = mcp_config
@@ -83,7 +97,8 @@ class Claude:
 
     def run(self, prompt: str, cwd: Path, agent: Agent, schema: dict, *, log_name: str,
             resume: str | None = None, env=None) -> ClaudeResult:
-        cmd = [self.bin, "-p", "--output-format", "json", "--model", agent.model,
+        # stream-json (needs --verbose) is the only output that carries the usage windows.
+        cmd = [self.bin, "-p", "--output-format", "stream-json", "--verbose", "--model", agent.model,
                "--permission-mode", "dontAsk", "--max-turns", str(agent.max_turns),
                "--json-schema", json.dumps(schema)]
         if resume:
@@ -104,6 +119,8 @@ class Claude:
         res = parse_output(r.out, r.err, r.code)
         if res.denials and self.on_denials:
             self.on_denials(log_name, res.denials)
+        if res.rate and self.on_rate:
+            self.on_rate(res.rate)
         return res
 
 

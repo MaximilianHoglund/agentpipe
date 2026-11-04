@@ -11,7 +11,10 @@ max_reviewers = 1
 max_rounds = 3            # rejections before a task goes to "needs decision"
 poll_seconds = 60         # how often GitHub is checked
 sync_seconds = 600        # how often tasks.md is re-read and issues reconciled
-limit_backoff_seconds = 1800  # pause after a usage/capacity limit
+limit_backoff_seconds = 1800  # pause after a usage/capacity limit (or until the window resets, if known)
+# Start nothing new once a usage window reaches this share; resume when it resets.
+# Running jobs finish, so the gap below 1.0 is their headroom.
+throttle = { five_hour = 0.85, seven_day = 0.95 }
 # Caps: a run that hits one goes to "needs decision" instead of being retried, since a
 # stuck run's late turns are its most expensive (its context only grows). The longest
 # task so far took 49 turns.

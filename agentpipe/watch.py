@@ -216,8 +216,14 @@ def _state_notes(work_dir: Path, now: float) -> list[str]:
         planned = len(json.loads((work_dir / "plan.json").read_text(encoding="utf-8"))["tasks"])
     except (OSError, ValueError, KeyError):
         return notes  # missing, or caught mid-write
+    rate = state.get("rate") or {}
+    windows = [f"{name.replace('_', ' ')} {w.get('utilization', 0):.0%} "
+               f"(resets {time.strftime('%a %H:%M', time.localtime(w.get('resetsAt', 0)))})"
+               for name, w in sorted(rate.items()) if isinstance(w, dict)]
+    if windows:
+        notes.append(f"usage as of {_ago(now - rate.get('_at', now))} ago: " + ", ".join(windows))
     if state.get("paused_until", 0) > now:
-        notes.append(f"PAUSED (usage limit) until {time.strftime('%H:%M', time.localtime(state['paused_until']))}")
+        notes.append(f"PAUSED (usage limit) until {time.strftime('%a %H:%M', time.localtime(state['paused_until']))}")
     linked = len(state.get("links", {}))
     if linked < planned:
         notes.append(f"blocked-by links synced for {linked} of {planned} tasks; "

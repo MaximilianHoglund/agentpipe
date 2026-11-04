@@ -102,3 +102,18 @@ def test_parse_output_success_failure_and_limits():
     assert crash.limited and not crash.ok
     no_schema = parse_output('{"subtype":"success","is_error":false,"result":"hi"}', "", 0)
     assert not no_schema.ok  # structured output is required
+
+
+def test_parse_output_reads_stream_json_and_its_usage_windows():
+    stream = "\n".join([
+        '{"type":"system","subtype":"init"}',
+        '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","unifiedWindows":'
+        '{"five_hour":{"utilization":0.82,"resetsAt":1793797800,"status":"allowed"},'
+        '"seven_day":{"utilization":0.37,"resetsAt":1794099600,"status":"allowed"}}}}',
+        '{"type":"assistant","message":{"content":[]}}',
+        '{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"s9",'
+        '"structured_output":{"a":1}}',
+    ])
+    res = parse_output(stream, "", 0)
+    assert (res.ok, res.session_id, res.structured) == (True, "s9", {"a": 1})
+    assert res.rate["five_hour"]["utilization"] == 0.82
