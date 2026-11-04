@@ -166,7 +166,9 @@ mutation_timeout = 1800
 context = ["docs/design.md", "docs/decisions.md", "docs/roadmap.md", "docs/agent-environment.md"]
 # Godot 4.7.2 in self-contained mode, with export templates, preinstalled off the repo.
 # PATH: agents' Git Bash otherwise can't find pwsh (a Store app alias in WindowsApps).
-env = { GODOT = "E:/Programs/Godot/4.7.2/Godot_v4.7.2-stable_win64_console.exe", PATH = "C:/Users/Max/AppData/Local/Microsoft/WindowsApps;{PATH}" }
+# Ticket #217: slots reuse a target dir across branches; clean the game's crates first.
+clean_workspace_crates = true
+env = { GODOT ="E:/Programs/Godot/4.7.2/Godot_v4.7.2-stable_win64_console.exe", PATH = "C:/Users/Max/AppData/Local/Microsoft/WindowsApps;{PATH}" }
 preflight = ["cargo --version", 'pwsh -NoProfile -Command "exit 0"',
              "E:/Programs/Godot/4.7.2/Godot_v4.7.2-stable_win64_console.exe --version"]
 preflight_gate = true

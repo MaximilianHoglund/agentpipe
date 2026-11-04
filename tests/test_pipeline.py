@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from agentpipe import proc as proc_mod
 from agentpipe.config import Agent, Config, Target
 from agentpipe.deps import Plan, TaskDeps
 from agentpipe.pipeline import Pipeline
@@ -303,3 +304,28 @@ def test_a_replan_that_reverses_an_edge_relinks_without_a_cycle(tmp_path):
     p.plan = Plan("fp", {"c/1.1": TaskDeps(blocked_by=["c/1.2"]), "c/1.2": TaskDeps()})
     p.sync_links(gh, issues)
     assert gh.links == {a: {b}, b: set()}
+
+
+def test_clean_workspace_crates_cleans_only_members(pl, tmp_path, monkeypatch):
+    p, _ = pl
+    ws = tmp_path / "ws"
+    (ws / "a" / "src").mkdir(parents=True)
+    (ws / "a" / "src" / "lib.rs").write_text("")
+    (ws / "Cargo.toml").write_text('[workspace]\nmembers = ["a"]\nresolver = "2"\n')
+    (ws / "a" / "Cargo.toml").write_text('[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\n')
+    calls = []
+    real = proc_mod.run
+
+    def spy(cmd, *a, **kw):
+        calls.append(list(cmd))
+        return real(cmd, *a, **kw)
+
+    monkeypatch.setattr(proc_mod, "run", spy)
+    p.clean_workspace_crates(ws, "impl-0")
+    assert calls == []  # off by default
+    p.t.clean_workspace_crates = True
+    p.clean_workspace_crates(ws, "impl-0")
+    assert calls[-1] == ["cargo", "clean", "-p", "a"]
+    calls.clear()
+    p.clean_workspace_crates(tmp_path, "impl-0")  # no Cargo.toml: nothing to do
+    assert calls == []

@@ -737,6 +737,7 @@ class Pipeline:
         st = self.state.task(t.key)
         n = st.get("runs", 0) + 1
         st["runs"] = n
+        self.clean_workspace_crates(self.wt(t) / self.t.project_dir, slot)
         res = self.claude.run(prompt, self.wt(t) / self.t.project_dir, self.agent_def("implementer"),
                               review.IMPLEMENTER_SCHEMA, log_name=f"{t.slug}-{tag}-{n}",
                               resume=self.resumable(t), env=self.env(slot))
@@ -853,7 +854,23 @@ class Pipeline:
         self.state.save()
 
     def run_gate(self, cwd: Path, slot: str, cmd: str, timeout: int) -> proc.Result:
+        self.clean_workspace_crates(cwd, slot)
         return proc.run(cmd, cwd, env=self.env(slot), timeout=timeout, check=False, shell=True)
+
+    def clean_workspace_crates(self, cwd: Path, slot: str) -> None:
+        """Drop the workspace's own crates from the slot's shared target dir (see config)."""
+        if not self.t.clean_workspace_crates or not (cwd / "Cargo.toml").exists():
+            return
+        env = self.env(slot)
+        try:
+            meta = json.loads(proc.run(["cargo", "metadata", "--no-deps", "--format-version", "1"],
+                                       cwd, env=env, timeout=300).out)
+            names = sorted({p["name"] for p in meta.get("packages", [])})
+            if names:
+                proc.run(["cargo", "clean", *[a for n in names for a in ("-p", n)]],
+                         cwd, env=env, timeout=300)
+        except (proc.CommandError, OSError, ValueError, KeyError) as e:
+            self.log(f"could not clean workspace crates in {slot}: {str(e)[-200:]}")
 
     def job_review(self, t: Task, issue: int, pr: dict, slot: str) -> None:
         sha = pr["headRefOid"]

@@ -42,6 +42,10 @@ class Target:
     extra_tools: list[str] = field(default_factory=list)
     # Extra environment variables for this target's agents, gate and mutation runs.
     env: dict[str, str] = field(default_factory=dict)
+    # Slots reuse one cargo target dir across branches; cargo can then take another branch's
+    # artifact for a same-path workspace crate as fresh. True cleans the workspace's own
+    # crates (not dependencies) from the slot's target before each gate and agent run.
+    clean_workspace_crates: bool = False
     # Milestone releases: when every change of the next milestone is done on `base`,
     # merge it into `release_branch`, tag it and publish a GitHub release.
     release_branch: str = ""
@@ -132,6 +136,7 @@ def load(path: Path) -> Config:
             mutation_timeout=t.get("mutation_timeout", 3600),
             extra_tools=list(t.get("extra_tools", [])),
             env={k: str(v) for k, v in t.get("env", {}).items()},
+            clean_workspace_crates=bool(t.get("clean_workspace_crates", False)),
             release_branch=t.get("release_branch", ""),
             milestones=[Milestone(m["tag"], m.get("title", m["tag"]), list(m["changes"]))
                         for m in t.get("milestones", [])],
