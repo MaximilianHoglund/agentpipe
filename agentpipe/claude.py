@@ -12,7 +12,9 @@ from agentpipe.config import Agent
 
 # Messages that mean "out of quota / capacity", as opposed to a failed task.
 LIMIT_RE = re.compile(
-    r"usage limit|rate[ _-]?limit|limit (?:reached|exceeded)|resets? at|overloaded|"
+    # "You've hit your 5-hour limit · resets 11:30pm (...)" matched none of these until 2026-11-04.
+    r"usage limit|rate[ _-]?limit|limit (?:reached|exceeded)|hit your [\w -]*limit|"
+    r"resets? (?:at )?\d|overloaded|"
     r"low[ -]priority|capacity|\b429\b|\b529\b",
     re.I,
 )

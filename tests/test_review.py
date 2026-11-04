@@ -95,6 +95,9 @@ def test_parse_output_success_failure_and_limits():
     assert (turns.ok, turns.limited, turns.session_id) == (False, False, "s2")
     limit = parse_output('{"subtype":"success","is_error":true,"result":"Claude usage limit reached"}', "", 1)
     assert limit.limited and not limit.ok
+    five_hour = parse_output('{"subtype":"success","is_error":true,'
+                             '"result":"You\'ve hit your 5-hour limit \\u00b7 resets 11:30pm (Europe/Stockholm)"}', "", 1)
+    assert five_hour.limited and not five_hour.ok
     crash = parse_output("", "Error: 529 overloaded", 1)
     assert crash.limited and not crash.ok
     no_schema = parse_output('{"subtype":"success","is_error":false,"result":"hi"}', "", 0)
