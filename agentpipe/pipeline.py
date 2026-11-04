@@ -30,6 +30,8 @@ from agentpipe.tickets import ticket_blockers
 
 IMPL_KINDS = {"implement", "revise"}
 RELEASE_KEY = "milestone"  # job key and slot of the milestone release job
+MERGE_ATTEMPTS = 3  # tries to bring a behind branch up to date and merge it
+MERGE_RETRY_SECONDS = 15  # lets GitHub finish computing mergeability after a push
 
 
 def fence(text: str) -> str:
@@ -992,27 +994,42 @@ class Pipeline:
         self.git.git("checkout", "--force", "-B", t.branch, f"origin/{t.branch}", cwd=wt)
         if self.git.head(wt) != pr["headRefOid"]:
             raise RuntimeError("PR head moved after approval; refusing to merge")
-        if not self.git.contains(wt, self.base_ref()):
-            if not self.git.merge(wt, self.base_ref()):
-                self.git.merge_abort(wt)
-                v = {"verdict": review.CONFLICT, "findings": [], "probes": [],
-                     "summary": f"The approved branch no longer merges cleanly with `{self.base_ref()}`."}
-                self.gh.comment(pr["number"], review.render_review(v, pr["headRefOid"], 0, self.cfg.max_rounds))
-                self.gh.set_status(issue, Status.CHANGES_REQUESTED, Status.APPROVED)
-                return
-            self.log(f"phase {t.key}: test gate (after merging {self.base_ref()})")
-            gate = self.run_gate(wt / self.t.project_dir, slot, self.t.test, self.t.test_timeout)
-            if not gate.ok:
-                history = review.review_history(self.gh.comments(pr["number"]))
-                round_ = review.rounds_used(history) + 1
-                v = {"verdict": review.TESTS_FAILED, "findings": [], "probes": [], "details": gate.tail(6000),
-                     "summary": f"After merging `{self.base_ref()}`, `{self.t.test}` fails."}
-                self.git.git("reset", "--hard", pr["headRefOid"], cwd=wt)
-                self.gh.comment(pr["number"], review.render_review(v, pr["headRefOid"], round_, self.cfg.max_rounds))
-                self.gh.set_status(issue, Status.CHANGES_REQUESTED, Status.APPROVED)
-                return
-            self.git.push(wt, t.branch)
-        self.gh.merge_pr(pr["number"], self.git.head(wt))
+        # A branch that fell behind is brought up to date and retried, never handed to the
+        # owner: the base can move again between our push and GitHub's merge, and GitHub
+        # reports "not mergeable" while it is still computing mergeability after a push.
+        for attempt in range(MERGE_ATTEMPTS):
+            if attempt:
+                time.sleep(MERGE_RETRY_SECONDS)
+                self.git.fetch()
+            if not self.git.contains(wt, self.base_ref()):
+                if not self.git.merge(wt, self.base_ref()):
+                    self.git.merge_abort(wt)
+                    return self.merge_conflict(issue, pr, f"The approved branch no longer merges cleanly "
+                                                          f"with `{self.base_ref()}`.")
+                self.log(f"phase {t.key}: test gate (after merging {self.base_ref()})")
+                gate = self.run_gate(wt / self.t.project_dir, slot, self.t.test, self.t.test_timeout)
+                if not gate.ok:
+                    history = review.review_history(self.gh.comments(pr["number"]))
+                    round_ = review.rounds_used(history) + 1
+                    v = {"verdict": review.TESTS_FAILED, "findings": [], "probes": [], "details": gate.tail(6000),
+                         "summary": f"After merging `{self.base_ref()}`, `{self.t.test}` fails."}
+                    self.git.git("reset", "--hard", pr["headRefOid"], cwd=wt)
+                    self.gh.comment(pr["number"], review.render_review(v, pr["headRefOid"], round_, self.cfg.max_rounds))
+                    self.gh.set_status(issue, Status.CHANGES_REQUESTED, Status.APPROVED)
+                    return
+                self.git.push(wt, t.branch)
+            try:
+                self.gh.merge_pr(pr["number"], self.git.head(wt))
+                break
+            except proc.CommandError as e:
+                if "not mergeable" not in str(e).lower():
+                    raise
+                self.log(f"merge {t.key} PR #{pr['number']}: not mergeable yet (attempt {attempt + 1}); retrying")
+        else:
+            return self.merge_conflict(issue, pr, f"GitHub still reports the branch as not mergeable after "
+                                                  f"{MERGE_ATTEMPTS} attempts to bring it up to date with "
+                                                  f"`{self.base_ref()}`; rebase it onto `{self.base_ref()}` "
+                                                  f"and resolve the conflicts.")
         tasks = self.batch(t)
         self.log(f"merged PR #{pr['number']} ({', '.join(x.key for x in tasks)})")
         self.gh.set_status(issue, Status.FINISHED, Status.APPROVED)
@@ -1030,6 +1047,12 @@ class Pipeline:
                 self.state.data["tasks"].pop(x.key, None)
         self.state.save()
         self.last_sync = 0.0  # dependents may be unblocked now
+
+    def merge_conflict(self, issue: int, pr: dict, summary: str) -> None:
+        """Send an approved PR that cannot be merged back to its implementer to update it."""
+        v = {"verdict": review.CONFLICT, "findings": [], "probes": [], "summary": summary}
+        self.gh.comment(pr["number"], review.render_review(v, pr["headRefOid"], 0, self.cfg.max_rounds))
+        self.gh.set_status(issue, Status.CHANGES_REQUESTED, Status.APPROVED)
 
     def commit_to_base(self, tasks: list[Task], message: str) -> None:
         """Tick ``tasks`` (all of one change: a batch never mixes changes) in one commit."""
