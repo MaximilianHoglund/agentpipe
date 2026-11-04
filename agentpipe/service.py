@@ -67,6 +67,25 @@ def start(target: str, work_dir: Path, config: Path) -> int:
     raise RuntimeError("could not start the dispatcher")
 
 
+def open_watcher(target: str, config: Path) -> int | None:
+    """Open ``agentpipe watch`` in its own visible console window; returns its pid.
+
+    Max wants every started pipeline to have a watcher attached. Off Windows there is no
+    portable way to open a terminal, so this returns None and the caller prints the command.
+    """
+    if os.name != "nt":
+        return None
+    cmd = [sys.executable, "-m", "agentpipe", "--config", str(config), "watch", target]
+    cwd = Path(__file__).resolve().parent.parent
+    base = subprocess.CREATE_NEW_CONSOLE
+    for flags in (base | subprocess.CREATE_BREAKAWAY_FROM_JOB, base):
+        try:
+            return subprocess.Popen(cmd, cwd=cwd, creationflags=flags).pid
+        except OSError:
+            continue
+    return None
+
+
 def request_stop(work_dir: Path) -> None:
     (work_dir / "stop").write_text("", encoding="utf-8")
 

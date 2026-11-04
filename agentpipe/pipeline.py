@@ -362,12 +362,22 @@ class Pipeline:
                 todo.append((key, issue, want))
         if todo:
             self.log(f"linking blocked-by for {len(todo)} issue(s)")
+        # Remove every stale link before adding any: a re-plan can reverse an edge
+        # (A<-B becomes B<-A), and GitHub rejects an add that would close a cycle.
+        current = {}
         for key, issue, want in todo:
             have = gh.blocked_by(issue["number"])
-            for n in set(want) - set(have):
-                gh.add_blocked_by(issue["number"], self.db_id(gh, n))
             for n in set(have) - set(want):
                 gh.remove_blocked_by(issue["number"], have[n])
+            current[key] = have
+        for key, issue, want in todo:
+            for n in set(want) - set(current[key]):
+                try:
+                    gh.add_blocked_by(issue["number"], self.db_id(gh, n))
+                except proc.CommandError as e:
+                    # A link GitHub refuses (e.g. a cycle through a closed issue) only
+                    # mirrors the plan; the plan itself still orders the work.
+                    self.log(f"#{issue['number']}: could not link blocked-by #{n}: {str(e)[-200:]}")
             st.data["links"][key] = want
             st.save()
 

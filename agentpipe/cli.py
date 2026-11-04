@@ -26,7 +26,7 @@ def main(argv: list[str] | None = None) -> int:
                         ("sync", "create/update issues, statuses and blocked-by links"),
                         ("status", "show the queue by status"),
                         ("run", "run the dispatcher: implement, review, merge"),
-                        ("start", "start the dispatcher hidden in the background"),
+                        ("start", "start the dispatcher hidden and open a watcher window"),
                         ("stop", "stop the background dispatcher once running agents finish"),
                         ("watch", "live view of the dispatcher and what each running agent is doing"),
                         ("denials", "review tool calls agents were refused, grouped, with the reason")):
@@ -45,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--events", type=int, default=8, help="recent events shown per agent")
             p.add_argument("--interval", type=float, default=2.0, help="seconds between refreshes")
             p.add_argument("--once", action="store_true", help="print one snapshot and exit")
+        if name == "start":
+            p.add_argument("--no-watch", action="store_true", help="don't open a watcher window")
         if name == "stop":
             p.add_argument("--now", action="store_true", help="kill it and its agents instead of waiting")
         if name == "denials":
@@ -106,14 +108,18 @@ def main(argv: list[str] | None = None) -> int:
         from agentpipe import service
         pid = service.running_pid(target.work_dir)
         if args.cmd == "start":
-            if pid:
+            already = pid is not None
+            if already:
                 print(f"{target.name}: dispatcher already running (pid {pid})")
-                return 1
-            pid = service.start(target.name, target.work_dir, args.config.resolve())
-            print(f"{target.name}: dispatcher started hidden (pid {pid}); "
-                  f"follow it with: agentpipe watch {target.name}")
-            print(f"  console output and crashes: {target.work_dir / 'logs' / 'dispatcher.out'}")
-            return 0
+            else:
+                pid = service.start(target.name, target.work_dir, args.config.resolve())
+                print(f"{target.name}: dispatcher started hidden (pid {pid})")
+                print(f"  console output and crashes: {target.work_dir / 'logs' / 'dispatcher.out'}")
+            if not args.no_watch:
+                wpid = service.open_watcher(target.name, args.config.resolve())
+                print(f"  watcher opened in its own window (pid {wpid})" if wpid else
+                      f"  follow it with: agentpipe watch {target.name}")
+            return 1 if already else 0
         if not pid:
             print(f"{target.name}: no dispatcher running")
             return 1

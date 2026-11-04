@@ -246,3 +246,60 @@ def test_is_alive_tells_live_from_dead_pids():
     from agentpipe import service
     assert service.is_alive(os.getpid())
     assert not service.is_alive(2 ** 22 + 3)
+
+
+class LinkingGitHub(FakeGitHub):
+    """Blocked-by links that, like GitHub, refuse an add that would close a cycle."""
+
+    def __init__(self):
+        super().__init__()
+        self.links: dict[int, set[int]] = {}  # issue -> blockers
+
+    def issue_db_id(self, number):
+        return 1000 + number
+
+    def blocked_by(self, number):
+        return {n: 1000 + n for n in self.links.get(number, set())}
+
+    def _reaches(self, start, goal):
+        seen, todo = set(), [start]
+        while todo:
+            n = todo.pop()
+            if n == goal:
+                return True
+            if n not in seen:
+                seen.add(n)
+                todo.extend(self.links.get(n, ()))
+        return False
+
+    def add_blocked_by(self, number, blocker_db_id):
+        from agentpipe.proc import CommandError
+        blocker = blocker_db_id - 1000
+        if self._reaches(blocker, number):
+            raise CommandError("gh api ... exited 1: would create a cycle")
+        self.links.setdefault(number, set()).add(blocker)
+
+    def remove_blocked_by(self, number, blocker_db_id):
+        self.links[number].discard(blocker_db_id - 1000)
+
+
+def test_a_replan_that_reverses_an_edge_relinks_without_a_cycle(tmp_path):
+    from agentpipe.deps import TaskDeps
+    target = Target("t", tmp_path, "o/r", "main", ["c"], ".", "true", "", [], tmp_path / "work")
+    agent = Agent("m", 1, [])
+    cfg = Config({"t": target}, "claude", "gh", {"planner": agent, "implementer": agent, "reviewer": agent})
+    gh = LinkingGitHub()
+    p = Pipeline(cfg, target, gh=gh, log=lambda m: None)
+    p.tasks = {t.key: t for t in parse_tasks("c", "- [ ] 1.1 a\n- [ ] 1.2 b\n")}
+    a = task_issue(gh, "c/1.1", S.BLOCKED_BY_TASK)
+    b = task_issue(gh, "c/1.2", S.BLOCKED_BY_TASK)
+    issues = p.issues_by_key(gh.list_issues())
+
+    p.plan = Plan("fp", {"c/1.1": TaskDeps(), "c/1.2": TaskDeps(blocked_by=["c/1.1"])})
+    p.sync_links(gh, issues)
+    assert gh.links == {b: {a}}
+
+    # The new plan reverses the edge; 1.1 is processed first, so a naive add-then-remove cycles.
+    p.plan = Plan("fp", {"c/1.1": TaskDeps(blocked_by=["c/1.2"]), "c/1.2": TaskDeps()})
+    p.sync_links(gh, issues)
+    assert gh.links == {a: {b}, b: set()}

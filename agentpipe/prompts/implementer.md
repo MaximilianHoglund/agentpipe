@@ -68,7 +68,16 @@ Open tickets: $open_tickets
 
 Commit your work on the current branch in focused commits with clear messages. Do not
 add Co-Authored-By or any other attribution lines. Do not push, open PRs, switch
-branches, or rewrite history; the pipeline does that. Leave the worktree clean.
+branches, or rewrite history; the pipeline does that. Leave nothing untracked outside
+git-ignored paths.
+
+Some commands are denied to every agent; a denied call only wastes a turn, so don't
+retry it in another form:
+- Recursive deletes (`rm -r`, `Remove-Item`). Put throwaway files and probe folders in
+  a git-ignored directory from the start (see `.gitignore`, e.g. `target/` or
+  `.scratch/`) and leave them there. Delete single files with plain `rm`.
+- `git checkout`/`switch`: undo an edit with `git restore <file>`.
+- `gh`: the task and every comment on it are already in this prompt.
 
 ## Finish
 
