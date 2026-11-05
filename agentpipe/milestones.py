@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from agentpipe.config import Milestone
+from agentpipe.status import TICKET_CHANGE
 from agentpipe.tasks import parse_tasks
 
 CHANGES = Path("openspec") / "changes"
@@ -27,6 +28,20 @@ def next_due(milestones: list[Milestone], released: set[str], checkout: Path) ->
             continue
         return m if all(change_done(checkout, c) for c in m.changes) else None
     return None
+
+
+def rank(milestones: list[Milestone], change: str) -> int:
+    """Scheduling priority of a task in ``change``: lower runs first.
+
+    Work toward an earlier milestone goes before work toward a later one, and work in no milestone
+    goes last. Tickets rank first, since they fix what blocks the work in progress.
+    """
+    if change == TICKET_CHANGE:
+        return -1
+    for i, m in enumerate(milestones):
+        if change in m.changes:
+            return i
+    return len(milestones)
 
 
 def task_paths(m: Milestone) -> list[str]:

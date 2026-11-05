@@ -89,6 +89,15 @@ def test_next_due_goes_in_order(tmp_path):
     assert milestones.next_due(ms, {"m1", "m2"}, tmp_path).tag == "m3"  # archived counts as done
 
 
+def test_rank_puts_earlier_milestones_first():
+    ms = [Milestone("m1", "", ["b", "c"]), Milestone("m2", "", ["a"])]
+    ranks = {c: milestones.rank(ms, c) for c in ("a", "b", "c", "loose", "ticket")}
+    assert ranks == {"ticket": -1, "b": 0, "c": 0, "a": 1, "loose": 2}
+    keys = ["a/1.1", "loose/1.1", "c/2.1", "b/1.2", "ticket/7"]
+    assert sorted(keys, key=lambda k: milestones.rank(ms, k.split("/")[0])) == \
+        ["ticket/7", "c/2.1", "b/1.2", "a/1.1", "loose/1.1"]
+
+
 def test_release_merges_the_cut_commit_into_main_and_tags_it(repo):
     tmp_path, work, origin, cut = repo
     p, gh = make(tmp_path, work)

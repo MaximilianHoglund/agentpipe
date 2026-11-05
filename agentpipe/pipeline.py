@@ -520,9 +520,13 @@ class Pipeline:
                     if f"review-{i}" not in {j.slot for j in self.jobs.values()}]
         merging = any(j.kind == "merge" for j in self.jobs.values())
 
+        def priority(k: str) -> tuple:
+            # Milestone work first (the next test build), then by task key.
+            return milestones.rank(self.t.milestones, self.tasks[k].change), key_sort(k)
+
         def by_status(s: Status) -> list[str]:
             return sorted((k for k, i in issues.items()
-                           if status_from_labels(i["labels"]) is s and k not in self.jobs), key=key_sort)
+                           if status_from_labels(i["labels"]) is s and k not in self.jobs), key=priority)
 
         for s in (Status.PENDING_APPROVAL, Status.CHANGES_REQUESTED, Status.APPROVED):
             for key in by_status(s):
