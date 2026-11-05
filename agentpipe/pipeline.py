@@ -16,7 +16,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from agentpipe import milestones, proc, review, syncplan
+from agentpipe import milestones, proc, review, service, syncplan
 from agentpipe.claude import CAPPED, MAX_TURNS, Claude, ClaudeResult
 from agentpipe.config import Agent, Config, Milestone, Target
 from agentpipe.deps import (PLAN_SCHEMA, Plan, PlanError, key_sort, merge_plans, stale_keys, text_hash,
@@ -639,23 +639,36 @@ class Pipeline:
     def pid_file(self) -> Path:
         return self.t.work_dir / "dispatcher.pid"
 
+    def stop_reason(self) -> str | None:
+        """Why the dispatcher should drain and exit now: a stop request, or its watcher closed."""
+        if self.stop_file.exists():
+            return "stop requested"
+        live = service.live_watchers(self.t.work_dir)
+        if live:
+            self.had_watcher = True
+        elif self.had_watcher:
+            return "watcher window closed"
+        return None
+
     def run_forever(self, once: bool = False) -> None:
         self.stop_file.unlink(missing_ok=True)  # a stale request must not stop a new run
         self.pid_file.write_text(str(os.getpid()), encoding="utf-8")
+        self.had_watcher = False
         self.gh.ensure_labels()
         self.log(f"running (pid {os.getpid()}); implementers={self.cfg.max_implementers} "
                  f"reviewers={self.cfg.max_reviewers}")
         try:
             while True:
-                if not self.stopping and self.stop_file.exists():
+                reason = None if self.stopping else self.stop_reason()
+                if reason:
                     self.stopping = True
-                    self.log(f"stop requested: starting nothing new, waiting for {len(self.jobs)} running job(s)")
+                    self.log(f"{reason}: starting nothing new, waiting for {len(self.jobs)} running job(s)")
                 self.tick()
                 if (once or self.stopping) and not self.jobs:
                     break
                 # Sleep in short steps so a stop request is noticed within seconds.
                 deadline = time.time() + (self.cfg.poll_seconds if not once else 5)
-                while time.time() < deadline and (self.stopping or not self.stop_file.exists()):
+                while time.time() < deadline and (self.stopping or not self.stop_reason()):
                     time.sleep(min(2.0, max(deadline - time.time(), 0)))
             self.log("stopped")
         except KeyboardInterrupt:

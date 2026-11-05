@@ -30,7 +30,7 @@ uv run agentpipe plan dota          # infer blockers; prints the graph; no GitHu
 uv run agentpipe sync dota --dry-run
 uv run agentpipe sync dota          # create issues, labels, blocked-by links
 uv run agentpipe run dota           # dispatcher in this console: implement, review, merge, repeat
-uv run agentpipe start dota         # the same, hidden in the background (no window)
+uv run agentpipe start dota         # the same, hidden, plus a watcher window; closing it stops the dispatcher
 uv run agentpipe stop dota          # background one: finish running agents, then exit (--now kills)
 uv run agentpipe watch dota         # live view: dispatcher state, each agent's latest steps
 uv run agentpipe denials dota       # review tool calls agents were refused
@@ -39,7 +39,9 @@ uv run agentpipe status dota
 
 `run` also syncs every `sync_seconds`, so `sync` on its own is only for looking first.
 Ctrl-C (for `run`) or `stop` (for `start`) stops scheduling and waits for running agents;
-everything resumes on restart. A hidden dispatcher's console output and any crash
+everything resumes on restart. Closing the watcher window that `start` opened acts like
+`stop` once no such window is left; `start --no-watch` and a plain `watch` aren't tied to
+the dispatcher. A hidden dispatcher's console output and any crash
 traceback go to `logs/dispatcher.out`, and crashes are also logged to `pipeline.log`.
 
 Optional per target: `extra_tools` (added to the implementer's and reviewer's allowed tools)

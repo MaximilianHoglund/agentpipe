@@ -5,6 +5,11 @@ stderr appended to ``logs/dispatcher.out``. The dispatcher writes ``dispatcher.p
 while it runs. ``agentpipe stop`` creates a ``stop`` file: the dispatcher starts nothing
 new, lets running agents finish, and exits. ``--now`` kills it and its agents instead
 (work resumes on the next start, minus the killed agents' unsaved progress).
+
+The watcher window ``start`` opens is linked: once the dispatcher has seen a linked
+watcher, closing the last one stops it the same way as ``stop`` (Max closes the window
+expecting the pipeline to stop). ``start --no-watch``, ``run`` and plain ``watch`` aren't
+linked.
 """
 
 from __future__ import annotations
@@ -75,7 +80,7 @@ def open_watcher(target: str, config: Path) -> int | None:
     """
     if os.name != "nt":
         return None
-    cmd = [sys.executable, "-m", "agentpipe", "--config", str(config), "watch", target]
+    cmd = [sys.executable, "-m", "agentpipe", "--config", str(config), "watch", target, "--linked"]
     cwd = Path(__file__).resolve().parent.parent
     base = subprocess.CREATE_NEW_CONSOLE
     for flags in (base | subprocess.CREATE_BREAKAWAY_FROM_JOB, base):
@@ -84,6 +89,37 @@ def open_watcher(target: str, config: Path) -> int | None:
         except OSError:
             continue
     return None
+
+
+def watchers_dir(work_dir: Path) -> Path:
+    return work_dir / "watchers"
+
+
+def register_watcher(work_dir: Path) -> Path:
+    """A linked watcher (the window ``start`` opens) records its pid here.
+
+    The file stays behind when the window is closed; the dispatcher tells by the pid.
+    """
+    d = watchers_dir(work_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / str(os.getpid())
+    f.write_text("", encoding="utf-8")
+    return f
+
+
+def live_watchers(work_dir: Path) -> int:
+    """Count live linked watchers, deleting the files of dead ones."""
+    n = 0
+    for f in watchers_dir(work_dir).glob("*"):
+        try:
+            alive = is_alive(int(f.name))
+        except ValueError:
+            alive = False
+        if alive:
+            n += 1
+        else:
+            f.unlink(missing_ok=True)
+    return n
 
 
 def request_stop(work_dir: Path) -> None:

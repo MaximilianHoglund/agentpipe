@@ -244,6 +244,37 @@ def test_stop_file_drains_running_jobs_then_exits(pl):
     assert not p.stop_file.exists() and not p.pid_file.exists()
 
 
+def test_closing_the_linked_watcher_stops_the_dispatcher(pl, monkeypatch):
+    from agentpipe import service
+    p, gh = pl
+    p.cfg.poll_seconds = 0
+    lines, ticks = [], []
+    p._log = lines.append
+    wdir = service.watchers_dir(p.t.work_dir)
+    wdir.mkdir(parents=True, exist_ok=True)
+    (wdir / "4242").write_text("", encoding="utf-8")
+    alive = {4242: True}
+    monkeypatch.setattr(service, "is_alive", lambda pid: alive.get(pid, False))
+
+    def tick():
+        ticks.append(1)
+        if len(ticks) == 3:
+            alive[4242] = False  # the window is closed
+        assert len(ticks) < 10
+
+    p.tick = tick
+    p.run_forever()
+    assert any("watcher window closed: starting nothing new" in l for l in lines)
+    assert lines[-1].endswith("stopped")
+    assert not (wdir / "4242").exists()
+
+
+def test_no_linked_watcher_means_no_watcher_stop(pl):
+    p, gh = pl
+    p.had_watcher = False
+    assert p.stop_reason() is None
+
+
 def test_is_alive_tells_live_from_dead_pids():
     from agentpipe import service
     assert service.is_alive(os.getpid())
