@@ -240,10 +240,13 @@ def find_cycle(edges: dict[str, list[str]]) -> list[str] | None:
 
 
 def classify(task: Task, plan: Plan, done_keys: set[str]) -> str:
-    """Queue status for a task nobody has claimed: ready, blocked or needs-human."""
+    """Queue status for a task nobody has claimed: ready, blocked or needs-human.
+
+    A non-autonomous task asks the human only once its blockers are done: there is nothing to
+    decide or play before then."""
     d = plan.get(task.key)
     if not d.autonomous:
-        return "needs-human"
+        return "needs-human" if all(b in done_keys for b in d.blocked_by) else "blocked"
     group = plan.batch_of(task.key, done_keys)
     if group[0] != task.key:
         return "blocked"  # a batch follower: its leader's PR does it

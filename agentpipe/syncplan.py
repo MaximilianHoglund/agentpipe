@@ -74,7 +74,10 @@ def compute(tasks: list[Task], plan: Plan, issues: dict[str, dict],
         reason = plan.get(t.key).human_reason if new is Status.NEEDS_DECISION else ""
         if issue is None:
             actions.append(Create(t.key, new, reason))
-        elif issue["state"].upper() == "OPEN" and (cur is None or cur in GRAPH_OWNED) and new != cur:
+        elif issue["state"].upper() == "OPEN" and new != cur and (
+                cur is None or cur in GRAPH_OWNED
+                # The pipeline asked the human before the task's blockers were done: take it back.
+                or (cur is Status.NEEDS_DECISION and t.key in flagged and new is Status.BLOCKED_BY_TASK)):
             actions.append(SetStatus(t.key, issue["number"], cur, new, reason))
     # Ready work first, so agents can start while the rest is still being applied.
     return sorted(actions, key=lambda a: not makes_ready(a))

@@ -60,6 +60,22 @@ def test_non_autonomous_task_is_flagged_with_reason():
     assert syncplan.Create("c/1.2", S.NEEDS_DECISION, "needs an API key") in actions
 
 
+def test_non_autonomous_task_waits_for_its_blockers_before_asking():
+    tasks, _ = setup()
+    plan = Plan("fp", {"c/1.2": TaskDeps(), "c/1.3": TaskDeps(["c/1.2"], False, "play the build")})
+    assert syncplan.Create("c/1.3", S.BLOCKED_BY_TASK) in syncplan.compute(tasks, plan, {}, set(), set())
+    # Flagged too early by an older pipeline: taken back, not treated as a human clearing it.
+    early = {"c/1.2": issue(1, S.IN_PROGRESS), "c/1.3": issue(2, S.NEEDS_DECISION)}
+    assert syncplan.compute(tasks, plan, early, {"c/1.3"}, set()) == [
+        syncplan.SetStatus("c/1.3", 2, S.NEEDS_DECISION, S.BLOCKED_BY_TASK)]
+    # A needs decision the pipeline didn't set (an agent asked mid-task) is left alone.
+    assert syncplan.compute(tasks, plan, early, set(), set()) == []
+    # Once the blocker is done, it asks.
+    done = {"c/1.2": issue(1, S.FINISHED, "CLOSED"), "c/1.3": issue(2, S.BLOCKED_BY_TASK)}
+    assert syncplan.compute(tasks, plan, done, set(), set()) == [
+        syncplan.SetStatus("c/1.3", 2, S.BLOCKED_BY_TASK, S.NEEDS_DECISION, "play the build")]
+
+
 def test_human_clearing_a_flag_is_respected_on_later_syncs():
     tasks, _ = setup()
     plan = Plan("fp", {"c/1.2": TaskDeps(["c/1.1"], False, "needs an API key"), "c/1.3": TaskDeps()})

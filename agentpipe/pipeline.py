@@ -400,6 +400,14 @@ class Pipeline:
             self.log(f"#{a.number} {self.what(a.key)}: {a.old.value if a.old else '-'} -> {a.new.value}")
             if a.new is Status.NEEDS_DECISION:
                 self.flag(gh, a.key, a.number, a.reason)
+            elif a.old is Status.NEEDS_DECISION:
+                # Taken back from the human until its blockers are done; it is flagged again then.
+                with st.lock:
+                    if a.key in st.data["flagged"]:
+                        st.data["flagged"].remove(a.key)
+                gh.comment(a.number, review.bot(
+                    "**Not ready for input yet.** This waits for the tasks it is blocked by; "
+                    "the pipeline will ask again once they are done."))
         elif isinstance(a, syncplan.Close):
             gh.set_status(a.number, Status.FINISHED, a.old)
             gh.comment(a.number, review.bot("Ticked in tasks.md outside the pipeline; closing."))
