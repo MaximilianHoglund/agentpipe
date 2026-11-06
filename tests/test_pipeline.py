@@ -363,6 +363,24 @@ def test_clean_workspace_crates_cleans_only_members(pl, tmp_path, monkeypatch):
     assert calls == []
 
 
+def test_clean_workspace_crates_prunes_checkout_scratch(pl, tmp_path, monkeypatch):
+    p, _ = pl
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "Cargo.toml").write_text('[workspace]\nmembers = []\nresolver = "2"\n')
+    tmp = p.t.work_dir / "target" / "impl-0" / "tmp"
+    (tmp / "checkout-abc" / "target").mkdir(parents=True)
+    (tmp / "other").mkdir()
+    monkeypatch.setattr(proc_mod, "run", lambda *a, **kw: proc_mod.Result(0, '{"packages": []}', ""))
+    p.clean_workspace_crates(ws, "impl-0")
+    assert (tmp / "checkout-abc").exists()  # off by default
+    p.t.clean_workspace_crates = True
+    p.clean_workspace_crates(ws, "impl-0")
+    assert not (tmp / "checkout-abc").exists()
+    assert (tmp / "other").exists()
+    p.clean_workspace_crates(ws, "impl-1")  # slot without a target dir: no error
+
+
 def test_approved_ticket_waits_for_the_tasks_it_names(pl):
     p, gh = pl
     n = gh.add(TICKET_MARKER + "\nNeeds c/1.2 first.", S.PENDING_IMPLEMENTATION, extra=("kind: defect",))

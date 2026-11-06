@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import time
 import traceback
@@ -1063,6 +1064,7 @@ class Pipeline:
         """Drop the workspace's own crates from the slot's shared target dir (see config)."""
         if not self.t.clean_workspace_crates or not (cwd / "Cargo.toml").exists():
             return
+        self.prune_checkout_scratch(slot)
         env = self.env(slot)
         try:
             meta = json.loads(proc.run(["cargo", "metadata", "--no-deps", "--format-version", "1"],
@@ -1073,6 +1075,16 @@ class Pipeline:
                          cwd, env=env, timeout=300)
         except (proc.CommandError, OSError, ValueError, KeyError) as e:
             self.log(f"could not clean workspace crates in {slot}: {str(e)[-200:]}")
+
+    def prune_checkout_scratch(self, slot: str) -> None:
+        """Delete per-checkout test scratch (`CARGO_TARGET_TMPDIR/checkout-*`, arpg ticket #307).
+
+        One job uses a slot at a time, so nothing in this slot's target dir is in use when a gate
+        or implementer starts; tests recreate their own folder. Without this, every worktree that
+        ever ran in the slot leaves a folder behind, some holding whole nested target trees."""
+        tmp = self.t.work_dir / "target" / slot / "tmp"
+        for d in tmp.glob("checkout-*") if tmp.is_dir() else ():
+            shutil.rmtree(d, ignore_errors=True)
 
     def job_review(self, t: Task, issue: int, pr: dict, slot: str) -> None:
         sha = pr["headRefOid"]
