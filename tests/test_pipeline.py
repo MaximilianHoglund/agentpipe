@@ -393,3 +393,33 @@ def test_usage_near_a_limit_pauses_new_work_until_the_window_resets(pl):
     p.state.data["rate"] = {"five_hour": {"utilization": 1.0, "resetsAt": later, "status": "rejected"}}
     p.pause("You've hit your 5-hour limit")
     assert p.state.data["paused_until"] == later + 60
+
+
+def test_config_edits_apply_without_restart(pl, tmp_path, monkeypatch):
+    p, _ = pl
+    from agentpipe import config as config_mod
+    path = tmp_path / "pipeline.toml"
+    path.write_text("v1", encoding="utf-8")
+    p.watch_config(path, {"max_reviewers": 4})
+    assert p.cfg.max_reviewers == 4
+
+    def edited(_path):
+        if path.read_text(encoding="utf-8") == "broken":
+            raise ValueError("bad toml")
+        new_t = dataclasses.replace(p.t, test="cargo test", github_repo="o/other")
+        return dataclasses.replace(p.cfg, targets={"t": new_t}, max_implementers=5,
+                                   max_reviewers=1, claude_bin="other-claude")
+    monkeypatch.setattr(config_mod, "load", edited)
+
+    path.write_text("v2", encoding="utf-8")
+    os.utime(path, (time.time() + 5, time.time() + 5))
+    p.reload_config()
+    assert p.cfg.max_implementers == 5
+    assert p.cfg.max_reviewers == 4  # the command-line override still wins
+    assert p.t.test == "cargo test"
+    assert p.cfg.claude_bin == "claude" and p.t.github_repo == "o/r"  # restart-only settings kept
+
+    path.write_text("broken", encoding="utf-8")
+    os.utime(path, (time.time() + 10, time.time() + 10))
+    p.reload_config()
+    assert p.cfg.max_implementers == 5  # a broken file keeps the current settings

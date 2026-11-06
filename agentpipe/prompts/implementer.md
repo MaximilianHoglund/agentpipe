@@ -71,11 +71,12 @@ add Co-Authored-By or any other attribution lines. Do not push, open PRs, switch
 branches, or rewrite history; the pipeline does that. Leave nothing untracked outside
 git-ignored paths.
 
+You may delete files and folders, recursively too, but only inside your working
+directory; never delete anything outside it. Put throwaway files and probe folders in a
+git-ignored directory (see `.gitignore`, e.g. `target/` or `.scratch/`).
+
 Some commands are denied to every agent; a denied call only wastes a turn, so don't
 retry it in another form:
-- Recursive deletes (`rm -r`, `Remove-Item`). Put throwaway files and probe folders in
-  a git-ignored directory from the start (see `.gitignore`, e.g. `target/` or
-  `.scratch/`) and leave them there. Delete single files with plain `rm`.
 - `git checkout`/`switch`: undo an edit with `git restore <file>`.
 - `gh`: the task and every comment on it are already in this prompt.
 

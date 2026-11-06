@@ -34,6 +34,29 @@ MERGE_ATTEMPTS = 3  # tries to bring a behind branch up to date and merge it
 MERGE_RETRY_SECONDS = 15  # lets GitHub finish computing mergeability after a push
 
 
+VERDICT_WORDS = {review.APPROVE: "APPROVED", review.REQUEST_CHANGES: "REJECTED, changes requested",
+                 review.TESTS_FAILED: "REJECTED, test gate failed",
+                 review.CONFLICT: "REJECTED, conflicts with the base branch"}
+
+
+def review_line(what: str, pr: int, v: dict, round_: int, max_rounds: int) -> str:
+    """The dispatcher's one line per review: the outcome in words, what blocks, and why."""
+    blocking = sum(1 for f in v["findings"] if f.get("severity") == "blocking")
+    nits = len(v["findings"]) - blocking
+    counts = ", ".join(f"{n} {label}" for n, label in ((blocking, "blocking"), (nits, "nit")) if n)
+    if v["verdict"] == review.APPROVE:
+        nxt = "to merge"
+    elif v["verdict"] in review.COUNTED and round_ >= max_rounds:
+        nxt = "out of rounds, needs a decision"
+    else:
+        nxt = "back to the implementer"
+    summary = " ".join(v.get("summary", "").split())
+    summary = summary if len(summary) <= 140 else summary[:137].rstrip() + "..."
+    return (f"review {what} PR #{pr}: {VERDICT_WORDS.get(v['verdict'], v['verdict'])}"
+            f" (round {round_}/{max_rounds}{', ' + counts if counts else ''}); {nxt}"
+            + (f". {summary}" if summary else ""))
+
+
 def fence(text: str) -> str:
     return "\n\n```\n" + text + "\n```"
 
@@ -77,6 +100,16 @@ class State:
             replace_retrying(tmp, self.path)
 
 
+def clear_pause(state: State) -> None:
+    """Drop a usage pause and the usage it was based on. A paused dispatcher runs no agents, so
+    it never learns that limits changed (a plan upgrade); the next run reports fresh usage and
+    re-pauses if it is still near a limit."""
+    with state.lock:
+        state.data["paused_until"] = 0.0
+        state.data.pop("rate", None)
+    state.save()
+
+
 def replace_retrying(src: Path, dst: Path, attempts: int = 50, delay: float = 0.1) -> None:
     """os.replace, retried: on Windows it fails with access denied while any other
     process (agentpipe watch, an editor, antivirus) has ``dst`` open, even just to read."""
@@ -116,8 +149,66 @@ class Pipeline:
         self.last_sync = 0.0
         self.jobs: dict[str, Job] = {}
         self.reviewed: dict[int, str] = {}  # PR number -> head sha already reviewed
-        self.pool = ThreadPoolExecutor(max_workers=cfg.max_implementers + cfg.max_reviewers + 2)
+        # Threads start lazily, so a generous cap costs nothing and lets a config reload
+        # raise the slot counts without replacing the pool.
+        self.pool = ThreadPoolExecutor(max_workers=64)
         self.stopping = False
+        # Set by `agentpipe run` so edits to pipeline.toml apply without a restart.
+        self.config_path: Path | None = None
+        self.overrides: dict[str, object] = {}  # command-line settings that beat the file
+        self.config_mtime = 0.0
+
+    # Settings read once at startup; changing them in the file still needs a restart.
+    RESTART_ONLY = ("claude_bin", "gh_bin", "agent_timeout", "mcp_servers")
+    RESTART_ONLY_TARGET = ("repo_root", "github_repo", "work_dir")
+
+    def watch_config(self, path: Path, overrides: dict[str, object]) -> None:
+        self.config_path, self.overrides = path, overrides
+        self.config_mtime = path.stat().st_mtime
+        for k, v in overrides.items():
+            setattr(self.cfg, k, v)
+
+    def reload_config(self) -> None:
+        """Apply pipeline.toml edits on the fly; a broken file keeps the current settings."""
+        if self.config_path is None:
+            return
+        try:
+            mtime = self.config_path.stat().st_mtime
+        except OSError:
+            return
+        if mtime == self.config_mtime:
+            return
+        self.config_mtime = mtime
+        from agentpipe import config as config_mod
+        try:
+            new = config_mod.load(self.config_path)
+            target = new.targets[self.t.name]
+        except Exception as e:
+            self.log(f"config reload failed, keeping current settings: {e!r}")
+            return
+        for k, v in self.overrides.items():
+            setattr(new, k, v)
+        old, old_t = self.cfg, self.t
+        stale = [k for k in self.RESTART_ONLY if getattr(new, k) != getattr(old, k)]
+        stale += [f"targets.{self.t.name}.{k}" for k in self.RESTART_ONLY_TARGET
+                  if getattr(target, k) != getattr(old_t, k)]
+        changed = [f"{k}={getattr(new, k)!r}" for k in ("max_implementers", "max_reviewers", "max_rounds",
+                                                         "poll_seconds", "sync_seconds", "throttle",
+                                                         "limit_backoff_seconds", "max_batch")
+                   if getattr(new, k) != getattr(old, k)]
+        if new.agents != old.agents:
+            changed.append("agents")
+        if target != old_t:
+            changed.append(f"targets.{self.t.name}")
+        for k in self.RESTART_ONLY:
+            setattr(new, k, getattr(old, k))
+        for k in self.RESTART_ONLY_TARGET:
+            setattr(target, k, getattr(old_t, k))
+        self.cfg, self.t = new, target
+        if changed:
+            self.log("config reloaded: " + ", ".join(changed))
+        if stale:
+            self.log("config: these take effect only after a restart: " + ", ".join(stale))
 
     def log(self, msg: str) -> None:
         line = time.strftime("%H:%M:%S ") + f"[{self.t.name}] " + msg
@@ -125,6 +216,22 @@ class Pipeline:
         self.logs.mkdir(parents=True, exist_ok=True)
         with open(self.logs / "pipeline.log", "a", encoding="utf-8") as f:
             f.write(time.strftime("%Y-%m-%d ") + line + "\n")
+
+    def about(self, key: str, width: int = 60) -> str:
+        """A task's text, shortened for a log line, so a key or issue number says what it is."""
+        t = self.tasks.get(key)
+        text = " ".join(t.text.split()) if t else ""
+        return text if len(text) <= width else text[:width - 3].rstrip() + "..."
+
+    def what(self, key: str) -> str:
+        """`key "short description"`, or the bare key for a task the dispatcher doesn't know."""
+        about = self.about(key)
+        return f'{key} "{about}"' if about else key
+
+    def issue_ref(self, number: int) -> str:
+        """`#n key "short description"` for an open task issue, else just `#n`."""
+        key = next((k for k, i in self.issue_map.items() if i["number"] == number), None)
+        return f"#{number} {self.what(key)}" if key else f"#{number}"
 
     def log_denials(self, run: str, denials: list[dict]) -> None:
         """One dispatcher line per run with denied tool calls; `agentpipe denials` has the detail."""
@@ -284,19 +391,19 @@ class Pipeline:
                     f"Section: {t.section}  \nSpec: `openspec/changes/{t.change}/`\n")
             n = gh.create_issue(title, body, a.status)
             issues[a.key] = {"number": n, "state": "OPEN", "labels": [a.status.label]}
-            self.log(f"#{n} created [{a.status.value}] {t.key}")
+            self.log(f"#{n} created [{a.status.value}] {self.what(t.key)}")
             if a.status is Status.NEEDS_DECISION:
                 self.flag(gh, a.key, n, a.reason)
         elif isinstance(a, syncplan.SetStatus):
             gh.set_status(a.number, a.new, a.old)
-            self.log(f"#{a.number} {a.key}: {a.old.value if a.old else '-'} -> {a.new.value}")
+            self.log(f"#{a.number} {self.what(a.key)}: {a.old.value if a.old else '-'} -> {a.new.value}")
             if a.new is Status.NEEDS_DECISION:
                 self.flag(gh, a.key, a.number, a.reason)
         elif isinstance(a, syncplan.Close):
             gh.set_status(a.number, Status.FINISHED, a.old)
             gh.comment(a.number, review.bot("Ticked in tasks.md outside the pipeline; closing."))
             gh.close_issue(a.number)
-            self.log(f"#{a.number} {a.key} closed (ticked by hand)")
+            self.log(f"#{a.number} {self.what(a.key)} closed (ticked by hand)")
         elif isinstance(a, syncplan.Cleared):
             with st.lock:
                 st.data["flagged"].remove(a.key)
@@ -324,7 +431,7 @@ class Pipeline:
             st["waits_for"] = waiting
             self.state.save()
             if waiting:
-                self.log(f"{key} waits for {', '.join(waiting)} to merge")
+                self.log(f"{self.what(key)} waits for {', '.join(self.what(w) for w in waiting)} to merge")
         return waiting
 
     def open_tickets(self) -> str:
@@ -395,7 +502,9 @@ class Pipeline:
                 except proc.CommandError as e:
                     # A link GitHub refuses (e.g. a cycle through a closed issue) only
                     # mirrors the plan; the plan itself still orders the work.
-                    self.log(f"#{issue['number']}: could not link blocked-by #{n}: {str(e)[-200:]}")
+                    blocker = next((k for k, i in issues.items() if i["number"] == n), None)
+                    self.log(f"#{issue['number']} {self.what(key)}: could not link blocked-by "
+                             f"#{n}{' ' + self.what(blocker) if blocker else ''}: {str(e)[-200:]}")
             st.data["links"][key] = want
             st.save()
 
@@ -430,6 +539,11 @@ class Pipeline:
         self.reap()
         if self.stopping:
             return
+        self.reload_config()
+        if self.resume_file.exists():
+            self.resume_file.unlink(missing_ok=True)
+            clear_pause(self.state)
+            self.log("resume requested: usage pause cleared; the next agent run reports fresh usage")
         if time.time() < self.state.data["paused_until"]:
             return
         try:
@@ -560,7 +674,8 @@ class Pipeline:
 
     def start(self, kind: str, key: str, slot: str, issue: dict, pr: dict | None) -> None:
         fn = getattr(self, f"job_{kind}")
-        self.log(f"start {kind} {key} (#{issue['number']}) on {slot}")
+        about = self.about(key)
+        self.log(f"start {kind} {key} (#{issue['number']}) on {slot}" + (f": {about}" if about else ""))
         fut = self.pool.submit(fn, self.tasks[key], issue["number"], pr, slot)
         self.jobs[key] = Job(kind, key, slot, fut)
 
@@ -595,7 +710,7 @@ class Pipeline:
         now = time.time()
         # A known window reset beats a guess; the backoff covers capacity errors with none.
         resets = [w.get("resetsAt", 0) for w in (self.state.data.get("rate") or {}).values()
-                  if isinstance(w, dict) and (w.get("status") != "allowed" or w.get("utilization", 0) >= 1)]
+                  if isinstance(w, dict) and (w.get("status") == "rejected" or w.get("utilization", 0) >= 1)]
         until = max([now + self.cfg.limit_backoff_seconds] + [r + 60 for r in resets if r > now])
         with self.state.lock:
             self.state.data["paused_until"] = max(until, self.state.data["paused_until"])
@@ -632,12 +747,17 @@ class Pipeline:
         self.gh.comment(number, review.bot(
             f"**Needs a decision.** {why}\n\nWhen resolved, set the label to the status the task "
             f"should resume from (usually `{Status.PENDING_IMPLEMENTATION.label}`)."))
-        self.log(f"#{number} -> needs decision: {why.splitlines()[0][:120]}")
+        self.log(f"{self.issue_ref(number)} -> needs decision:{why.splitlines()[0][:120]}")
 
     @property
     def stop_file(self) -> Path:
         """`agentpipe stop` creates this; the dispatcher then drains its jobs and exits."""
         return self.t.work_dir / "stop"
+
+    @property
+    def resume_file(self) -> Path:
+        """`agentpipe resume` creates this; the dispatcher then drops its usage pause."""
+        return self.t.work_dir / "resume"
 
     @property
     def pid_file(self) -> Path:
@@ -901,7 +1021,7 @@ class Pipeline:
             title = (f"{t.key}: {t.text}" if len(tasks) == 1 else
                      f"{t.change} {', '.join(x.id for x in tasks)}: {t.text}")
             n = self.gh.create_pr(t.branch, self.t.base, title[:120], body)
-            self.log(f"PR #{n} opened for {t.key}" + (f" (batch of {len(tasks)})" if len(tasks) > 1 else ""))
+            self.log(f"PR #{n} opened for {self.what(t.key)}" +(f" (batch of {len(tasks)})" if len(tasks) > 1 else ""))
         else:
             self.gh.comment(pr["number"], review.bot(f"**Revised.**\n\n{out['summary']}\n\n**Tests:** {out['tests']}"))
         self.gh.set_status(issue, Status.PENDING_APPROVAL, cur)
@@ -950,6 +1070,7 @@ class Pipeline:
                     return self.capped(t, issue, Status.PENDING_APPROVAL, e.result, "reviewer")
             self.gh.comment(pr["number"], review.render_review(v, sha, round_, self.cfg.max_rounds))
             self.reviewed[pr["number"]] = sha
+            self.log(review_line(self.what(t.key), pr["number"], v, round_, self.cfg.max_rounds))
             if v["verdict"] == review.APPROVE:
                 self.gh.set_status(issue, Status.APPROVED, Status.PENDING_APPROVAL)
             elif round_ >= self.cfg.max_rounds:
@@ -957,7 +1078,6 @@ class Pipeline:
                                  f"The reviewer rejected PR #{pr['number']} {round_} times; see the PR.")
             else:
                 self.gh.set_status(issue, Status.CHANGES_REQUESTED, Status.PENDING_APPROVAL)
-            self.log(f"review {t.key} PR #{pr['number']}: {v['verdict']} (round {round_})")
         finally:
             self.git.worktree_remove(rv)
 
@@ -1041,14 +1161,14 @@ class Pipeline:
             except proc.CommandError as e:
                 if "not mergeable" not in str(e).lower():
                     raise
-                self.log(f"merge {t.key} PR #{pr['number']}: not mergeable yet (attempt {attempt + 1}); retrying")
+                self.log(f"merge {self.what(t.key)} PR #{pr['number']}: not mergeable yet (attempt {attempt + 1}); retrying")
         else:
             return self.merge_conflict(issue, pr, f"GitHub still reports the branch as not mergeable after "
                                                   f"{MERGE_ATTEMPTS} attempts to bring it up to date with "
                                                   f"`{self.base_ref()}`; rebase it onto `{self.base_ref()}` "
                                                   f"and resolve the conflicts.")
         tasks = self.batch(t)
-        self.log(f"merged PR #{pr['number']} ({', '.join(x.key for x in tasks)})")
+        self.log(f"merged PR #{pr['number']}: {', '.join(self.what(x.key) for x in tasks)}")
         self.gh.set_status(issue, Status.FINISHED, Status.APPROVED)
         self.gh.close_issue(issue)  # "Closes #n" normally does this; harmless if already closed
         for k, n in self.state.task(t.key).get("batch_issues", {}).items():

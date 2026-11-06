@@ -99,3 +99,9 @@ def test_steps_without_an_agent_show_progress_and_flag_stalls(tmp_path, monkeypa
     assert "POSSIBLY STALLED" in text
     st = watch.parse_log((work / "logs" / "pipeline.log").read_text().splitlines())
     assert {j.key: j.phase for j in st.jobs}["c/1.1"] == "test gate"
+
+
+def test_parse_log_reads_the_task_description_on_a_start_line():
+    st = watch.parse_log(["2026-11-03 12:00:01 [t] start implement c/1.1 (#5) on impl-0: Add a combat log: v2"])
+    [job] = st.jobs
+    assert (job.slot, job.issue, job.about) == ("impl-0", 5, "Add a combat log: v2")

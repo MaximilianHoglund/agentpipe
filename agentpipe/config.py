@@ -86,7 +86,7 @@ class Config:
     limit_backoff_seconds: int = 1800
     # Start nothing new once a usage window (as agents report it) reaches this share; resume
     # when it resets. Running jobs finish, so leave them headroom below 1.0.
-    throttle: dict[str, float] = field(default_factory=lambda: {"five_hour": 0.85, "seven_day": 0.95})
+    throttle: dict[str, float] = field(default_factory=lambda: {"five_hour": 0.85, "seven_day": 0.93})
     agent_timeout: int = 4 * 3600
     # Resume an agent's last session only if it ended this recently; an older one is
     # re-cached in full and carries stale context, so start fresh with a summary instead.
@@ -164,7 +164,7 @@ def load(path: Path) -> Config:
         poll_seconds=run.get("poll_seconds", 60),
         sync_seconds=run.get("sync_seconds", 600),
         limit_backoff_seconds=run.get("limit_backoff_seconds", 1800),
-        throttle={k: float(v) for k, v in run.get("throttle", {"five_hour": 0.85, "seven_day": 0.95}).items()},
+        throttle={k: float(v) for k, v in run.get("throttle", {"five_hour": 0.85, "seven_day": 0.93}).items()},
         agent_timeout=run.get("agent_timeout", 4 * 3600),
         resume_within_seconds=run.get("resume_within_seconds", 3000),
         max_batch=run.get("max_batch", 4),

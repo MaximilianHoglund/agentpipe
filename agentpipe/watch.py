@@ -24,7 +24,8 @@ from pathlib import Path
 PROJECTS = Path.home() / ".claude" / "projects"
 
 _LINE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[[^\]]+\] (.*)$")
-_START_RE = re.compile(r"^start (\w+) (\S+) \(#(\d+)\) on (\S+)$")
+# Newer dispatchers append ": <short task description>".
+_START_RE = re.compile(r"^start (\w+) (\S+) \(#(\d+)\) on (\S+?)(?:: (.*))?$")
 _PHASE_RE = re.compile(r"^phase (\S+): (.*)$")
 _END_RE = re.compile(r"^(?:done (\w+) (\S+)|(\w+) (\S+) crashed: .*)$")
 
@@ -38,6 +39,7 @@ class Job:
     started: float  # epoch seconds
     phase: str = ""  # latest "phase <key>: ..." line, e.g. "mutation testing"
     phase_at: float = 0.0
+    about: str = ""  # short task description from the start line
 
 
 @dataclass
@@ -62,8 +64,8 @@ def parse_log(lines: list[str], recent: int = 6) -> LogState:
         if msg.startswith("running;") or msg.startswith("running (pid"):
             jobs.clear()  # a (re)started dispatcher has no jobs yet
         elif s := _START_RE.match(msg):
-            kind, key, issue, slot = s.groups()
-            jobs[key] = Job(kind, key, int(issue), slot, last_time)
+            kind, key, issue, slot, about = s.groups()
+            jobs[key] = Job(kind, key, int(issue), slot, last_time, about=about or "")
         elif (ph := _PHASE_RE.match(msg)) and ph.group(1) in jobs:
             jobs[ph.group(1)].phase, jobs[ph.group(1)].phase_at = ph.group(2), last_time
         elif e := _END_RE.match(msg):
@@ -250,7 +252,8 @@ def render(target: str, work_dir: Path, project_dir: str, *, events: int = 8,
     for job in sorted(st.jobs, key=lambda j: j.slot):
         cwd = job_cwd(work_dir, project_dir, job)
         path = live_transcript(cwd, job.started)
-        head = f"[{job.slot}] {job.kind} {job.key} (#{job.issue}), {_ago(now - job.started)}"
+        head = (f"[{job.slot}] {job.kind} {job.key} (#{job.issue})"
+                + (f' "{job.about}"' if job.about else "") + f", {_ago(now - job.started)}")
         if path is None or (job.phase and not job.phase.startswith("agent")):
             # Not in an agent (yet): say which step, how far along, and when it last did anything.
             what, progress, active = job_step(work_dir, cwd, job)

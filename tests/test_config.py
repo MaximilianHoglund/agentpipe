@@ -41,4 +41,5 @@ def test_shared_deny_reaches_every_agent_and_the_claude_command(tmp_path):
 def test_shipped_config_denies_pushing_and_gh_for_all_agents():
     c = config.load(Path(__file__).resolve().parent.parent / "pipeline.toml")
     for a in c.agents.values():
-        assert {"Bash(git push:*)", "Bash(gh:*)", "PowerShell(Remove-Item:*)"} <= set(a.deny)
+        assert {"Bash(git push:*)", "Bash(gh:*)"} <= set(a.deny)
+        assert not any(r.startswith("PowerShell(Remove-Item:") or r.startswith("Bash(rm ") for r in a.deny)

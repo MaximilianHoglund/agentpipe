@@ -28,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
                         ("run", "run the dispatcher: implement, review, merge"),
                         ("start", "start the dispatcher hidden and open a watcher window"),
                         ("stop", "stop the background dispatcher once running agents finish"),
+                        ("resume", "clear a usage-limit pause, e.g. after a plan upgrade"),
                         ("watch", "live view of the dispatcher and what each running agent is doing"),
                         ("denials", "review tool calls agents were refused, grouped, with the reason")):
         p = sub.add_parser(name, help=help_)
@@ -134,6 +135,18 @@ def main(argv: list[str] | None = None) -> int:
                   f"(watch shows progress; --now kills it)")
         return 0
 
+    if args.cmd == "resume":
+        from agentpipe import service
+        from agentpipe.pipeline import State, clear_pause
+        if pid := service.running_pid(target.work_dir):
+            # The running dispatcher owns state.json in memory; it picks this up next tick.
+            (target.work_dir / "resume").write_text("", encoding="utf-8")
+            print(f"{target.name}: resume requested; dispatcher {pid} clears its pause on its next tick")
+        else:
+            clear_pause(State(target.work_dir / "state.json"))
+            print(f"{target.name}: usage pause cleared")
+        return 0
+
     if args.cmd == "denials":
         from agentpipe import denials
         since = __import__("time").time() - args.hours * 3600 if args.hours else 0.0
@@ -158,11 +171,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "run":
-        if args.implementers is not None:
-            cfg.max_implementers = args.implementers
-        if args.reviewers is not None:
-            cfg.max_reviewers = args.reviewers
-        Pipeline(cfg, target).run_forever(once=args.once)
+        overrides = {k: v for k, v in (("max_implementers", args.implementers),
+                                       ("max_reviewers", args.reviewers)) if v is not None}
+        pl = Pipeline(cfg, target)
+        pl.watch_config(args.config, overrides)  # pipeline.toml edits apply without a restart
+        pl.run_forever(once=args.once)
         return 0
     return 1
 
