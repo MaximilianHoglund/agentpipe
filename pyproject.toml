@@ -3,7 +3,9 @@ name = "agentpipe"
 version = "0.1.0"
 description = "Multi-agent task pipeline: OpenSpec tasks -> GitHub issues -> implementer agents -> reviewer agent -> auto-merge"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "textual>=1.0",
+]
 
 [dependency-groups]
 dev = ["pytest>=8"]

@@ -32,7 +32,9 @@ uv run agentpipe sync dota          # create issues, labels, blocked-by links
 uv run agentpipe run dota           # dispatcher in this console: implement, review, merge, repeat
 uv run agentpipe start dota         # the same, hidden, plus a watcher window; closing it stops the dispatcher
 uv run agentpipe stop dota          # background one: finish running agents, then exit (--now kills)
-uv run agentpipe watch dota         # live view: dispatcher state, each agent's latest steps
+uv run agentpipe watch dota         # live panes: one scrollable pane per running job, plus the dispatcher log
+                                    #   tab: next pane, m: maximize it (m/esc restores), q: quit
+                                    #   --plain: the old redrawn text view; --once: one text snapshot
 uv run agentpipe denials dota       # review tool calls agents were refused
 uv run agentpipe status dota
 ```

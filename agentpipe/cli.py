@@ -46,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--events", type=int, default=8, help="recent events shown per agent")
             p.add_argument("--interval", type=float, default=2.0, help="seconds between refreshes")
             p.add_argument("--once", action="store_true", help="print one snapshot and exit")
+            p.add_argument("--plain", action="store_true", help="redrawn text view instead of panes")
             p.add_argument("--linked", action="store_true",
                            help="closing this watcher stops the dispatcher (start opens one like this)")
         if name == "start":
@@ -163,6 +164,10 @@ def main(argv: list[str] | None = None) -> int:
         try:
             if args.follow:
                 watch.follow(target.work_dir, target.project_dir, args.follow)
+            elif not args.once and not args.plain:
+                from agentpipe import panes
+                panes.run(target.name, target.work_dir, target.project_dir, interval=args.interval,
+                          linked=args.linked)
             else:
                 watch.watch(target.name, target.work_dir, target.project_dir,
                             interval=args.interval, events=args.events, once=args.once)
