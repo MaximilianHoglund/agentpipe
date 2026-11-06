@@ -972,10 +972,35 @@ class Pipeline:
         a = self.agent_def(role)
         what = (f"its {a.max_turns}-turn cap" if res.subtype == MAX_TURNS
                 else f"the {self.cfg.agent_timeout // 60}-minute timeout")
+        saved = self.save_wip(t, what) if role == "implementer" else ""
         self.to_decision(issue, cur, (
-            f"The {role} hit {what} without finishing. Rather than spend another run like it: split the "
-            f"task in tasks.md if it is too big for one session, or requeue it to continue in a fresh "
+            f"The {role} hit {what} without finishing.{saved} Rather than spend another run like it: split "
+            f"the task in tasks.md if it is too big for one session, or requeue it to continue in a fresh "
             f"session from what is committed."))
+
+    def save_wip(self, t: Task, what: str) -> str:
+        """Commit and push what a capped implementer left uncommitted, so a requeue keeps it.
+
+        Returns a sentence for the decision comment. A worktree in an unfinished merge is left
+        alone: committing it would record conflict markers.
+        """
+        wt = self.wt(t)
+        if not (wt / ".git").exists():
+            return ""
+        try:
+            if self.git.merging(wt):
+                return (" Its worktree is in an unfinished merge with uncommitted work, left as is: "
+                        "resolve it by hand before requeueing.")
+            if not self.git.commit_all(wt, f"{t.key}: WIP from a run that hit {what}\n\n"
+                                           "Saved by the dispatcher; not yet gated."):
+                return ""
+            self.git.push(wt, t.branch)
+        except proc.CommandError as e:
+            self.log(f"could not save WIP for {self.what(t.key)}: {e}")
+            return " Saving its uncommitted work failed; it is still in the worktree."
+        self.log(f"saved WIP for {self.what(t.key)} after {what}")
+        return (" Its uncommitted work was saved as a WIP commit on the branch (not yet gated), "
+                "so a requeue continues from it.")
 
     def deliver(self, t: Task, issue: int, pr: dict | None, res: ClaudeResult, slot: str,
                 cur: Status) -> None:

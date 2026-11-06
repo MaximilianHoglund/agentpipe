@@ -55,6 +55,14 @@ class Git:
     def is_clean(self, wt: Path) -> bool:
         return self.git("status", "--porcelain", cwd=wt).out.strip() == ""
 
+    def commit_all(self, wt: Path, message: str) -> bool:
+        """Commit every change in ``wt`` (git-ignored files stay out). False if nothing to commit."""
+        if self.is_clean(wt):
+            return False
+        self.git("add", "-A", cwd=wt)
+        self.git("commit", "--quiet", "--no-verify", "-m", message, cwd=wt)
+        return True
+
     def contains(self, wt: Path, ref: str) -> bool:
         """True if ``ref`` is already an ancestor of HEAD."""
         return self.git("merge-base", "--is-ancestor", ref, "HEAD", cwd=wt, check=False).ok

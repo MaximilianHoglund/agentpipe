@@ -190,6 +190,65 @@ def test_capped_run_goes_to_decision_and_forgets_its_session(pl):
     assert "session" not in p.state.task("c/1.1")
 
 
+class WipGit:
+    """Records the WIP save: dirty or clean, mid-merge or not, push failing or not."""
+
+    def __init__(self, dirty=True, merging=False, push_fails=False):
+        self.dirty, self.in_merge, self.push_fails, self.calls = dirty, merging, push_fails, []
+
+    def merging(self, wt):
+        return self.in_merge
+
+    def commit_all(self, wt, message):
+        self.calls.append(("commit", message))
+        return self.dirty
+
+    def push(self, wt, branch):
+        self.calls.append(("push", branch))
+        if self.push_fails:
+            raise proc.CommandError(["git", "push"], proc.Result(1, "", "rejected"))
+
+
+def capped_with(p, gh, git):
+    n = gh.add(TASK_MARKER.format(key="c/1.1"), S.IN_PROGRESS)
+    t = p.tasks["c/1.1"]
+    (p.wt(t) / ".git").mkdir(parents=True)
+    p.git, p.log = git, (lambda m: None)
+    p.deliver(t, n, None, ClaudeResult(False, "s", "", None, False, subtype=claude_mod.MAX_TURNS),
+              "impl-0", S.IN_PROGRESS)
+    assert S.NEEDS_DECISION.label in gh.issues[n]["labels"]
+    return gh.comments_by[n][-1]["body"]
+
+
+def test_capped_implementer_commits_and_pushes_its_wip(pl):
+    p, gh = pl
+    git = WipGit()
+    body = capped_with(p, gh, git)
+    assert [c[0] for c in git.calls] == ["commit", "push"]
+    assert "c/1.1: WIP" in git.calls[0][1] and git.calls[1][1] == "pipeline/c/1.1"
+    assert "saved as a WIP commit" in body
+
+
+def test_capped_implementer_with_a_clean_tree_saves_nothing(pl):
+    p, gh = pl
+    git = WipGit(dirty=False)
+    body = capped_with(p, gh, git)
+    assert git.calls == [("commit", git.calls[0][1])] and "WIP" not in body
+
+
+def test_capped_implementer_mid_merge_is_left_alone(pl):
+    p, gh = pl
+    git = WipGit(merging=True)
+    body = capped_with(p, gh, git)
+    assert git.calls == [] and "unfinished merge" in body
+
+
+def test_failed_wip_push_still_goes_to_decision(pl):
+    p, gh = pl
+    body = capped_with(p, gh, WipGit(push_fails=True))
+    assert "Saving its uncommitted work failed" in body
+
+
 def test_only_recent_sessions_are_resumed(pl):
     p, gh = pl
     t = p.tasks["c/1.1"]
