@@ -792,16 +792,20 @@ class Pipeline:
                  f"reviewers={self.cfg.max_reviewers}")
         try:
             while True:
-                reason = None if self.stopping else self.stop_reason()
-                if reason:
+                reason = self.stop_reason()
+                if reason and not self.stopping:
                     self.stopping = True
                     self.log(f"{reason}: starting nothing new, waiting for {len(self.jobs)} running job(s)")
+                elif not reason and self.stopping:
+                    # `start` while draining removes the stop file and opens a watcher: keep going.
+                    self.stopping = False
+                    self.log("stop cancelled: running again")
                 self.tick()
                 if (once or self.stopping) and not self.jobs:
                     break
-                # Sleep in short steps so a stop request is noticed within seconds.
+                # Sleep in short steps so a stop request (or its cancelling) is noticed within seconds.
                 deadline = time.time() + (self.cfg.poll_seconds if not once else 5)
-                while time.time() < deadline and (self.stopping or not self.stop_reason()):
+                while time.time() < deadline and self.stopping == bool(self.stop_reason()):
                     time.sleep(min(2.0, max(deadline - time.time(), 0)))
             self.log("stopped")
         except KeyboardInterrupt:

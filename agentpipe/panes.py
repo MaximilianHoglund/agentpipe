@@ -95,6 +95,8 @@ class PanesApp(App):
     def __init__(self, target: str, work_dir: Path, project_dir: str, interval: float = 2.0,
                  linked: bool = False):
         super().__init__()
+        self.linked = linked
+        self.seen_dispatcher = False
         # Closing a linked watcher drains the dispatcher; say so where q is shown.
         self.bind("q", "quit", description="quit + stop dispatcher" if linked else "quit")
         self.target, self.work_dir, self.project_dir, self.interval = target, work_dir, project_dir, interval
@@ -118,6 +120,9 @@ class PanesApp(App):
 
     # ------------------------------------------------------------ refresh
     def tick(self) -> None:
+        if self.linked and w.linked_watcher_done(self.work_dir, self):
+            self.exit()  # its dispatcher exited; a restart opens a fresh window
+            return
         now = time.time()
         log = self.query_one("#log", RichLog)
         for line in self.log_tail.read():

@@ -244,6 +244,47 @@ def test_stop_file_drains_running_jobs_then_exits(pl):
     assert not p.stop_file.exists() and not p.pid_file.exists()
 
 
+def test_removing_the_stop_file_while_draining_cancels_the_stop(pl):
+    p, gh = pl
+    p.cfg.poll_seconds = 0
+    lines, ticks = [], []
+    p._log = lines.append
+    job = type("J", (), {"kind": "implement", "slot": "impl-0"})()
+
+    def tick():
+        ticks.append(1)
+        n = len(ticks)
+        if n == 1:
+            p.jobs["c/1.1"] = job
+            p.stop_file.write_text("", encoding="utf-8")
+        elif n == 3:
+            assert p.stopping
+            p.stop_file.unlink()  # `agentpipe start` while it drains
+        elif n == 5:
+            assert not p.stopping
+            p.jobs.clear()  # no jobs, but not stopping: it must keep running
+        elif n == 7:
+            p.stop_file.write_text("", encoding="utf-8")
+        assert n < 12
+
+    p.tick = tick
+    p.run_forever()
+    assert any(l.endswith("stop cancelled: running again") for l in lines)
+    assert len(ticks) >= 7 and lines[-1].endswith("stopped")
+
+
+def test_linked_watcher_closes_once_its_dispatcher_exits(tmp_path, monkeypatch):
+    from agentpipe import service, watch
+    pid = {"v": None}
+    monkeypatch.setattr(service, "running_pid", lambda wd: pid["v"])
+    seen = type("S", (), {"seen_dispatcher": False})()
+    assert not watch.linked_watcher_done(tmp_path, seen)  # opened before the dispatcher's pid file
+    pid["v"] = 123
+    assert not watch.linked_watcher_done(tmp_path, seen)
+    pid["v"] = None
+    assert watch.linked_watcher_done(tmp_path, seen)
+
+
 def test_closing_the_linked_watcher_stops_the_dispatcher(pl, monkeypatch):
     from agentpipe import service
     p, gh = pl

@@ -366,12 +366,27 @@ def follow(work_dir: Path, project_dir: str, key: str, *, color: bool = True, po
         time.sleep(poll)
 
 
+def linked_watcher_done(work_dir: Path, holder) -> bool:
+    """True once the dispatcher this watcher saw running has exited.
+
+    ``holder.seen_dispatcher`` remembers whether one was seen; a watcher opened before its
+    dispatcher wrote its pid file must not close straight away."""
+    from agentpipe import service
+    if service.running_pid(work_dir) is not None:
+        holder.seen_dispatcher = True
+        return False
+    return holder.seen_dispatcher
+
+
 def watch(target: str, work_dir: Path, project_dir: str, *, interval: float = 2.0,
-          events: int = 8, once: bool = False) -> None:
+          events: int = 8, once: bool = False, linked: bool = False) -> None:
     if os.name == "nt":
         os.system("")  # turn on ANSI escapes in the Windows console
     color = once is False
+    holder = type("Seen", (), {"seen_dispatcher": False})()
     while True:
+        if linked and not once and linked_watcher_done(work_dir, holder):
+            return
         size = os.get_terminal_size() if not once and os.isatty(1) else os.terminal_size((120, 40))
         text = render(target, work_dir, project_dir, events=events, width=size.columns, color=color)
         if once:

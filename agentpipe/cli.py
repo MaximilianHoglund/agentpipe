@@ -113,13 +113,19 @@ def main(argv: list[str] | None = None) -> int:
         pid = service.running_pid(target.work_dir)
         if args.cmd == "start":
             already = pid is not None
-            if already:
+            stop = target.work_dir / "stop"
+            if already and stop.exists():
+                stop.unlink(missing_ok=True)
+                print(f"{target.name}: dispatcher {pid} was stopping; stop cancelled, it keeps running")
+            elif already:
                 print(f"{target.name}: dispatcher already running (pid {pid})")
             else:
                 pid = service.start(target.name, target.work_dir, args.config.resolve())
                 print(f"{target.name}: dispatcher started hidden (pid {pid})")
                 print(f"  console output and crashes: {target.work_dir / 'logs' / 'dispatcher.out'}")
-            if not args.no_watch:
+            if not args.no_watch and service.live_watchers(target.work_dir):
+                print("  a watcher window is already open; not opening another")
+            elif not args.no_watch:
                 wpid = service.open_watcher(target.name, args.config.resolve())
                 print(f"  watcher opened in its own window (pid {wpid})" if wpid else
                       f"  follow it with: agentpipe watch {target.name}")
@@ -170,7 +176,8 @@ def main(argv: list[str] | None = None) -> int:
                           linked=args.linked)
             else:
                 watch.watch(target.name, target.work_dir, target.project_dir,
-                            interval=args.interval, events=args.events, once=args.once)
+                            interval=args.interval, events=args.events, once=args.once,
+                            linked=args.linked)
         except KeyboardInterrupt:
             pass
         return 0
