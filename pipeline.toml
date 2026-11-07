@@ -193,6 +193,8 @@ context = ["docs/design.md", "docs/decisions.md", "docs/roadmap.md", "docs/agent
 # PATH: agents' Git Bash otherwise can't find pwsh (a Store app alias in WindowsApps).
 # Ticket #217: slots reuse a target dir across branches; clean the game's crates first.
 clean_workspace_crates = true
+# Max, 2026-11-07: technical tickets shouldn't wait for him; triage approves them.
+auto_approve = true
 # The gate checks rustfmt, so dev stays formatted: after keeping both sides of an additive
 # conflict, fmt re-sorts the appended `mod`/`use` lines.
 format = "cargo fmt --all"

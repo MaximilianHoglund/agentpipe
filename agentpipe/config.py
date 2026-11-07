@@ -80,6 +80,9 @@ class Target:
     # openspec/specs/ and moves it to changes/archive/. {change} is the change name; "" turns
     # archiving off.
     archive: str = "openspec archive {change} --yes"
+    # Agent-filed tickets get one triage run: purely technical ones are approved without Max,
+    # the rest wait for him in pending approval with the triage's reason as a comment.
+    auto_approve: bool = False
 
     def is_parked(self, key: str, number: int) -> bool:
         return (number in self.parked or key in self.parked
@@ -222,6 +225,7 @@ def load(path: Path) -> Config:
             overlap_ignore=list(t.get("overlap_ignore", [])),
             parked=list(t.get("parked", [])),
             archive=t.get("archive", "openspec archive {change} --yes"),
+            auto_approve=bool(t.get("auto_approve", False)),
         )
         tg = targets[name]
         if tg.milestones and not tg.release_branch:

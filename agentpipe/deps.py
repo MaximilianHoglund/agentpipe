@@ -87,6 +87,24 @@ TIER_SCHEMA = {
 }
 
 
+TRIAGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tickets": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"key": {"type": "string"},
+                               "verdict": {"type": "string", "enum": ["approve", "ask"]},
+                               "reason": {"type": "string"}},
+                "required": ["key", "verdict", "reason"],
+            },
+        }
+    },
+    "required": ["tickets"],
+}
+
+
 @dataclass
 class TaskDeps:
     blocked_by: list[str] = field(default_factory=list)  # task keys

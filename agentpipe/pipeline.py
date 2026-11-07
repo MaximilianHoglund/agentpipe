@@ -21,7 +21,7 @@ from agentpipe import milestones, proc, review, service, syncplan
 from agentpipe.claude import CAPPED, MAX_TURNS, Claude, ClaudeResult
 from agentpipe.config import Agent, Config, Milestone, Target
 from agentpipe import conflicts
-from agentpipe.deps import (PLAN_SCHEMA, TIER_SCHEMA, TOUCHES_SCHEMA, Plan, PlanError, clean_tier, clean_touches, key_sort,
+from agentpipe.deps import (PLAN_SCHEMA, TIER_SCHEMA, TOUCHES_SCHEMA, TRIAGE_SCHEMA, Plan, PlanError, clean_tier, clean_touches, key_sort,
                             merge_plans, stale_keys, text_hash, validate_plan)
 from agentpipe.git import Git
 from agentpipe.github import GitHub
@@ -364,6 +364,58 @@ class Pipeline:
         self.log(f"predicted files or tier for {n} of {len(need)} task(s); {light} rated light")
         return n > 0
 
+    def triage_tickets(self, gh: GitHub, issues: dict[str, dict]) -> None:
+        """Approve purely technical proposals without Max (target `auto_approve`).
+
+        One run on the full planner model over every untriaged ticket in pending approval that
+        nobody has worked on. `approve` moves it to pending implementation; `ask` leaves it for
+        Max. Both comment the reason. Each ticket is triaged once (state `triaged`), so an `ask`
+        isn't re-asked and Max can always override by hand. A failed run is retried next sync."""
+        if not self.t.auto_approve:
+            return
+        done = set(self.state.data.get("triaged", []))
+        need = [k for k, i in issues.items()
+                if k in self.tasks and k.startswith(TICKET_CHANGE + "/") and i["state"].upper() == "OPEN"
+                and status_from_labels(i["labels"]) is Status.PENDING_APPROVAL
+                and not self.state.task(k).get("runs") and k not in done
+                and not self.t.is_parked(k, i["number"])]
+        if not need:
+            return
+        self.log(f"triaging {len(need)} ticket(s)")
+        rows = "\n\n".join(f"### {k}: {self.tasks[k].text}\n\n{self.ticket_bodies.get(k, '')[:4000]}" for k in need)
+        prompt = review.prompt("ticket_triage", repo_root=self.base_wt, target=self.t.name,
+                               project_dir=self.t.project_dir, tickets=rows)
+        res = self.claude.run(prompt, self.base_wt, self.cfg.agents["planner"], TRIAGE_SCHEMA,
+                              log_name=f"ticket-triage-{len(need)}")
+        if res.limited:
+            raise LimitHit(res.text)
+        if not res.ok:
+            self.log(f"triaging tickets failed ({res.subtype}); retrying next sync")
+            return
+        approved = 0
+        for e in res.structured.get("tickets", []):
+            key = str(e.get("key", "")).strip()
+            if key not in need or key in done:
+                continue
+            reason = str(e.get("reason", "")).strip() or "no reason given"
+            n = issues[key]["number"]
+            if e.get("verdict") == "approve":
+                gh.set_status(n, Status.PENDING_IMPLEMENTATION, Status.PENDING_APPROVAL)
+                issues[key]["labels"] = [Status.PENDING_IMPLEMENTATION.label] + [
+                    l for l in issues[key]["labels"] if l != Status.PENDING_APPROVAL.label]
+                gh.comment(n, review.bot(f"**Approved by triage** (technical, no change a player sees): "
+                                         f"{reason} Close the issue to reject it."))
+                approved += 1
+            else:
+                gh.comment(n, review.bot(f"**Needs your decision:** {reason} Approve by setting "
+                                         f"`{Status.PENDING_IMPLEMENTATION.label}`; close it to reject."))
+            done.add(key)
+            self.log(f"#{n} triage: {e.get('verdict')}: {reason}")
+        with self.state.lock:
+            self.state.data["triaged"] = sorted(done, key=key_sort)
+        self.state.save()
+        self.log(f"triaged {len(need)} ticket(s); {approved} approved")
+
     def rate_tickets(self, issues: dict[str, dict]) -> None:
         """Rate approved tickets that haven't started `light` or `standard` (one run, on the
         planner's light model), into state.json. Tickets aren't planned, so this is where they
@@ -470,6 +522,7 @@ class Pipeline:
         # After the ready agents started: a task without a prediction is simply never held back.
         if self.backfill_touches(tasks, plan):
             plan.save(self.plan_path)
+        self.triage_tickets(gh, issues)
         self.rate_tickets(issues)
         self.last_sync = time.time()
         return actions
