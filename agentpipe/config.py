@@ -22,6 +22,9 @@ class Milestone:
     tag: str  # git tag and GitHub release name, e.g. "step-1-watchable-combat"
     title: str
     changes: list[str]  # OpenSpec changes that must all be ticked off
+    # Task keys where the owner plays this release: they wait for its tag, and the release
+    # doesn't wait for them (a task inside the milestone would otherwise deadlock it).
+    play: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -141,7 +144,8 @@ def load(path: Path) -> Config:
             env={k: str(v) for k, v in t.get("env", {}).items()},
             clean_workspace_crates=bool(t.get("clean_workspace_crates", False)),
             release_branch=t.get("release_branch", ""),
-            milestones=[Milestone(m["tag"], m.get("title", m["tag"]), list(m["changes"]))
+            milestones=[Milestone(m["tag"], m.get("title", m["tag"]), list(m["changes"]),
+                                  list(m.get("play", [])))
                         for m in t.get("milestones", [])],
             release_build=t.get("release_build", ""),
             release_assets=list(t.get("release_assets", [])),

@@ -49,13 +49,17 @@ class Cleared:
 
 
 def compute(tasks: list[Task], plan: Plan, issues: dict[str, dict],
-            flagged: set[str], cleared: set[str]) -> list:
+            flagged: set[str], cleared: set[str],
+            play: dict[str, str] | None = None, released: set[str] = frozenset()) -> list:
     """Actions that bring GitHub in line with tasks.md and the plan.
 
     ``issues`` maps task key -> issue dict (number, state, labels). ``flagged`` holds
     keys the pipeline itself put in needs-decision; if such an issue is now back in a
     graph-owned status, a human cleared it, and the planner's verdict is overridden.
+    ``play`` maps a task key to the release tag the owner must play first; such a task stays
+    blocked until that tag is in ``released``.
     """
+    play = play or {}
     done = {t.key for t in tasks if t.done}
     done |= {k for k, i in issues.items() if i["state"].upper() == "CLOSED"}
     actions: list = []
@@ -71,7 +75,11 @@ def compute(tasks: list[Task], plan: Plan, issues: dict[str, dict],
             cleared.add(t.key)
             actions.append(Cleared(t.key))
         new = _status_for(t, plan, done, cleared)
+        if t.key in play and play[t.key] not in released:
+            new = Status.BLOCKED_BY_TASK
         reason = plan.get(t.key).human_reason if new is Status.NEEDS_DECISION else ""
+        if new is Status.NEEDS_DECISION and t.key in play:
+            reason += f" Play the `{play[t.key]}` release (see the repo's GitHub releases)."
         if issue is None:
             actions.append(Create(t.key, new, reason))
         elif issue["state"].upper() == "OPEN" and new != cur and (

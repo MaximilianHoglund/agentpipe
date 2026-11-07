@@ -155,9 +155,11 @@ github_repo = "MaximilianHoglund/arpg-manager"
 # for a human to play and test.
 base = "dev"
 release_branch = "main"
-# Once project-foundation 4.1 lands an export script, build the .exe into each release, e.g.:
-# release_build = "pwsh -NoProfile -File scripts/export.ps1"
-# release_assets = ["build/windows/*.exe", "build/windows/*.pck"]
+# Each release carries the playable build. project-foundation 4.1 (in step 1) adds the script,
+# so it exists by the first release.
+release_build = "pwsh -NoProfile -File scripts/export.ps1"
+release_assets = ["dist/windows/arpg-manager.exe", "dist/windows/arpg-manager.pck",
+                  "dist/windows/arpg_bridge.dll"]
 changes = "*"
 project_dir = "."
 # Gate, first match wins: scripts/check.ps1 once project-foundation 3.3 adds it (Rust and
@@ -180,6 +182,8 @@ preflight_gate = true
 tag = "step-1-watchable-combat"
 title = "Step 1: Watchable combat"
 changes = ["project-foundation", "combat-simulation", "strategy-rules", "run-viewer-and-reports"]
+# Owner-play tasks: they wait for this release, and the release doesn't wait for them.
+play = ["run-viewer-and-reports/4.2"]
 
 [[targets.arpg.milestones]]
 tag = "step-2-gear"
@@ -195,6 +199,7 @@ changes = ["skill-gems", "monster-variety"]
 tag = "step-4-full-loop"
 title = "Step 4: The full loop"
 changes = ["map-progression", "map-juicing", "crafting", "character-progression"]
+play = ["balance-and-content/3.1", "balance-and-content/3.4"]
 
 [[targets.arpg.milestones]]
 tag = "step-5-long-term-balance"

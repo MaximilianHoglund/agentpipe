@@ -76,6 +76,22 @@ def test_non_autonomous_task_waits_for_its_blockers_before_asking():
         syncplan.SetStatus("c/1.3", 2, S.BLOCKED_BY_TASK, S.NEEDS_DECISION, "play the build")]
 
 
+def test_play_task_waits_for_its_release_then_asks_with_the_tag():
+    tasks, _ = setup()
+    plan = Plan("fp", {"c/1.2": TaskDeps(), "c/1.3": TaskDeps([], False, "play the build.")})
+    play = {"c/1.3": "step-1"}
+    assert syncplan.Create("c/1.3", S.BLOCKED_BY_TASK) in syncplan.compute(
+        tasks, plan, {}, set(), set(), play, set())
+    # Flagged before the release existed: taken back.
+    early = {"c/1.2": issue(1, S.IN_PROGRESS), "c/1.3": issue(2, S.NEEDS_DECISION)}
+    assert syncplan.compute(tasks, plan, early, {"c/1.3"}, set(), play, set()) == [
+        syncplan.SetStatus("c/1.3", 2, S.NEEDS_DECISION, S.BLOCKED_BY_TASK)]
+    blocked = {"c/1.2": issue(1, S.IN_PROGRESS), "c/1.3": issue(2, S.BLOCKED_BY_TASK)}
+    [a] = syncplan.compute(tasks, plan, blocked, set(), set(), play, {"step-1"})
+    assert (a.new, a.reason) == (S.NEEDS_DECISION,
+                                 "play the build. Play the `step-1` release (see the repo's GitHub releases).")
+
+
 def test_human_clearing_a_flag_is_respected_on_later_syncs():
     tasks, _ = setup()
     plan = Plan("fp", {"c/1.2": TaskDeps(["c/1.1"], False, "needs an API key"), "c/1.3": TaskDeps()})

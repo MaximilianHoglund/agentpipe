@@ -368,7 +368,10 @@ class Pipeline:
         self.plan = plan
         issues = self.issues_by_key(gh.list_issues())
         st = self.state
-        actions = syncplan.compute(tasks, plan, issues, set(st.data["flagged"]), set(st.data["cleared"]))
+        play = milestones.play_tags(self.t.milestones)
+        released = self.git.remote_tags() if play else set()
+        actions = syncplan.compute(tasks, plan, issues, set(st.data["flagged"]), set(st.data["cleared"]),
+                                   play, released)
         pending_ready = on_ready is not None
         for a in actions:
             if pending_ready and not syncplan.makes_ready(a):

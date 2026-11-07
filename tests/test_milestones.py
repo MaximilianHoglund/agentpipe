@@ -135,3 +135,11 @@ def test_milestones_require_a_distinct_release_branch(tmp_path):
                    '[[targets.x.milestones]]\ntag="m1"\nchanges=["a"]\n', encoding="utf-8")
     with pytest.raises(ValueError, match="release_branch"):
         load(cfg)
+
+
+def test_a_milestone_does_not_wait_for_its_own_play_tasks(tmp_path: Path):
+    write(tmp_path, "openspec/changes/a/tasks.md", "- [x] 1.1 x\n- [ ] 1.2 play it\n")
+    m = Milestone("step-1", "Step 1", ["a"], play=["a/1.2"])
+    assert milestones.next_due([m], set(), tmp_path) is m
+    assert milestones.next_due([Milestone("step-1", "Step 1", ["a"])], set(), tmp_path) is None
+    assert milestones.play_tags([m]) == {"a/1.2": "step-1"}

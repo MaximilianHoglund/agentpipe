@@ -11,23 +11,30 @@ from agentpipe.tasks import parse_tasks
 CHANGES = Path("openspec") / "changes"
 
 
-def change_done(checkout: Path, change: str) -> bool:
-    """Every task of ``change`` is ticked, or the change has been archived."""
+def change_done(checkout: Path, change: str, skip: frozenset[str] | set[str] = frozenset()) -> bool:
+    """Every task of ``change`` not in ``skip`` is ticked, or the change has been archived."""
     path = checkout / CHANGES / change / "tasks.md"
     if path.exists():
         tasks = parse_tasks(change, path.read_text(encoding="utf-8"))
-        return bool(tasks) and all(t.done for t in tasks)
+        return bool(tasks) and all(t.done or t.key in skip for t in tasks)
     archive = checkout / CHANGES / "archive"
     return archive.is_dir() and any(p.name.endswith("-" + change) for p in archive.iterdir())
 
 
 def next_due(milestones: list[Milestone], released: set[str], checkout: Path) -> Milestone | None:
-    """The first unreleased milestone, if it is complete. Milestones are cut strictly in order."""
+    """The first unreleased milestone, if it is complete. Milestones are cut strictly in order.
+
+    A milestone's own play tasks don't count: they need the release to exist."""
     for m in milestones:
         if m.tag in released:
             continue
-        return m if all(change_done(checkout, c) for c in m.changes) else None
+        return m if all(change_done(checkout, c, set(m.play)) for c in m.changes) else None
     return None
+
+
+def play_tags(milestones: list[Milestone]) -> dict[str, str]:
+    """Task key -> the release tag the owner plays for it."""
+    return {k: m.tag for m in milestones for k in m.play}
 
 
 def rank(milestones: list[Milestone], change: str) -> int:
