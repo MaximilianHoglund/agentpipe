@@ -64,6 +64,8 @@ class Target:
     release_branch: str = ""
     milestones: list[Milestone] = field(default_factory=list)
     release_build: str = ""  # optional command run in the merged checkout before tagging
+    # The release's gate, if not `test`: e.g. one that also runs tests the per-PR gate leaves out.
+    release_test: str = ""
     release_assets: list[str] = field(default_factory=list)  # globs (project-relative) to attach
     # Checked before any agent runs (dispatcher start, then each sync while failing):
     # each command must exit 0 from the dispatcher's shell and from an agent's Bash tool.
@@ -223,6 +225,7 @@ def load(path: Path) -> Config:
                                   list(m.get("play", [])), list(m.get("deferred", [])))
                         for m in t.get("milestones", [])],
             release_build=t.get("release_build", ""),
+            release_test=t.get("release_test", ""),
             release_assets=list(t.get("release_assets", [])),
             preflight=list(t.get("preflight", [])),
             preflight_gate=bool(t.get("preflight_gate", False)),

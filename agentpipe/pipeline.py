@@ -1865,9 +1865,10 @@ class Pipeline:
                 return self.release_failed(m, sha, f"`{self.t.base}` at {sha[:8]} does not merge cleanly "
                                            f"into `{rel}`. Merge `{rel}` into `{self.t.base}` to resolve it.")
             pdir = wt / self.t.project_dir
-            gate = self.run_gate(pdir, RELEASE_KEY, self.t.test, self.t.test_timeout)
+            test = self.t.release_test or self.t.test
+            gate = self.run_gate(pdir, RELEASE_KEY, test, self.t.test_timeout)
             if not gate.ok:
-                return self.release_failed(m, sha, f"`{self.t.test}` fails on the merge:" + fence(gate.tail(4000)))
+                return self.release_failed(m, sha, f"`{test}` fails on the merge:" + fence(gate.tail(4000)))
             assets: list[str] = []
             if self.t.release_build:
                 b = self.run_gate(pdir, RELEASE_KEY, self.t.release_build, self.t.test_timeout)
