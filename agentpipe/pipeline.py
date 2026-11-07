@@ -382,6 +382,7 @@ class Pipeline:
         st.save()
         self.load_tickets(issues)
         self.sync_links(gh, issues)
+        self.check_waiters(issues)
         self.last_sync = time.time()
         return actions
 
@@ -416,6 +417,7 @@ class Pipeline:
             gh.comment(a.number, review.bot("Ticked in tasks.md outside the pipeline; closing."))
             gh.close_issue(a.number)
             self.log(f"#{a.number} {self.what(a.key)} closed (ticked by hand)")
+            self.release_waiters(a.number)
         elif isinstance(a, syncplan.Cleared):
             with st.lock:
                 st.data["flagged"].remove(a.key)
@@ -445,6 +447,70 @@ class Pipeline:
             if waiting:
                 self.log(f"{self.what(key)} waits for {', '.join(self.what(w) for w in waiting)} to merge")
         return waiting
+
+    # ------------------------------------------------------------------ waiting on other tasks
+    # A waiter is an issue in `awaiting task`. What it waits for are its GitHub blocked-by
+    # links; GitHub shows the backlink ("blocking") on each blocker. When an issue closes, its
+    # backlinks are checked, and a waiter is released once its last blocker is done.
+
+    def register_wait(self, waiter: int, blockers: list[int], old: Status | None = None) -> None:
+        """Make ``waiter`` wait for ``blockers`` (issue numbers): link, backlink, label, comment."""
+        have = self.gh.blocked_by(waiter)
+        for b in blockers:
+            if b not in have:
+                self.gh.add_blocked_by(waiter, self.gh.issue_db_id(b))
+                self.gh.comment(b, review.bot(
+                    f"**#{waiter} waits for this.** It is released once this and everything else "
+                    "it waits for are done."))
+        if old is not Status.AWAITING_TASK:
+            self.gh.set_status(waiter, Status.AWAITING_TASK, old)
+        refs = ", ".join(f"#{b}" for b in sorted(set(blockers) | set(have)))
+        self.gh.comment(waiter, review.bot(
+            f"**Awaiting task:** waits for {refs}. The pipeline sets it to "
+            f"`{Status.PENDING_IMPLEMENTATION.label}` once all of them are done."))
+        self.log(f"{self.issue_ref(waiter)} awaits {refs}")
+        self.check_waiter(self.gh.issue(waiter))
+
+    def check_waiter(self, issue: dict) -> bool:
+        """Release an open `awaiting task` issue whose blockers are all done; True if released."""
+        n = issue["number"]
+        if issue["state"].upper() != "OPEN" or status_from_labels(issue["labels"]) is not Status.AWAITING_TASK:
+            return False
+        blockers = self.gh.blockers(n)
+        if not blockers:
+            self.to_decision(n, Status.AWAITING_TASK,
+                             "Status is `awaiting task`, but it isn't blocked by anything. Name what it "
+                             f"waits for (`agentpipe wait {self.t.name} {n} <issue or task key>...`), "
+                             "or set it to the status it should resume from.")
+            return False
+        dropped = sorted(b for b, s in blockers.items() if s["state"] == "closed" and s["reason"] == "not_planned")
+        if dropped:
+            self.to_decision(n, Status.AWAITING_TASK,
+                             f"It waits for {', '.join(f'#{b}' for b in dropped)}, which was closed without "
+                             "being done. Decide whether it still waits for something.")
+            return False
+        if any(s["state"] != "closed" for s in blockers.values()):
+            return False
+        self.gh.set_status(n, Status.PENDING_IMPLEMENTATION, Status.AWAITING_TASK)
+        refs = ", ".join(f"#{b}" for b in sorted(blockers))
+        self.gh.comment(n, review.bot(f"**Released.** Everything it waited for is done: {refs}."))
+        self.log(f"{self.issue_ref(n)} released: {refs} done")
+        return True
+
+    def release_waiters(self, done: int) -> None:
+        """Issue ``done`` just closed: release the waiters whose last blocker it was."""
+        try:
+            for n in self.gh.blocking(done):
+                self.check_waiter(self.gh.issue(n))
+        except proc.CommandError as e:
+            # The sync's sweep over every waiter catches anything missed here.
+            self.log(f"releasing waiters of #{done} failed; the next sync retries: {str(e)[-200:]}")
+
+    def check_waiters(self, issues: dict[str, dict]) -> None:
+        """Sweep: blockers can close outside the pipeline, or while the dispatcher was down."""
+        for i in issues.values():
+            if i["state"].upper() == "OPEN" and status_from_labels(i["labels"]) is Status.AWAITING_TASK:
+                self.check_waiter(i)
 
     def open_tickets(self) -> str:
         titles = [f"#{t.id} {t.text}" for k, t in self.tasks.items() if k.startswith(TICKET_CHANGE + "/")]
@@ -494,6 +560,8 @@ class Pipeline:
         for key, issue in issues.items():
             if issue["state"].upper() != "OPEN" or key not in self.tasks:
                 continue
+            if status_from_labels(issue["labels"]) is Status.AWAITING_TASK:
+                continue  # its links say what it waits for; the plan doesn't own them
             want = sorted(issues[b]["number"] for b in self.plan.get(key).blocked_by if b in issues)
             if st.data["links"].get(key) != want:
                 todo.append((key, issue, want))
@@ -670,7 +738,17 @@ class Pipeline:
             kind = "revise" if status is Status.CHANGES_REQUESTED else "implement"
             if kind == "revise" and key not in prs:
                 continue
-            if kind == "implement" and self.ticket_waits_for(key):
+            if kind == "implement" and (waits := self.ticket_waits_for(key)):
+                # Link the named tasks that have an open issue, so their merge releases this.
+                # A task without one (not created yet, or closed but not yet ticked) is
+                # picked up by a later tick, which waits until tasks.md says it is done.
+                if open_ := [issues[w]["number"] for w in waits if w in issues]:
+                    try:
+                        self.register_wait(issues[key]["number"], open_, status)
+                        issues[key]["labels"] = [Status.AWAITING_TASK.label]
+                    except proc.CommandError as e:
+                        self.log(f"{self.what(key)}: could not register its wait; retrying next tick: "
+                                 f"{str(e)[-200:]}")
                 continue
             self.start(kind, key, free_impl.pop(0), issues[key], prs.get(key))
         for key in by_status(Status.PENDING_APPROVAL):
@@ -1249,6 +1327,8 @@ class Pipeline:
         for k, n in self.state.task(t.key).get("batch_issues", {}).items():
             self.gh.set_status(n, Status.FINISHED, Status.BLOCKED_BY_TASK)
             self.gh.close_issue(n)
+        for n in [issue, *self.state.task(t.key).get("batch_issues", {}).values()]:
+            self.release_waiters(n)
         if t.change != TICKET_CHANGE:
             self.commit_to_base(tasks, f"Tick {', '.join(x.key for x in tasks)} in tasks.md")
         self.git.worktree_remove(wt)

@@ -380,6 +380,88 @@ class LinkingGitHub(FakeGitHub):
     def remove_blocked_by(self, number, blocker_db_id):
         self.links[number].discard(blocker_db_id - 1000)
 
+    def blockers(self, number):
+        return {n: {"state": self.issues[n]["state"].lower(), "reason": self.issues[n].get("reason")}
+                for n in self.links.get(number, set())}
+
+    def blocking(self, number):
+        return sorted(w for w, bs in self.links.items() if number in bs)
+
+    def issue(self, number):
+        i = self.issues[number]
+        return {"number": number, "state": i["state"], "labels": list(i["labels"])}
+
+    def close_issue(self, number, reason="completed"):
+        self.issues[number]["state"] = "CLOSED"
+        self.issues[number]["reason"] = reason
+
+
+@pytest.fixture
+def linked(pl):
+    p, _ = pl
+    gh = LinkingGitHub()
+    p.gh = gh
+    return p, gh
+
+
+def status_of(gh, n):
+    return next(l for l in gh.issues[n]["labels"] if l.startswith("status: "))
+
+
+def test_a_waiter_is_released_only_when_its_last_blocker_is_done(linked):
+    p, gh = linked
+    a = task_issue(gh, "c/1.1", S.IN_PROGRESS)
+    b = task_issue(gh, "c/1.2", S.IN_PROGRESS)
+    w = gh.add(TICKET_MARKER + "\nlater", S.PENDING_APPROVAL)
+    p.register_wait(w, [a, b], S.PENDING_APPROVAL)
+    assert status_of(gh, w) == S.AWAITING_TASK.label
+    assert gh.blocking(a) == [w] and gh.blocking(b) == [w]  # each blocker links back to it
+    assert any(f"#{w} waits for this" in c["body"] for c in gh.comments(a))
+    gh.close_issue(a)
+    p.release_waiters(a)
+    assert status_of(gh, w) == S.AWAITING_TASK.label  # b is still open
+    gh.close_issue(b)
+    p.release_waiters(b)
+    assert status_of(gh, w) == S.PENDING_IMPLEMENTATION.label
+    assert "Released" in gh.comments(w)[-1]["body"]
+
+
+def test_sweep_releases_waiters_whose_blockers_closed_outside_the_pipeline(linked):
+    p, gh = linked
+    a = task_issue(gh, "c/1.1", S.IN_PROGRESS)
+    w = gh.add(TICKET_MARKER + "\nlater", S.PENDING_APPROVAL)
+    p.register_wait(w, [a], S.PENDING_APPROVAL)
+    gh.close_issue(a)  # e.g. merged by hand while the dispatcher was down
+    p.check_waiters({"x": gh.issue(w)})
+    assert status_of(gh, w) == S.PENDING_IMPLEMENTATION.label
+
+
+def test_waiter_on_a_dropped_blocker_or_on_nothing_goes_to_a_human(linked):
+    p, gh = linked
+    a = task_issue(gh, "c/1.1", S.IN_PROGRESS)
+    w = gh.add(TICKET_MARKER + "\nlater", S.PENDING_APPROVAL)
+    p.register_wait(w, [a], S.PENDING_APPROVAL)
+    gh.close_issue(a, "not_planned")  # rejected: what it waited for will never land
+    p.release_waiters(a)
+    assert status_of(gh, w) == S.NEEDS_DECISION.label
+    lone = gh.add(TICKET_MARKER + "\nparked", S.AWAITING_TASK)  # labelled by hand, no links
+    p.check_waiters({"x": gh.issue(lone)})
+    assert status_of(gh, lone) == S.NEEDS_DECISION.label
+
+
+def test_approved_ticket_naming_a_task_awaits_it_and_is_released_by_its_merge(linked):
+    p, gh = linked
+    blocker = task_issue(gh, "c/1.2", S.IN_PROGRESS)
+    n = gh.add(TICKET_MARKER + "\nNeeds c/1.2 first.", S.PENDING_IMPLEMENTATION, extra=("kind: defect",))
+    p.state.data["tickets"] = [n]
+    p.load_tickets(p.issues_by_key(gh.list_issues()))
+    p.tick()
+    assert f"ticket/{n}" not in {k for _, k, _ in p.started}
+    assert status_of(gh, n) == S.AWAITING_TASK.label and gh.blocking(blocker) == [n]
+    gh.close_issue(blocker)
+    p.release_waiters(blocker)
+    assert status_of(gh, n) == S.PENDING_IMPLEMENTATION.label
+
 
 def test_a_replan_that_reverses_an_edge_relinks_without_a_cycle(tmp_path):
     from agentpipe.deps import TaskDeps

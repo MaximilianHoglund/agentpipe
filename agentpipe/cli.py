@@ -30,7 +30,8 @@ def main(argv: list[str] | None = None) -> int:
                         ("stop", "stop the background dispatcher once running agents finish"),
                         ("resume", "clear a usage-limit pause, e.g. after a plan upgrade"),
                         ("watch", "live view of the dispatcher and what each running agent is doing"),
-                        ("denials", "review tool calls agents were refused, grouped, with the reason")):
+                        ("denials", "review tool calls agents were refused, grouped, with the reason"),
+                        ("wait", "park a decided issue until other issues or tasks are done, then release it")):
         p = sub.add_parser(name, help=help_)
         p.add_argument("target")
         if name == "plan":
@@ -53,6 +54,10 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--no-watch", action="store_true", help="don't open a watcher window")
         if name == "stop":
             p.add_argument("--now", action="store_true", help="kill it and its agents instead of waiting")
+        if name == "wait":
+            p.add_argument("issue", type=int, help="the issue that waits")
+            p.add_argument("blockers", nargs="+",
+                           help="what it waits for: issue numbers (#316 or 316) or task keys (crafting/3.5)")
         if name == "denials":
             p.add_argument("--hours", type=float, help="only runs from the last N hours")
             p.add_argument("--examples", type=int, default=2, help="example commands per group")
@@ -152,6 +157,36 @@ def main(argv: list[str] | None = None) -> int:
         else:
             clear_pause(State(target.work_dir / "state.json"))
             print(f"{target.name}: usage pause cleared")
+        return 0
+
+    if args.cmd == "wait":
+        # GitHub writes only, no state.json, so it is safe while the dispatcher runs.
+        pl = Pipeline(cfg, target)
+        issues = None
+        blockers = []
+        for b in args.blockers:
+            b = b.lstrip("#")
+            if b.isdigit():
+                blockers.append(int(b))
+                continue
+            if issues is None:  # task keys need the task list
+                pl.refresh_base()
+                pl.tasks = {t.key: t for t in pl.load_tasks()}
+                issues = pl.issues_by_key(pl.gh.list_issues())
+            if b in issues:
+                blockers.append(issues[b]["number"])
+            else:
+                print(f"{b}: no issue for this task key. Wait only for a defined task: add it to tasks.md "
+                      f"and run `agentpipe sync {target.name}` first.", file=sys.stderr)
+                return 2
+        if args.issue in blockers:
+            print(f"#{args.issue} can't wait for itself", file=sys.stderr)
+            return 2
+        waiter = pl.gh.issue(args.issue)
+        if waiter["state"].upper() != "OPEN":
+            print(f"#{args.issue} is closed", file=sys.stderr)
+            return 2
+        pl.register_wait(args.issue, blockers, status_from_labels(waiter["labels"]))
         return 0
 
     if args.cmd == "denials":

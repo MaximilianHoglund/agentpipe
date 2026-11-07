@@ -73,6 +73,7 @@ release branch.
 |---|---|---|
 | `status: blocked by task` | A blocker is unfinished (see the issue's blocked-by links) | sync |
 | `status: needs decision` | Needs information or a decision; the question is in the latest comment | **you** |
+| `status: awaiting task` | Decided, but waits for other issues (its blocked-by links) to be done | dispatcher |
 | `status: pending implementation` | Unblocked, waiting for a free agent | dispatcher |
 | `status: in progress` | Implementer working | implementer |
 | `status: pending approval` | PR waiting for the reviewer, **or** an agent-filed ticket waiting for you | reviewer / **you** |
@@ -83,6 +84,17 @@ release branch.
 **Answering a decision:** comment on the issue, then set `status: pending implementation`.
 Every non-pipeline comment on the issue and its PR is given to the agent as
 authoritative input. The planner's "needs decision" verdict stays overridden after that.
+
+**Waiting for other work:** `agentpipe wait <target> <issue> <blocker>...` parks a decided
+issue until its blockers are done. Blockers are issue numbers or task keys (`crafting/3.5`).
+A task key must already have an issue: wait only for defined work. The command adds a
+blocked-by link per blocker, so GitHub shows the backlink ("blocking") on the blocker. It
+comments on both sides and sets `status: awaiting task`. When an issue closes, the
+dispatcher checks the issues it blocks. A waiter goes to `pending implementation` once its
+last blocker is done; a waiter with several blockers waits for all of them. Each sync also
+sweeps every waiter, which catches issues closed by hand. If a blocker is closed as not
+planned, or a waiter has no blockers, the waiter goes to `needs decision`. An approved
+ticket whose text names unfinished tasks is registered the same way.
 
 **Agent-filed tickets:** implementers and the reviewer report defects and improvements
 they notice outside their scope. They arrive as issues labelled `kind: defect` or

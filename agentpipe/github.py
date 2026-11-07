@@ -82,6 +82,22 @@ class GitHub:
         items = self._api(f"issues/{number}/dependencies/blocked_by?per_page=100") or []
         return {i["number"]: i["id"] for i in items}
 
+    def blockers(self, number: int) -> dict[int, dict]:
+        """Blocker issue number -> {"state": "open"|"closed", "reason": GitHub's state_reason}."""
+        items = self._api(f"issues/{number}/dependencies/blocked_by?per_page=100") or []
+        return {i["number"]: {"state": i["state"], "reason": i.get("state_reason")} for i in items}
+
+    def blocking(self, number: int) -> list[int]:
+        """Issues that ``number`` blocks: the backlinks GitHub keeps for every blocked-by link."""
+        items = self._api(f"issues/{number}/dependencies/blocking?per_page=100") or []
+        return [i["number"] for i in items]
+
+    def issue(self, number: int) -> dict:
+        """One issue's number, state and label names."""
+        i = self._json("issue", "view", str(number), "-R", self.repo, "--json", "number,state,labels")
+        i["labels"] = [l["name"] for l in i["labels"]]
+        return i
+
     def add_blocked_by(self, number: int, blocker_db_id: int) -> None:
         self._json("api", "-X", "POST", f"repos/{self.repo}/issues/{number}/dependencies/blocked_by",
                    "-F", f"issue_id={blocker_db_id}")
@@ -147,6 +163,12 @@ class DryRunGitHub(GitHub):
 
     def blocked_by(self, number):
         return {} if number > 100000 else super().blocked_by(number)
+
+    def blockers(self, number):
+        return {} if number > 100000 else super().blockers(number)
+
+    def blocking(self, number):
+        return [] if number > 100000 else super().blocking(number)
 
     def add_blocked_by(self, number, blocker_db_id):
         self._log(f"[dry-run] #{number} blocked by issue id {blocker_db_id}")
