@@ -72,6 +72,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"unknown target {args.target!r}; configured: {', '.join(cfg.targets)}", file=sys.stderr)
         return 2
     target = cfg.targets[args.target]
+    if args.cmd in ("run", "start", "sync") and not cfg.runs_here(target.name):
+        print(f"{target.name} doesn't run on this machine ({cfg.machine}); its targets: "
+              f"{', '.join(cfg.machine_targets or []) or 'none'}. A target runs on one machine at a "
+              f"time: change [machines.{cfg.machine}] targets in pipeline.toml to move it.", file=sys.stderr)
+        return 2
 
     if args.cmd == "plan":
         pl = Pipeline(cfg, target)

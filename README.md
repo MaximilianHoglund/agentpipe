@@ -164,6 +164,22 @@ full re-review. Four things cut that:
 Implementers are also told not to number new entries in shared logs, since parallel
 PRs claim the same number.
 
+## Machines
+
+A target runs on one machine at a time, and several machines can each run their own
+targets at once. `[machines.<name>]` in `pipeline.toml` lists the targets a machine may
+run (`run`, `start` and `sync` refuse the others) and overrides `claude_bin`, `gh_bin`,
+`work_root` and any target key there (`[machines.<name>.target.<target>]`). The section
+is picked by `AGENTPIPE_MACHINE`, else by `hostnames`. To move a target, stop its
+dispatcher, copy its `state.json` and `plan.json` to the other machine's work dir, drop
+the `session*` fields (sessions don't move between machines), and swap it between the
+two `targets` lists. Both machines share one Claude subscription, so this adds build and
+test capacity, not agent usage: each dispatcher throttles on the account's usage.
+
+The laptop runs agentpipe inside WSL2 Ubuntu (Smart App Control blocks native Rust
+builds there): code in `~/agentpipe`, work dir `~/pipeline-work`, launched by
+`~/agentpipe/pipeline/laptop-run.sh <target>`, detached so it outlives the SSH session.
+
 ## What runs where
 
 - Agents run as headless `claude -p` on your subscription, with `--permission-mode

@@ -132,8 +132,8 @@ tools = ["Read", "Edit", "Glob", "Grep", "Bash", "PowerShell"]
 #   `openspec archive {change} --yes`, "" turns it off.
 
 [targets.dota]
-repo_root = "E:/Source/Claude"
-github_repo = "MaximilianHoglund/PoEEyes"
+repo_root = "E:/Source/dota2-draft-helper"
+github_repo = "MaximilianHoglund/dota2-draft-helper"
 changes = ["dota2-draft-helper"]
 project_dir = "dota"
 test = "cargo test --workspace"
@@ -147,8 +147,8 @@ mutation = "cargo mutants --in-place --in-diff {diff} --baseline skip --timeout 
 mutation_timeout = 1800
 
 [targets.riftbound]
-repo_root = "E:/Source/Claude"
-github_repo = "MaximilianHoglund/PoEEyes"
+repo_root = "E:/Source/riftbound"
+github_repo = "MaximilianHoglund/riftbound"
 changes = ["riftbound-footage-replay", "riftbound-full-card-database", "riftbound-gui",
            "riftbound-learned-agent", "riftbound-opponent-modelling"]
 project_dir = "riftbound"
@@ -232,3 +232,31 @@ play = ["balance-and-content/3.1", "balance-and-content/3.4"]
 tag = "step-5-long-term-balance"
 title = "Step 5: Long-term balance"
 changes = ["balance-and-content"]
+
+# ---------------------------------------------------------------- machines
+# Each machine runs its own targets, so two dispatchers can work at once without both taking
+# the same issue. The section is picked by AGENTPIPE_MACHINE, else by `hostnames`. `targets`
+# lists what may run there (run/start/sync refuse the rest); to move a target, take it out of
+# one list, stop its dispatcher, and add it to the other. Top-level claude_bin, gh_bin and
+# work_root, and any target key under [machines.<name>.target.<target>], are overridden.
+
+[machines.desktop]
+hostnames = ["Amiariel"]
+targets = ["arpg", "dota"]
+
+# The laptop runs agentpipe inside WSL2 Ubuntu-24.04: Smart App Control blocks unsigned
+# native binaries (rustc), so Windows-side builds don't work there. 12 threads, 12 GB for WSL.
+[machines.laptop]
+hostnames = ["DESKTOP-AJ9U89K"]
+targets = ["riftbound"]
+claude_bin = "~/.local/bin/claude"
+gh_bin = "~/.local/bin/gh"
+work_root = "~/pipeline-work"
+
+[machines.laptop.target.riftbound]
+repo_root = "~/riftbound"
+# The POSIX twin of check.ps1 (riftbound-learned-agent D12); --fast skips fmt as -Fast does.
+test = "bash scripts/check.sh --fast"
+preflight = ["cargo --version"]
+# The laptop builds about 1.4x slower than the desktop.
+test_timeout = 7200

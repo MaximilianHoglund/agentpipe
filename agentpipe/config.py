@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -122,6 +123,13 @@ class Config:
     max_batch: int = 4  # most tasks the planner may put in one batch (one PR); 1 turns batching off
     mcp_servers: dict = field(default_factory=dict)  # the only MCP servers agents get
     extra: dict = field(default_factory=dict)
+    # The [machines.<name>] section in effect ("" when none matched), and the targets it may
+    # run (None: any). A target runs on one machine at a time, so each machine lists its own.
+    machine: str = ""
+    machine_targets: list[str] | None = None
+
+    def runs_here(self, target: str) -> bool:
+        return self.machine_targets is None or target in self.machine_targets
 
     def __post_init__(self) -> None:
         # The preflight agent only runs the targets' check commands, so a small model will
@@ -134,8 +142,42 @@ class Config:
             pre.tools = list(impl.tools)
 
 
+def machine_name(machines: dict) -> str:
+    """The [machines.<name>] section for this machine: AGENTPIPE_MACHINE if set, else the
+    section whose `hostnames` lists this host, else ""."""
+    if name := os.environ.get("AGENTPIPE_MACHINE", ""):
+        if name not in machines:
+            raise ValueError(f"AGENTPIPE_MACHINE={name!r}: pipeline.toml has no [machines.{name}]")
+        return name
+    host = socket.gethostname().lower()
+    for name, m in machines.items():
+        if host in (h.lower() for h in m.get("hostnames", [])):
+            return name
+    return ""
+
+
+def apply_machine(data: dict) -> tuple[str, list[str] | None]:
+    """Merge this machine's overrides into the parsed file: top-level keys (claude_bin, gh_bin,
+    work_root) and per-target keys under [machines.<name>.target.<target>]."""
+    machines = data.get("machines", {})
+    name = machine_name(machines)
+    if not name:
+        return "", None
+    m = machines[name]
+    for key in ("claude_bin", "gh_bin", "work_root"):
+        if key in m:
+            data[key] = m[key]
+    for tname, over in m.get("target", {}).items():
+        if tname not in data.get("targets", {}):
+            raise ValueError(f"[machines.{name}.target.{tname}]: no such target")
+        data["targets"][tname].update(over)
+    targets = m.get("targets")
+    return name, (list(targets) if targets is not None else None)
+
+
 def load(path: Path) -> Config:
     data = tomllib.loads(path.read_text(encoding="utf-8"))
+    machine, machine_targets = apply_machine(data)
     run = data.get("run", {})
     work_root = Path(os.path.expanduser(data.get("work_root", "E:/Source/.pipeline")))
     shared_deny = list(data.get("permissions", {}).get("deny", []))
@@ -202,4 +244,6 @@ def load(path: Path) -> Config:
         resume_within_seconds=run.get("resume_within_seconds", 3000),
         max_batch=run.get("max_batch", 4),
         mcp_servers=dict(data.get("mcp_servers", {})),
+        machine=machine,
+        machine_targets=machine_targets,
     )
