@@ -22,6 +22,24 @@ def test_tail_returns_only_new_complete_lines(tmp_path):
     assert t.read() == ["new"]
 
 
+def test_theme_is_remembered_and_ansi_themes_are_not_offered(tmp_path):
+    work = tmp_path / "arpg"
+    (work / "logs").mkdir(parents=True)
+
+    async def go(expect):
+        app = panes.PanesApp("arpg", work, ".", interval=60)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            assert "ansi-dark" not in app.available_themes
+            assert app.theme == expect
+            app.theme = "nord"
+            await pilot.pause()
+
+    asyncio.run(go("textual-dark"))
+    assert (tmp_path / "watch-theme").read_text(encoding="utf-8") == "nord"
+    asyncio.run(go("nord"))
+
+
 def _stamp(t):
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
 

@@ -97,6 +97,11 @@ class PanesApp(App):
         super().__init__()
         self.linked = linked
         self.seen_dispatcher = False
+        # The ANSI themes take colours from the console's palette and come out blank in the
+        # classic Windows console (Max, 2026-11-07), so they aren't offered.
+        for name in ("ansi-dark", "ansi-light"):
+            self.unregister_theme(name)
+        self.theme_file = work_dir.parent / "watch-theme"  # shared by every target's watcher
         # Closing a linked watcher drains the dispatcher; say so where q is shown.
         self.bind("q", "quit", description="quit + stop dispatcher" if linked else "quit")
         self.target, self.work_dir, self.project_dir, self.interval = target, work_dir, project_dir, interval
@@ -111,6 +116,13 @@ class PanesApp(App):
 
     def on_mount(self) -> None:
         self.title = f"agentpipe {self.target}"
+        try:
+            saved = self.theme_file.read_text(encoding="utf-8").strip()
+            if saved in self.available_themes:
+                self.theme = saved
+        except OSError:
+            pass
+        self.theme_changed_signal.subscribe(self, self.save_theme)
         log = self.query_one("#log", RichLog)
         log.border_title = "dispatcher log"
         for line in self.log_tail.read()[-200:]:
@@ -180,6 +192,12 @@ class PanesApp(App):
         pane.set_class(stalled, "stalled")
         seen = "no activity yet" if idle is None else f"active {w._ago(idle)} ago" + (" STALLED?" if stalled else "")
         pane.border_subtitle = escape(f"{w._ago(now - job.started)} · {what} · {seen}")
+
+    def save_theme(self, theme) -> None:
+        try:
+            self.theme_file.write_text(theme.name, encoding="utf-8")
+        except OSError:
+            pass
 
     # ------------------------------------------------------------ actions
     def action_toggle_max(self) -> None:
