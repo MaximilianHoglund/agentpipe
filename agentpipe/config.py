@@ -25,6 +25,9 @@ class Milestone:
     # Task keys where the owner plays this release: they wait for its tag, and the release
     # doesn't wait for them (a task inside the milestone would otherwise deadlock it).
     play: list[str] = field(default_factory=list)
+    # Task keys the release doesn't wait for, with no other effect: they still run whenever they
+    # can (e.g. tasks that need a machine that is unavailable).
+    deferred: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -153,7 +156,7 @@ def load(path: Path) -> Config:
             clean_workspace_crates=bool(t.get("clean_workspace_crates", False)),
             release_branch=t.get("release_branch", ""),
             milestones=[Milestone(m["tag"], m.get("title", m["tag"]), list(m["changes"]),
-                                  list(m.get("play", [])))
+                                  list(m.get("play", [])), list(m.get("deferred", [])))
                         for m in t.get("milestones", [])],
             release_build=t.get("release_build", ""),
             release_assets=list(t.get("release_assets", [])),

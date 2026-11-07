@@ -24,11 +24,13 @@ def change_done(checkout: Path, change: str, skip: frozenset[str] | set[str] = f
 def next_due(milestones: list[Milestone], released: set[str], checkout: Path) -> Milestone | None:
     """The first unreleased milestone, if it is complete. Milestones are cut strictly in order.
 
-    A milestone's own play tasks don't count: they need the release to exist."""
+    A milestone's own play tasks don't count, since they need the release to exist, and neither
+    do its deferred tasks."""
     for m in milestones:
         if m.tag in released:
             continue
-        return m if all(change_done(checkout, c, set(m.play)) for c in m.changes) else None
+        skip = set(m.play) | set(m.deferred)
+        return m if all(change_done(checkout, c, skip) for c in m.changes) else None
     return None
 
 

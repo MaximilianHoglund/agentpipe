@@ -143,3 +143,10 @@ def test_a_milestone_does_not_wait_for_its_own_play_tasks(tmp_path: Path):
     assert milestones.next_due([m], set(), tmp_path) is m
     assert milestones.next_due([Milestone("step-1", "Step 1", ["a"])], set(), tmp_path) is None
     assert milestones.play_tags([m]) == {"a/1.2": "step-1"}
+
+
+def test_a_milestone_does_not_wait_for_deferred_tasks(tmp_path: Path):
+    write(tmp_path, "openspec/changes/a/tasks.md", "- [x] 1.1 x\n- [ ] 1.2 needs the laptop\n")
+    m = Milestone("step-1", "Step 1", ["a"], deferred=["a/1.2"])
+    assert milestones.next_due([m], set(), tmp_path) is m
+    assert milestones.play_tags([m]) == {}  # deferred tasks don't wait for the release
