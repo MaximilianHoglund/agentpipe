@@ -9,6 +9,7 @@ from enum import Enum
 class Status(str, Enum):
     BLOCKED_BY_TASK = "blocked by task"
     NEEDS_DECISION = "needs decision"
+    ON_HOLD = "on hold"
     PENDING_IMPLEMENTATION = "pending implementation"
     IN_PROGRESS = "in progress"
     PENDING_APPROVAL = "pending approval"
@@ -24,6 +25,7 @@ class Status(str, Enum):
 LABEL_INFO = {
     Status.BLOCKED_BY_TASK: ("bfd4f2", "Waits on another task; see the issue's blocked-by links"),
     Status.NEEDS_DECISION: ("d93f0b", "Needs information or a decision from a human; see the latest comment"),
+    Status.ON_HOLD: ("c2e0c6", "Decided, parked until something else lands; see the latest comment"),
     Status.PENDING_IMPLEMENTATION: ("0e8a16", "Unblocked; waiting for an implementer agent"),
     Status.IN_PROGRESS: ("fbca04", "An implementer agent is working on it"),
     Status.PENDING_APPROVAL: ("1d76db", "PR open; waiting for the reviewer agent"),
@@ -45,7 +47,7 @@ def status_from_labels(labels: list[str]) -> Status | None:
     if not found:
         return None
     # Two status labels means a human edited by hand; the most "human" one wins.
-    order = [Status.NEEDS_DECISION, Status.FINISHED, Status.APPROVED, Status.CHANGES_REQUESTED,
+    order = [Status.NEEDS_DECISION, Status.ON_HOLD, Status.FINISHED, Status.APPROVED, Status.CHANGES_REQUESTED,
              Status.PENDING_APPROVAL, Status.IN_PROGRESS, Status.PENDING_IMPLEMENTATION,
              Status.BLOCKED_BY_TASK]
     return min(found, key=order.index)

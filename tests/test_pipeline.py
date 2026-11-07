@@ -145,6 +145,11 @@ def test_records_issues_waiting_on_max_for_the_watcher(pl):
     gh.set_status(d, S.PENDING_IMPLEMENTATION, S.NEEDS_DECISION)  # Max answered
     p.tick()
     assert watch.awaiting_label(p.t.work_dir) == "1 waiting on you"
+    gh.set_status(t, S.ON_HOLD, S.PENDING_APPROVAL)  # decided, parked until something lands
+    p.tick()
+    assert watch.awaiting_label(p.t.work_dir) == "0 waiting on you"
+    assert S.ON_HOLD.label in gh.issues[t]["labels"]  # the pipeline leaves it alone
+    assert not any(k == f"ticket/{t}" for _, k, _ in p.started)
 
 
 def test_approved_ticket_is_implemented_with_its_body_as_spec(pl):
