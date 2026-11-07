@@ -1019,7 +1019,9 @@ class Pipeline:
         if not notes:
             return ""
         body = "\n\n".join(f"**{c['user']}** ({c['created_at']}):\n{c['body']}" for c in notes)
-        return "## Input from humans (authoritative; it overrides the spec where they conflict)\n\n" + body
+        return ("## Input from humans (authoritative; it overrides the spec where they conflict)\n\n"
+                "Each decision or fact here must be written into the docs by the PR that acts on "
+                "it (see \"Keep the docs current\"), not left only in a comment.\n\n" + body)
 
     # ------------------------------------------------------------------ batches
     def batch(self, t: Task) -> list[Task]:
@@ -1326,14 +1328,16 @@ class Pipeline:
         closes = "\n".join([f"Closes #{issue}"] + [f"Closes #{nums[x.key]}" for x in tasks[1:] if x.key in nums])
         listing = "\n".join(f"**{x.key}** — {x.text}" for x in tasks)
         body = (f"{TASK_MARKER.format(key=t.key)}\n{closes}\n\n{listing}\n\n"
-                f"## Summary\n\n{out['summary']}\n\n## Tests\n\n{out['tests']}\n")
+                f"## Summary\n\n{out['summary']}\n\n## Tests\n\n{out['tests']}\n\n"
+                f"## Docs\n\n{out.get('docs') or 'none'}\n")
         if pr is None:
             title = (f"{t.key}: {t.text}" if len(tasks) == 1 else
                      f"{t.change} {', '.join(x.id for x in tasks)}: {t.text}")
             n = self.gh.create_pr(t.branch, self.t.base, title[:120], body)
             self.log(f"PR #{n} opened for {self.what(t.key)}" +(f" (batch of {len(tasks)})" if len(tasks) > 1 else ""))
         else:
-            self.gh.comment(pr["number"], review.bot(f"**Revised.**\n\n{out['summary']}\n\n**Tests:** {out['tests']}"))
+            self.gh.comment(pr["number"], review.bot(f"**Revised.**\n\n{out['summary']}\n\n**Tests:** {out['tests']}"
+                                                  f"\n\n**Docs:** {out.get('docs') or 'none'}"))
         self.gh.set_status(issue, Status.PENDING_APPROVAL, cur)
         st = self.state.task(t.key)
         st.pop("fail_implement", None)
@@ -1555,6 +1559,7 @@ class Pipeline:
             self.release_waiters(n)
         if t.change != TICKET_CHANGE:
             self.commit_to_base(tasks, f"Tick {', '.join(x.key for x in tasks)} in tasks.md")
+            self.archive_if_finished(t.change)
         self.git.worktree_remove(wt)
         self.git.delete_branch(t.branch)
         self.git.delete_remote_branch(t.branch)
@@ -1589,6 +1594,43 @@ class Pipeline:
             if self.git.git("push", "origin", f"HEAD:refs/heads/{self.t.base}", cwd=self.base_wt, check=False).ok:
                 return
         self.log(f"could not push the tick for {t.key}; the next sync will retry via Close")
+
+    def archive_if_finished(self, change: str) -> None:
+        """Archive ``change`` once every task of it is ticked on the base branch.
+
+        `openspec archive` merges the change's spec deltas into openspec/specs/ and moves the
+        change under changes/archive/, so the main specs describe what was actually built
+        instead of the knowledge staying spread over finished changes. A change with a task
+        left (a play or deferred one, say) stays open. When the archive fails, typically
+        because a delta no longer applies to the main specs, a ticket asks for it to be fixed.
+        """
+        if not self.t.archive:
+            return
+        rel = self.t.changes_dir / change / "tasks.md"
+        for _ in range(3):
+            self.refresh_base()
+            if not (self.base_wt / rel).exists() or not milestones.change_done(self.base_wt, change):
+                return
+            cmd = self.t.archive.replace("{change}", change)
+            r = proc.run(cmd, self.base_wt, timeout=600, check=False, shell=True)
+            if not r.ok or (self.base_wt / rel).exists():
+                self.log(f"archiving finished change {change} failed: {r.tail(500)}")
+                self.file_tickets("the pipeline's archive step", [{
+                    "kind": "defect", "title": f"Archive the finished change {change}",
+                    "body": (f"Every task of `{change}` is ticked, but `{cmd}` at the repo root "
+                             f"failed, so its spec deltas never reached `openspec/specs/`:"
+                             + fence(r.tail(3000)) +
+                             "\nFix what the output names (usually a delta whose MODIFIED or "
+                             "REMOVED requirement doesn't match the main spec), run the command, "
+                             "and commit the result.")}])
+                return
+            self.git.git("add", "-A", "--", "openspec", cwd=self.base_wt)
+            self.git.git("commit", "-m", f"Archive {change}: every task is done; its specs are synced "
+                                         "into openspec/specs", cwd=self.base_wt)
+            if self.git.git("push", "origin", f"HEAD:refs/heads/{self.t.base}", cwd=self.base_wt, check=False).ok:
+                self.log(f"archived {change}: its specs are synced into openspec/specs")
+                return
+        self.log(f"could not push the archive of {change}; run `{self.t.archive.replace('{change}', change)}` by hand")
 
     # ------------------------------------------------------------------ milestones
     def release_state(self, m: Milestone) -> dict:

@@ -8,7 +8,7 @@ from importlib import resources
 from agentpipe.status import BOT_MARKER, REVIEW_MARKER, is_bot_comment, parse_review_marker
 
 CATEGORIES = ["spec", "correctness", "corner-cut", "duplication", "architecture",
-              "test-behaviour", "test-coverage", "other"]
+              "test-behaviour", "test-coverage", "docs", "other"]
 
 TICKETS_PROPERTY = {
     "type": "array",
@@ -51,9 +51,11 @@ IMPLEMENTER_SCHEMA = {
         "summary": {"type": "string"},
         "tests": {"type": "string"},
         "question": {"type": "string"},
+        "docs": {"type": "string",
+                 "description": "Docs updated and what each now records, or 'none' and why nothing needed it"},
         "tickets": TICKETS_PROPERTY,
     },
-    "required": ["status", "summary", "tests"],
+    "required": ["status", "summary", "tests", "docs"],
 }
 
 REVIEW_SCHEMA = {

@@ -73,6 +73,10 @@ class Target:
     # Items Max has parked (issue numbers or task keys): they stay as they are, but don't count
     # as waiting on him. Milestone `deferred` tasks count as parked too.
     parked: list[int | str] = field(default_factory=list)
+    # Run at the repo root once every task of a change is ticked: syncs its spec deltas into
+    # openspec/specs/ and moves it to changes/archive/. {change} is the change name; "" turns
+    # archiving off.
+    archive: str = "openspec archive {change} --yes"
 
     def is_parked(self, key: str, number: int) -> bool:
         return (number in self.parked or key in self.parked
@@ -90,7 +94,8 @@ class Target:
                 p.name for p in root.iterdir()
                 if p.is_dir() and p.name != "archive" and (p / "tasks.md").exists()
             )
-        return list(self.changes_spec)
+        # A listed change that has been archived since has no tasks.md left to load.
+        return [c for c in self.changes_spec if (root / c / "tasks.md").exists()]
 
 
 @dataclass
@@ -172,6 +177,7 @@ def load(path: Path) -> Config:
             format=t.get("format", ""),
             overlap_ignore=list(t.get("overlap_ignore", [])),
             parked=list(t.get("parked", [])),
+            archive=t.get("archive", "openspec archive {change} --yes"),
         )
         tg = targets[name]
         if tg.milestones and not tg.release_branch:

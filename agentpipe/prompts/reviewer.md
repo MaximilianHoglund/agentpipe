@@ -69,6 +69,10 @@ retry it in another form:
 - [test-coverage] Happy-path-only tests. Enumerate the input partitions and boundaries
   (empty, zero, one, max, off-by-one, malformed, missing, every error path, ordering
   and state interactions the spec names) and flag each meaningful one with no test.
+- [docs] The code now differs from the change's spec or `design.md`, or from the context
+  docs, and the PR doesn't update them; a reading the implementer chose for an ambiguous
+  spec, or a decision from the human input, that the PR doesn't record; a doc the PR made
+  false. Missing prose for what the code says plainly is not a finding.
 
 ## Tickets for things outside your scope
 

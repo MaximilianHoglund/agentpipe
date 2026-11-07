@@ -58,6 +58,7 @@ class FakeGitHub:
 def pl(tmp_path: Path):
     base = tmp_path / "work" / "base"
     (base / "openspec" / "changes" / "c").mkdir(parents=True)
+    (base / "openspec" / "changes" / "c" / "tasks.md").write_text("- [ ] 1.1 a\n- [ ] 1.2 b\n- [ ] 1.3 c\n- [ ] 1.4 d\n")
     target = Target("t", tmp_path, "o/r", "main", ["c"], ".", "true", "", [], tmp_path / "work")
     agent = Agent("m", 1, [])
     cfg = Config({"t": target}, "claude", "gh", {"planner": agent, "implementer": agent, "reviewer": agent},
@@ -484,6 +485,9 @@ def test_approved_ticket_naming_a_task_awaits_it_and_is_released_by_its_merge(li
 
 def test_a_replan_that_reverses_an_edge_relinks_without_a_cycle(tmp_path):
     from agentpipe.deps import TaskDeps
+    change = tmp_path / "work" / "base" / "openspec" / "changes" / "c"
+    change.mkdir(parents=True)
+    (change / "tasks.md").write_text("- [ ] 1.1 a\n- [ ] 1.2 b\n")
     target = Target("t", tmp_path, "o/r", "main", ["c"], ".", "true", "", [], tmp_path / "work")
     agent = Agent("m", 1, [])
     cfg = Config({"t": target}, "claude", "gh", {"planner": agent, "implementer": agent, "reviewer": agent})
@@ -771,3 +775,72 @@ def test_a_clean_merge_after_approval_is_approved_without_an_agent(pl, tmp_path)
     # New work since the approval needs the full review.
     commit_on(repo, "feature", "run.rs", "x = 9\n")
     assert p.resolution_verdict(t, {"number": 5, "headRefOid": p.git.head(repo)}, repo, repo, "s", history) is None
+
+
+def archive_repo(p, tmp_path, tasks_md):
+    """A remote with `main` holding change `c`, and ``p`` pointed at a clone of it."""
+    import sys
+    from agentpipe.git import Git
+    origin = tmp_path / "origin.git"
+    git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
+    root = tmp_path / "root"
+    git(tmp_path, "clone", "-q", str(origin), str(root))
+    for k, v in (("user.email", "t@t"), ("user.name", "t"), ("core.autocrlf", "false")):
+        git(root, "config", k, v)
+    (root / "openspec" / "changes" / "c").mkdir(parents=True)
+    (root / "openspec" / "changes" / "c" / "tasks.md").write_text(tasks_md)
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "init")
+    git(root, "push", "-q", "origin", "HEAD:main")
+    p.git = Git(root)
+    p.base_wt = tmp_path / "base-wt"
+    p.base_ref = lambda: "origin/main"
+    p.t.base = "main"
+    mover = ("import os,shutil;os.makedirs('openspec/changes/archive',exist_ok=True);"
+             "shutil.move('openspec/changes/{change}','openspec/changes/archive/2026-01-01-{change}')")
+    p.t.archive = f'"{sys.executable}" -c "{mover}"'
+    return origin
+
+
+def remote_files(origin):
+    return git(origin, "ls-tree", "-r", "--name-only", "main").split()
+
+
+def test_a_finished_change_is_archived_on_the_base_branch(pl, tmp_path):
+    p, gh = pl
+    origin = archive_repo(p, tmp_path, "- [x] 1.1 a\n- [x] 1.2 b\n")
+    p.archive_if_finished("c")
+    assert remote_files(origin) == ["openspec/changes/archive/2026-01-01-c/tasks.md"]
+    assert gh.issues == {}
+
+
+def test_a_change_with_an_open_task_is_not_archived(pl, tmp_path):
+    p, gh = pl
+    origin = archive_repo(p, tmp_path, "- [x] 1.1 a\n- [ ] 1.2 b\n")
+    p.archive_if_finished("c")
+    assert remote_files(origin) == ["openspec/changes/c/tasks.md"]
+
+
+def test_a_failed_archive_files_a_ticket_and_pushes_nothing(pl, tmp_path):
+    p, gh = pl
+    origin = archive_repo(p, tmp_path, "- [x] 1.1 a\n")
+    p.t.archive = "echo delta does not apply&& exit 1"
+    p.archive_if_finished("c")
+    assert remote_files(origin) == ["openspec/changes/c/tasks.md"]
+    (ticket,) = gh.issues.values()
+    assert ticket["title"] == "Archive the finished change c" and "delta does not apply" in ticket["body"]
+
+
+def test_archiving_off_leaves_a_finished_change(pl, tmp_path):
+    p, gh = pl
+    origin = archive_repo(p, tmp_path, "- [x] 1.1 a\n")
+    p.t.archive = ""
+    p.archive_if_finished("c")
+    assert remote_files(origin) == ["openspec/changes/c/tasks.md"]
+
+
+def test_a_listed_change_that_was_archived_is_no_longer_loaded(tmp_path):
+    (tmp_path / "openspec" / "changes" / "live").mkdir(parents=True)
+    (tmp_path / "openspec" / "changes" / "live" / "tasks.md").write_text("- [ ] 1.1 a\n")
+    t = Target("t", tmp_path, "o/r", "main", ["live", "gone"], ".", "true", "", [], tmp_path / "work")
+    assert t.changes(tmp_path) == ["live"]

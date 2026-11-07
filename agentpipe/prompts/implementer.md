@@ -19,6 +19,24 @@ $batch_section
 - The repo's CLAUDE.md files apply and override general habits.
 - Do **not** edit `tasks.md`; the pipeline ticks it after merge.
 
+## Keep the docs current
+
+The next agent knows only what is written down. When your work settles something the docs
+don't say, write it down in the same PR, where the next agent in that area will read it:
+
+- **The spec or design was wrong, incomplete or ambiguous** and you chose a reading: update
+  the change's `design.md` (the decision and its reason) or its spec delta under `specs/`
+  (requirement and scenario), so they describe what the code now does. For a ticket, use
+  the context docs above.
+- **A decision or fact from the human input** below: record it the same way, dated. It must
+  not live only in an issue comment.
+- **A non-obvious fact that cost you time**: a pitfall, a constraint, why the obvious approach
+  fails. Put it in the context docs, or a comment where it applies in the code.
+
+Follow each doc's own conventions, and rewrite what your change made wrong rather than
+appending a contradiction. Don't document what the code already says plainly. The reviewer
+rejects a PR whose code contradicts the spec or docs without updating them.
+
 $prior_work
 $human_input
 
@@ -99,5 +117,7 @@ Return the structured output:
   use it for things you can figure out by reading the code.
 - `summary`: what you changed and why, written for the PR description.
 - `tests`: the behaviours and edge cases your tests cover.
+- `docs`: each doc you updated and what it now records, or `none` and why nothing needed
+  recording.
 - `question`: when `needs_decision`, the precise question(s) and the options you see,
   with your recommendation. Commit whatever finished work you have first.

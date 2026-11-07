@@ -121,6 +121,9 @@ tools = ["Read", "Edit", "Glob", "Grep", "Bash", "PowerShell"]
 #   to project_dir. cargo-mutants runs --in-place in the reviewer's throwaway checkout, so it
 #   reuses the gate's warm build and never copies the tree to %TEMP% (C:). The gate has just
 #   passed on the same commit, hence --baseline skip; --timeout caps each mutant instead.
+# context: repo-relative docs every agent reads first; agents record findings there.
+# archive (optional): run at the repo root when a change's last task is ticked; defaults to
+#   `openspec archive {change} --yes`, "" turns it off.
 
 [targets.dota]
 repo_root = "E:/Source/Claude"
@@ -128,6 +131,7 @@ github_repo = "MaximilianHoglund/PoEEyes"
 changes = ["dota2-draft-helper"]
 project_dir = "dota"
 test = "cargo test --workspace"
+context = ["dota/DECISIONS.md"]
 # preflight: commands that must exit 0 from the dispatcher's shell (cmd) and from an
 # agent's Bash and PowerShell tools before any agent runs; preflight_gate also runs the
 # gate on the base branch. Keep them valid in all three shells.
@@ -143,6 +147,8 @@ changes = ["riftbound-footage-replay", "riftbound-full-card-database", "riftboun
            "riftbound-learned-agent", "riftbound-opponent-modelling"]
 project_dir = "riftbound"
 test = "pwsh -NoProfile -File scripts/check.ps1 -Fast"
+# RULINGS.md is too long to read every task; riftbound/CLAUDE.md points agents at it.
+context = ["riftbound/DECISIONS.md"]
 preflight = ["cargo --version", 'pwsh -NoProfile -Command "exit 0"']
 # No preflight_gate: the gate takes over an hour here.
 test_timeout = 5400
