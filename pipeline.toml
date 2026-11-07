@@ -184,7 +184,9 @@ test = '''pwsh -NoProfile -Command "if (Test-Path scripts/check.ps1) { & ./scrip
 # --skip: the two `checkouts_sharing_a_target_directory_*` tests (content, bridge) check Cargo
 # rebuild behaviour with nested builds, not code, and take ~110 s; they made every bridge mutant
 # time out (run-viewer 1.1: 24 of 36 mutants, 29 min, no signal). Rest of bridge's tests: ~40 s.
-mutation = '''pwsh -NoProfile -Command "if (Test-Path Cargo.toml) { cargo mutants --in-place --in-diff '{diff}' --baseline skip --timeout 120 --no-shuffle -- -- --skip checkouts_sharing_a_target_directory } else { Write-Output 'No Cargo.toml yet: no mutation run.' }"'''
+# -j 6, not --in-place: 6 copies of the tree (in the slot's TEMP), each with its own target dir,
+# so CARGO_TARGET_DIR is cleared or they'd share one. PR #367's 86 mutants: 8 min, vs ~1 h serial.
+mutation = '''pwsh -NoProfile -Command "if (Test-Path Cargo.toml) { Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue; cargo mutants -j 6 --in-diff '{diff}' --baseline skip --timeout 120 --no-shuffle -- -- --skip checkouts_sharing_a_target_directory } else { Write-Output 'No Cargo.toml yet: no mutation run.' }"'''
 mutation_timeout = 1800
 context = ["docs/design.md", "docs/decisions.md", "docs/roadmap.md", "docs/agent-environment.md"]
 # Godot 4.7.2 in self-contained mode, with export templates, preinstalled off the repo.
