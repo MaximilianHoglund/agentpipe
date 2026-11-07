@@ -851,3 +851,28 @@ def test_a_listed_change_that_was_archived_is_no_longer_loaded(tmp_path):
     (tmp_path / "openspec" / "changes" / "live" / "tasks.md").write_text("- [ ] 1.1 a\n")
     t = Target("t", tmp_path, "o/r", "main", ["live", "gone"], ".", "true", "", [], tmp_path / "work")
     assert t.changes(tmp_path) == ["live"]
+
+
+def test_review_worktree_gets_the_base_merged_in_locally(pl, tmp_path):
+    p, _ = pl
+    repo, commit_on, git = merge_repo(tmp_path)
+    commit_on(repo, "base", "run.rs", "x = 1\n")
+    commit_on(repo, "feature", "lib.rs", "mod a;\nmod b;\nmod z;\n")
+    pipeline_on(p, repo)
+    head = git(repo, "rev-parse", "HEAD").strip()
+    p.merge_base_for_review(repo)
+    assert (repo / "run.rs").read_text() == "x = 1\n"
+    assert p.git.contains(repo, "base") and p.git.contains(repo, head)
+    assert "lib.rs" in p.git.diff(repo, "base") and "run.rs" not in p.git.diff(repo, "base")
+
+
+def test_review_worktree_keeps_the_branch_when_the_base_conflicts(pl, tmp_path):
+    p, _ = pl
+    repo, commit_on, git = merge_repo(tmp_path)
+    commit_on(repo, "base", "run.rs", "x = 1\n")
+    commit_on(repo, "feature", "run.rs", "x = 2\n")
+    pipeline_on(p, repo)
+    head = git(repo, "rev-parse", "HEAD").strip()
+    p.merge_base_for_review(repo)
+    assert git(repo, "rev-parse", "HEAD").strip() == head
+    assert not p.git.merging(repo) and git(repo, "status", "--porcelain").strip() == ""

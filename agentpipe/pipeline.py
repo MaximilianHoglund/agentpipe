@@ -1552,6 +1552,7 @@ class Pipeline:
         self.git.fetch()
         self.git.worktree_detached(rv, sha)
         try:
+            self.merge_base_for_review(rv)
             pdir = rv / self.t.project_dir
             history = review.review_history(self.gh.comments(pr["number"]))
             round_ = review.rounds_used(history) + 1
@@ -1596,6 +1597,18 @@ class Pipeline:
         finally:
             self.git.worktree_remove(rv)
 
+    def merge_base_for_review(self, rv: Path) -> None:
+        """Merges the base into the review worktree, locally (nothing is pushed), so the review
+        judges the PR as it would land, and the gate and tests are the base's latest rather than
+        the ones the branch forked with: arpg's gate fixes otherwise reached a PR only once its
+        branch merged them (Nov 2026). A conflicting merge is undone and the PR reviewed as it is;
+        the merge job deals with the conflict."""
+        if self.git.contains(rv, self.base_ref()):
+            return
+        if not self.git.merge(rv, self.base_ref()):
+            self.git.merge_abort(rv)
+            self.log(f"review worktree {rv.name}: {self.base_ref()} doesn't merge cleanly; reviewing the branch as it is")
+
     def resolution_verdict(self, t: Task, pr: dict, rv: Path, pdir: Path, slot: str, history) -> dict | None:
         """A short review for a PR that was approved, hit a conflict, and since then only merged
         the base: check the merges' conflict resolutions, not the whole PR again (no mutation run).
@@ -1630,7 +1643,7 @@ class Pipeline:
         if res.subtype in CAPPED:
             raise CappedRun(res)
         if not res.ok:
-            self.git.git("checkout", "--force", "--detach", pr["headRefOid"], cwd=rv)
+            self.git.git("checkout", "--force", "--detach", "HEAD", cwd=rv)
             return None  # fall back to the full review
         self.file_tickets(f"the review of PR #{pr['number']} ({t.key})", res.structured.get("tickets"))
         return review.normalize_verdict(res.structured)
@@ -1689,7 +1702,7 @@ class Pipeline:
             if res.ok:
                 self.file_tickets(f"the review of PR #{pr['number']} ({t.key})", res.structured.get("tickets"))
                 return review.normalize_verdict(res.structured)
-            self.git.git("checkout", "--force", "--detach", pr["headRefOid"], cwd=rv)  # undo stray probes
+            self.git.git("checkout", "--force", "--detach", "HEAD", cwd=rv)  # undo stray probes
         raise RuntimeError(f"reviewer failed twice ({res.subtype}): {res.text[:1000]}")
 
     def job_merge(self, t: Task, issue: int, pr: dict, slot: str) -> None:
