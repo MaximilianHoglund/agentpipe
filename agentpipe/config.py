@@ -70,6 +70,13 @@ class Target:
     # touching the same files apart: files nearly every task edits and whose conflicts are
     # additive, such as module lists and decision logs.
     overlap_ignore: list[str] = field(default_factory=list)
+    # Items Max has parked (issue numbers or task keys): they stay as they are, but don't count
+    # as waiting on him. Milestone `deferred` tasks count as parked too.
+    parked: list[int | str] = field(default_factory=list)
+
+    def is_parked(self, key: str, number: int) -> bool:
+        return (number in self.parked or key in self.parked
+                or any(key in m.deferred for m in self.milestones))
 
     @property
     def changes_dir(self) -> Path:
@@ -164,6 +171,7 @@ def load(path: Path) -> Config:
             preflight_gate=bool(t.get("preflight_gate", False)),
             format=t.get("format", ""),
             overlap_ignore=list(t.get("overlap_ignore", [])),
+            parked=list(t.get("parked", [])),
         )
         tg = targets[name]
         if tg.milestones and not tg.release_branch:

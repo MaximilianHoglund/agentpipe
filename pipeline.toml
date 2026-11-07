@@ -147,6 +147,9 @@ preflight = ["cargo --version", 'pwsh -NoProfile -Command "exit 0"']
 # No preflight_gate: the gate takes over an hour here.
 test_timeout = 5400
 # No mutation run: the gate alone takes long here, and in-place mutants run serially.
+# Parked by Max 2026-11-07, not counted as waiting on him: #12-#15 footage (paid API key),
+# #28 (GPU), #37 (clean second machine).
+parked = [12, 13, 14, 15, 28, 37]
 
 [targets.arpg]
 repo_root = "E:/Source/arpg-manager"

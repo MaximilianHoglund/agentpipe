@@ -47,6 +47,10 @@ everything resumes on restart. Closing the watcher window that `start` opened ac
 the dispatcher. A hidden dispatcher's console output and any crash
 traceback go to `logs/dispatcher.out`, and crashes are also logged to `pipeline.log`.
 
+The watcher's "N waiting on you" counts issues in `needs decision` and unworked ticket
+proposals. It leaves out a target's `parked` items (issue numbers or task keys) and its
+milestones' `deferred` tasks; their labels stay as they are.
+
 Optional per target: `extra_tools` (added to the implementer's and reviewer's allowed tools)
 and `env` (extra environment variables; `{NAME}` in a value expands to the inherited value).
 

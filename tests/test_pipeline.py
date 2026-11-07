@@ -129,6 +129,23 @@ def test_status_without_pr_goes_to_needs_decision_but_fresh_tickets_wait(pl):
     assert not any(k == f"ticket/{t}" for _, k, _ in p.started)
 
 
+def test_parked_and_deferred_items_are_not_waiting_on_max(pl):
+    from agentpipe.config import Milestone
+    p, gh = pl
+    d = task_issue(gh, "c/1.1", S.NEEDS_DECISION)
+    by_key = task_issue(gh, "c/1.2", S.NEEDS_DECISION)
+    deferred = task_issue(gh, "c/1.3", S.NEEDS_DECISION)
+    by_number = gh.add(TICKET_MARKER + "\nfix it", S.PENDING_APPROVAL, title="Needs a GPU")
+    p.state.data["tickets"] = [by_number]
+    p.load_tickets(p.issues_by_key(gh.list_issues()))
+    p.t.parked = ["c/1.2", by_number]
+    p.t.milestones = [Milestone("step-1", "Step 1", ["c"], deferred=["c/1.3"])]
+    p.tick()
+    assert p.state.data["awaiting_input"] == [d]
+    assert S.NEEDS_DECISION.label in gh.issues[by_key]["labels"]  # parked, not changed
+    assert S.NEEDS_DECISION.label in gh.issues[deferred]["labels"]
+
+
 def test_records_issues_waiting_on_max_for_the_watcher(pl):
     from agentpipe import watch
     p, gh = pl

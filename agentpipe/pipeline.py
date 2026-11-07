@@ -850,9 +850,12 @@ class Pipeline:
 
         These are issues in needs decision, plus tickets in pending approval that nobody has
         worked on and that have no PR. A ticket with a PR is in review, so it isn't counted.
+        Parked items (target `parked`, milestone `deferred`) aren't counted either.
         """
         awaiting = []
         for key, i in issues.items():
+            if self.t.is_parked(key, i["number"]):
+                continue
             s = status_from_labels(i["labels"])
             proposal = (s is Status.PENDING_APPROVAL and key.startswith(TICKET_CHANGE + "/")
                         and key not in prs and not self.state.task(key).get("runs"))
