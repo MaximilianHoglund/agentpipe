@@ -40,6 +40,14 @@ $prior_section
    file with `git restore <file>`. Do at least three probes, aimed at edge cases.
    An uncaught break is strong evidence of a coverage gap.
 
+Some commands are denied to every agent; a denied call only wastes a turn, so don't
+retry it in another form:
+- `gh`: the task, the human comments on its issue and PR, and the open tickets are
+  already in this prompt. Other issues are not available; judge from the code.
+- `kill`/`taskkill`/`Stop-Process`: other agents run on this machine. Run tests in the
+  foreground with a timeout rather than in the background.
+- `git checkout`: use `git restore <file>`.
+
 ## Criteria (category in brackets)
 
 - [spec] Does the change do what the task and its spec scenarios require, completely?

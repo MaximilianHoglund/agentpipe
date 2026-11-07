@@ -8,8 +8,12 @@ extra bookkeeping. Each denial is classed by why it happened:
   that keeps firing on harmless work may be too broad.
 - ``not allowed``: no allow rule covers the tool. That is a gap: either allow the
   tool or tell the agents to do it another way.
+- ``protected file``: an Edit or Write the agent's allowlist permits, refused by Claude
+  Code's own safety check on files that can run code (``.cargo/config.toml``, ``.git/``,
+  ``.claude/``). No config rule lifts it: steer agents to report the change instead.
 - ``no longer denied``: today's config would let it through (a rule was narrowed or a
-  tool allowed since). Kept so the history is complete; nothing to do.
+  tool allowed since), or Claude Code's own checks refused a shell command (protected
+  paths in ``Remove-Item``). Mostly history; recent entries are worth a look.
 
 A run killed mid-way leaves no result, so its denials are missing here; watch shows
 live ones.
@@ -26,6 +30,7 @@ from pathlib import Path
 
 _RULE_RE = re.compile(r"^(\w+)(?:\((.*?)(?::\*)?\))?$")
 _SPLIT_RE = re.compile(r"&&|\|\||[;|\n]")
+_FILE_TOOLS = {"Edit", "Write", "NotebookEdit"}
 
 
 @dataclass
@@ -77,7 +82,14 @@ def scan(logs: Path, deny: list[str], since: float = 0.0, allowed: set[str] = fr
             inp = d.get("tool_input") or {}
             command = str(inp.get("command") or inp.get("file_path") or inp.get("url") or json.dumps(inp))
             rule = matching_rule(tool, command, deny)
-            reason = f"deny rule {rule}" if rule else "no longer denied" if tool in allowed else "not allowed"
+            if rule:
+                reason = f"deny rule {rule}"
+            elif tool not in allowed:
+                reason = "not allowed"
+            elif tool in _FILE_TOOLS:
+                reason = "protected file"
+            else:
+                reason = "no longer denied"
             out.append(Denial(path.name.removesuffix(".out.json"), when, tool, command, reason))
     return out
 
@@ -101,7 +113,8 @@ def _group_key(d: Denial) -> str:
 _HEADINGS = {
     "not allowed": "NOT ALLOWED (gaps: allow the tool, or steer agents elsewhere)",
     "deny rule": "DENY RULES (intended; check none fire on harmless work)",
-    "no longer denied": "NO LONGER DENIED (today's config allows these; history only)",
+    "protected file": "PROTECTED FILES (Claude Code's own check; the change needs a human)",
+    "no longer denied": "NO LONGER DENIED (today's config allows these; or a Claude Code path check)",
 }
 
 
@@ -110,7 +123,7 @@ def report(denials: list[Denial], *, examples: int = 2, width: int = 110) -> str
         return "No denied tool calls."
     runs = {d.run for d in denials}
     lines = [f"{len(denials)} denied tool call(s) in {len(runs)} run(s).", ""]
-    for reason in ("not allowed", "deny rule", "no longer denied"):
+    for reason in ("not allowed", "protected file", "deny rule", "no longer denied"):
         group = [d for d in denials if d.reason.startswith(reason)]
         if not group:
             continue

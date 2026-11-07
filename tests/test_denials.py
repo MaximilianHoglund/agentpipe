@@ -36,6 +36,10 @@ def test_scan_and_report_separate_gaps_from_deny_rules(tmp_path):
     assert denials.report([]) == "No denied tool calls."
     later = denials.scan(tmp_path, DENY, allowed={"PowerShell"})
     assert [d.reason for d in later][1:] == ["no longer denied", "no longer denied"]
+    _out(tmp_path / "c-impl-1.out.json", [{"tool_name": "Edit", "tool_input": {"file_path": ".cargo/config.toml"}}])
+    guarded = denials.scan(tmp_path, DENY, allowed={"Edit"})
+    assert guarded[-1].reason == "protected file"
+    assert "PROTECTED FILES" in denials.report(guarded)
 
 
 def test_claude_run_reports_denials_and_writes_plain_log_names(tmp_path):

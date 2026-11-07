@@ -1216,7 +1216,7 @@ class Pipeline:
                      "findings": [], "probes": [], "details": gate.tail(6000)}
             else:
                 try:
-                    v = self.reviewer_verdict(t, pr, rv, pdir, slot, history)
+                    v = self.reviewer_verdict(t, pr, rv, pdir, slot, history, issue)
                 except CappedRun as e:
                     return self.capped(t, issue, Status.PENDING_APPROVAL, e.result, "reviewer")
             self.gh.comment(pr["number"], review.render_review(v, sha, round_, self.cfg.max_rounds))
@@ -1232,7 +1232,8 @@ class Pipeline:
         finally:
             self.git.worktree_remove(rv)
 
-    def reviewer_verdict(self, t: Task, pr: dict, rv: Path, pdir: Path, slot: str, history) -> dict:
+    def reviewer_verdict(self, t: Task, pr: dict, rv: Path, pdir: Path, slot: str, history,
+                         issue: int | None = None) -> dict:
         mutation_section = ""
         if self.t.mutation:
             diff_path = rv.parent / f"{t.slug}.diff"
@@ -1263,6 +1264,10 @@ class Pipeline:
             pr_summary=pr["body"].split("## Summary", 1)[-1].strip()[:6000],
             test_cmd=self.t.test, mutation_section=mutation_section, prior_section=prior,
             context_list=self.context_list())
+        # Max's answers on the issue override the spec for the implementer, so the reviewer
+        # must judge against them too; without them it tried `gh issue view --comments`.
+        if issue is not None and (notes := self.human_input(issue, pr)):
+            prompt += "\n\n" + notes
         self.log(f"phase {t.key}: agent (reviewer)")
         for attempt in range(2):
             res = self.claude.run(prompt, pdir, self.agent_def("reviewer"), review.REVIEW_SCHEMA,

@@ -77,8 +77,14 @@ git-ignored directory (see `.gitignore`, e.g. `target/` or `.scratch/`).
 
 Some commands are denied to every agent; a denied call only wastes a turn, so don't
 retry it in another form:
-- `git checkout`/`switch`: undo an edit with `git restore <file>`.
+- `git checkout`/`switch`: undo an edit with `git restore <file>`; in a merge conflict,
+  take one side with `git restore --theirs <file>` (or `--ours`).
 - `gh`: the task and every comment on it are already in this prompt.
+- `kill`/`taskkill`/`Stop-Process`: other agents run on this machine. Give long commands
+  a timeout instead.
+- Claude Code itself refuses writes to files that can run code, such as
+  `.cargo/config.toml`, by any tool (Edit, Write, a shell redirect). If the task needs one
+  changed, make the rest of the change and say exactly what the file needs in `summary`.
 
 ## Finish
 

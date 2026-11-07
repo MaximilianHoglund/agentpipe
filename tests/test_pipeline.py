@@ -532,6 +532,23 @@ def test_mutation_run_does_not_clean_what_the_gate_just_built(pl, tmp_path, monk
     assert cleaned == []
 
 
+def test_reviewer_sees_human_input_on_the_issue(pl, tmp_path):
+    from agentpipe.claude import ClaudeResult
+    p, gh = pl
+    p.t.mutation = ""
+    rv = tmp_path / "rv"
+    rv.mkdir()
+    gh.comments_by[3] = [{"user": "max", "created_at": "2026-11-07", "body": "Use option B."}]
+    p.git = type("G", (), {"diff": lambda self, *a, **kw: ""})()
+    prompts = []
+    verdict = {"verdict": "approve", "summary": "s", "findings": [], "probes": [], "tickets": []}
+    p.claude = type("C", (), {"run": lambda self, prompt, *a, **kw: (prompts.append(prompt), ClaudeResult(
+        True, "", "", verdict, False, subtype="success"))[1]})()
+    pr = {"number": 7, "headRefOid": "abc1234567", "body": "## Summary\nx"}
+    p.reviewer_verdict(p.tasks["c/1.1"], pr, rv, rv, "review-0", [], 3)
+    assert "Input from humans" in prompts[0] and "Use option B." in prompts[0]
+
+
 def test_clean_workspace_crates_prunes_checkout_scratch(pl, tmp_path, monkeypatch):
     p, _ = pl
     ws = tmp_path / "ws"
