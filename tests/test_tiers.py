@@ -139,3 +139,48 @@ def test_backfill_rates_unrated_tasks_on_the_light_planner(pl):
     assert p.backfill_touches(list(p.tasks.values()), p.plan)
     assert seen["model"] == LIGHT and "c/1.1 |" in seen["prompt"] and "c/1.2 |" not in seen["prompt"]
     assert p.plan.tasks["c/1.1"].tier == "light" and p.plan.tasks["c/1.1"].touches == ["a.rs"]
+
+
+# ------------------------------------------------------------------ tickets
+def ticket_pl(p):
+    from agentpipe.status import TICKET_MARKER, Status
+    from agentpipe.tasks import Task
+    p.cfg.agents["implementer"] = Agent(FULL, 1, [], light_model=LIGHT)
+    p.cfg.agents["planner"] = Agent(FULL, 1, [], light_model=LIGHT)
+    issues = {}
+    for n, s in ((7, Status.PENDING_IMPLEMENTATION), (8, Status.PENDING_APPROVAL), (9, Status.PENDING_IMPLEMENTATION)):
+        k = f"ticket/{n}"
+        issues[k] = {"number": n, "state": "OPEN", "labels": [s.label], "body": f"{TICKET_MARKER}\nbody {n}"}
+        p.tasks[k] = Task("ticket", str(n), f"title {n}", False, "defect", 0)
+    p.ticket_bodies = {k: i["body"] for k, i in issues.items()}
+    p.state.task("ticket/9")["runs"] = 1  # already started: keeps whatever it ran on
+    return issues
+
+
+def test_approved_unstarted_tickets_are_rated_once_on_the_light_planner(pl):
+    p, _ = pl
+    issues = ticket_pl(p)
+    seen = []
+
+    class C:
+        def run(self, prompt, cwd, agent, schema, *, log_name, resume=None, env=None):
+            seen.append((agent.model, prompt))
+            return ClaudeResult(True, "s", "", {"tickets": [{"key": "ticket/7", "tier": "light"}]}, False,
+                                subtype="success")
+
+    p.claude = C()
+    p.rate_tickets(issues)
+    p.rate_tickets(issues)
+    assert len(seen) == 1 and seen[0][0] == LIGHT
+    assert "ticket/7" in seen[0][1] and "ticket/8" not in seen[0][1] and "ticket/9" not in seen[0][1]
+    assert p.state.task("ticket/7")["tier"] == "light"
+    assert p.model_for(p.tasks["ticket/7"], "impl") == LIGHT
+    assert p.model_for(p.tasks["ticket/9"], "impl") == FULL
+
+
+def test_ticket_rating_is_skipped_without_a_light_model(pl):
+    p, _ = pl
+    issues = ticket_pl(p)
+    p.cfg.agents["implementer"] = Agent(FULL, 1, [])
+    p.claude = None  # would fail if called
+    p.rate_tickets(issues)

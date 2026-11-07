@@ -71,6 +71,22 @@ TOUCHES_SCHEMA = {
 }
 
 
+TIER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tickets": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"key": {"type": "string"}, "tier": {"type": "string", "enum": list(TIERS)}},
+                "required": ["key", "tier"],
+            },
+        }
+    },
+    "required": ["tickets"],
+}
+
+
 @dataclass
 class TaskDeps:
     blocked_by: list[str] = field(default_factory=list)  # task keys

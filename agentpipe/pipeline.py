@@ -21,7 +21,7 @@ from agentpipe import milestones, proc, review, service, syncplan
 from agentpipe.claude import CAPPED, MAX_TURNS, Claude, ClaudeResult
 from agentpipe.config import Agent, Config, Milestone, Target
 from agentpipe import conflicts
-from agentpipe.deps import (PLAN_SCHEMA, TOUCHES_SCHEMA, Plan, PlanError, clean_tier, clean_touches, key_sort,
+from agentpipe.deps import (PLAN_SCHEMA, TIER_SCHEMA, TOUCHES_SCHEMA, Plan, PlanError, clean_tier, clean_touches, key_sort,
                             merge_plans, stale_keys, text_hash, validate_plan)
 from agentpipe.git import Git
 from agentpipe.github import GitHub
@@ -155,6 +155,7 @@ class Pipeline:
         self.jobs: dict[str, Job] = {}
         self.reviewed: dict[int, str] = {}  # PR number -> head sha already reviewed
         self.touches_tried: set[str] = set()  # task keys sent to backfill_touches this run
+        self.tiers_tried: set[str] = set()  # ticket keys sent to rate_tickets this run
         self.held: dict[str, str] = {}  # task key -> why it waits for another's files (logged once)
         # Threads start lazily, so a generous cap costs nothing and lets a config reload
         # raise the slot counts without replacing the pool.
@@ -363,6 +364,43 @@ class Pipeline:
         self.log(f"predicted files or tier for {n} of {len(need)} task(s); {light} rated light")
         return n > 0
 
+    def rate_tickets(self, issues: dict[str, dict]) -> None:
+        """Rate approved tickets that haven't started `light` or `standard` (one run, on the
+        planner's light model), into state.json. Tickets aren't planned, so this is where they
+        get the tier the plan gives tasks. Only approved ones: a proposal may never be built.
+        A failed run is logged and not retried until a restart; an unrated ticket runs as
+        `standard`."""
+        if not self.cfg.agents["implementer"].light_model:
+            return
+        need = [k for k, i in issues.items()
+                if k in self.tasks and k.startswith(TICKET_CHANGE + "/") and i["state"].upper() == "OPEN"
+                and status_from_labels(i["labels"]) is Status.PENDING_IMPLEMENTATION
+                and "tier" not in self.state.task(k) and not self.state.task(k).get("runs")
+                and k not in self.tiers_tried]
+        if not need:
+            return
+        self.tiers_tried |= set(need)
+        self.log(f"rating {len(need)} approved ticket(s)")
+        rows = "\n\n".join(f"### {k}: {self.tasks[k].text}\n\n{self.ticket_bodies.get(k, '')[:4000]}" for k in need)
+        prompt = review.prompt("ticket_tiers", repo_root=self.base_wt, target=self.t.name,
+                               project_dir=self.t.project_dir, tickets=rows)
+        planner = self.cfg.agents["planner"]
+        res = self.claude.run(prompt, self.base_wt, replace(planner, model=planner.light_model or planner.model),
+                              TIER_SCHEMA, log_name=f"ticket-tiers-{len(need)}")
+        if res.limited:
+            raise LimitHit(res.text)
+        if not res.ok:
+            self.log(f"rating tickets failed ({res.subtype}); they run as standard")
+            return
+        light = 0
+        for e in res.structured.get("tickets", []):
+            key = str(e.get("key", "")).strip()
+            if key in need and (tier := clean_tier(e.get("tier"))):
+                self.state.task(key)["tier"] = tier
+                light += tier == "light"
+        self.state.save()
+        self.log(f"rated {len(need)} ticket(s); {light} light")
+
     def planner_prompt(self, tasks: list[Task], plan_t: list[Task], old: Plan | None, removed: set[str]) -> str:
         def line(t: Task) -> str:
             return f"- {t.key} | {t.section} | {t.text}"
@@ -432,6 +470,7 @@ class Pipeline:
         # After the ready agents started: a task without a prediction is simply never held back.
         if self.backfill_touches(tasks, plan):
             plan.save(self.plan_path)
+        self.rate_tickets(issues)
         self.last_sync = time.time()
         return actions
 
@@ -1090,7 +1129,9 @@ class Pipeline:
 
     # ------------------------------------------------------------------ model tiers
     def light_task(self, t: Task) -> bool:
-        """The planner rated every task of ``t``'s job light."""
+        """The planner rated every task of ``t``'s job light (a ticket: rate_tickets did)."""
+        if t.change == TICKET_CHANGE:
+            return self.state.task(t.key).get("tier") == "light"
         return bool(self.plan) and all(self.plan.get(x.key).tier == "light" for x in self.batch(t))
 
     def model_for(self, t: Task, run: str) -> str:

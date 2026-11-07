@@ -126,7 +126,9 @@ the base branch are sent back without using up a round.
 
 An agent in `pipeline.toml` may set `light_model` beside `model`. The planner rates each
 task `light` (routine, fully specified) or `standard`; tasks planned earlier get rated in
-the same extra run that predicts their `touches`, on the planner's light model. The
+the same extra run that predicts their `touches`, on the planner's light model. Tickets
+aren't planned: once approved, and before their first run, they're rated in one run per
+sync on the planner's light model, and the tier goes in `state.json`. The
 implementer's light model takes the first implementation of a light task (a batch only if
 every member is light) and every conflict-resolution and cleanup run. Revisions always run
 on the full model; so does every run after a task escalates, which happens when a light
