@@ -33,7 +33,7 @@ def test_closed_blocker_issue_unblocks_even_before_tasks_md_is_ticked():
 def test_agent_and_human_owned_statuses_are_never_overwritten():
     tasks, plan = setup()
     for owned in (S.IN_PROGRESS, S.PENDING_APPROVAL, S.CHANGES_REQUESTED, S.APPROVED, S.NEEDS_DECISION,
-                  S.ON_HOLD):
+                  S.AWAITING_TASK):
         issues = {"c/1.2": issue(1, owned), "c/1.3": issue(2, S.BLOCKED_BY_TASK)}
         assert syncplan.compute(tasks, plan, issues, set(), set()) == [], owned
 
