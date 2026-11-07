@@ -249,13 +249,13 @@ changes = ["balance-and-content"]
 
 [machines.desktop]
 hostnames = ["Amiariel"]
-targets = ["arpg", "dota"]
+targets = ["arpg"]
 
 # The laptop runs agentpipe inside WSL2 Ubuntu-24.04: Smart App Control blocks unsigned
 # native binaries (rustc), so Windows-side builds don't work there. 12 threads, 12 GB for WSL.
 [machines.laptop]
 hostnames = ["DESKTOP-AJ9U89K"]
-targets = ["riftbound"]
+targets = ["riftbound", "dota"]
 claude_bin = "~/.local/bin/claude"
 gh_bin = "~/.local/bin/gh"
 work_root = "~/pipeline-work"
@@ -267,3 +267,7 @@ test = "bash scripts/check.sh --fast"
 preflight = ["cargo --version"]
 # The laptop builds about 1.4x slower than the desktop.
 test_timeout = 7200
+
+# dota moved here 2026-11-08. ureq's native-tls needs libssl-dev (installed in WSL).
+[machines.laptop.target.dota]
+repo_root = "~/dota2-draft-helper"
