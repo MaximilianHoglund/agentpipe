@@ -14,15 +14,15 @@ import threading
 import time
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from agentpipe import milestones, proc, review, service, syncplan
 from agentpipe.claude import CAPPED, MAX_TURNS, Claude, ClaudeResult
 from agentpipe.config import Agent, Config, Milestone, Target
 from agentpipe import conflicts
-from agentpipe.deps import (PLAN_SCHEMA, TOUCHES_SCHEMA, Plan, PlanError, clean_touches, key_sort, merge_plans,
-                            stale_keys, text_hash, validate_plan)
+from agentpipe.deps import (PLAN_SCHEMA, TOUCHES_SCHEMA, Plan, PlanError, clean_tier, clean_touches, key_sort,
+                            merge_plans, stale_keys, text_hash, validate_plan)
 from agentpipe.git import Git
 from agentpipe.github import GitHub
 from agentpipe.status import (GRAPH_OWNED, TASK_MARKER, TICKET_CHANGE, TICKET_MARKER, Status,
@@ -31,6 +31,9 @@ from agentpipe.tasks import Task, fingerprint, mark_done, parse_tasks
 from agentpipe.tickets import ticket_blockers
 
 IMPL_KINDS = {"implement", "revise"}
+# Implementer runs that go to the light model whatever the task's tier: resolving a merge and
+# committing a dirty tree are narrow, and the gate checks the result.
+LIGHT_RUNS = {"conflict", "cleanup"}
 RELEASE_KEY = "milestone"  # job key and slot of the milestone release job
 MERGE_ATTEMPTS = 3  # tries to bring a behind branch up to date and merge it
 MERGE_RETRY_SECONDS = 15  # lets GitHub finish computing mergeability after a push
@@ -256,7 +259,7 @@ class Pipeline:
         a = self.cfg.agents[role]
         if role == "planner" or not self.t.extra_tools:
             return a
-        return Agent(a.model, a.max_turns, a.tools + self.t.extra_tools, a.deny)
+        return replace(a, tools=a.tools + self.t.extra_tools)
 
     def env(self, slot: str) -> dict:
         env = dict(os.environ)
@@ -321,21 +324,24 @@ class Pipeline:
         raise PlanError(f"planner failed twice: {errors}")
 
     def backfill_touches(self, tasks: list[Task], plan: Plan) -> bool:
-        """Predict `touches` for open tasks planned before the planner gave them (one run).
+        """Predict `touches` and `tier` for open tasks planned before the planner gave them
+        (one run, on the planner's light model).
 
         A failed run is logged and not retried until a restart: without a prediction a task
-        is simply scheduled as before. Returns True if the plan changed."""
-        need = [t for t in tasks if not t.done and t.key in plan.tasks and plan.tasks[t.key].touches is None
-                and plan.tasks[t.key].autonomous and t.key not in self.touches_tried]
+        is simply scheduled as before, and runs as `standard`. Returns True if the plan changed."""
+        need = [t for t in tasks if not t.done and t.key in plan.tasks and plan.tasks[t.key].autonomous
+                and (plan.tasks[t.key].touches is None or plan.tasks[t.key].tier is None)
+                and t.key not in self.touches_tried]
         if not need:
             return False
         self.touches_tried |= {t.key for t in need}
-        self.log(f"predicting the files {len(need)} planned task(s) touch")
+        self.log(f"predicting the files and tier of {len(need)} planned task(s)")
         prompt = review.prompt(
             "touches", repo_root=self.base_wt, target=self.t.name, project_dir=self.t.project_dir,
             tasks="\n".join(f"- {t.key} | {t.section} | {t.text}" for t in need))
-        res = self.claude.run(prompt, self.base_wt, self.cfg.agents["planner"], TOUCHES_SCHEMA,
-                              log_name=f"touches-{len(need)}")
+        planner = self.cfg.agents["planner"]
+        res = self.claude.run(prompt, self.base_wt, replace(planner, model=planner.light_model or planner.model),
+                              TOUCHES_SCHEMA, log_name=f"touches-{len(need)}")
         if res.limited:
             raise LimitHit(res.text)
         if not res.ok:
@@ -345,10 +351,16 @@ class Pipeline:
         n = 0
         for e in res.structured.get("tasks", []):
             key = str(e.get("key", "")).strip()
-            if key in asked and (touches := clean_touches(e.get("touches"))) is not None:
-                plan.tasks[key].touches = touches
-                n += 1
-        self.log(f"predicted touched files for {n} of {len(need)} task(s)")
+            if key not in asked:
+                continue
+            d, hit = plan.tasks[key], False
+            if d.touches is None and (touches := clean_touches(e.get("touches"))) is not None:
+                d.touches, hit = touches, True
+            if d.tier is None and (tier := clean_tier(e.get("tier"))) is not None:
+                d.tier, hit = tier, True
+            n += hit
+        light = sum(1 for t in need if plan.tasks[t.key].tier == "light")
+        self.log(f"predicted files or tier for {n} of {len(need)} task(s); {light} rated light")
         return n > 0
 
     def planner_prompt(self, tasks: list[Task], plan_t: list[Task], old: Plan | None, removed: set[str]) -> str:
@@ -1063,18 +1075,51 @@ class Pipeline:
                 "complete:\n\n" + rows + "\n")
 
     # ------------------------------------------------------------------ sessions
-    def resumable(self, t: Task) -> str | None:
-        """The agent session to resume, or None. An old session would be re-cached in full
-        and carries stale context, so past resume_within_seconds a run starts fresh."""
+    def resumable(self, t: Task, run: str = "impl") -> str | None:
+        """The agent session a ``run`` (impl, revise, conflict, cleanup) would resume, or None.
+        An old session would be re-cached in full and carries stale context, so past
+        resume_within_seconds a run starts fresh; so does a run on another model than the
+        session's, which could reuse none of its cache."""
         st = self.state.task(t.key)
         s = st.get("session")
-        if s and time.time() - st.get("session_at", 0) <= self.cfg.resume_within_seconds:
-            return s
-        return None
+        if not s or time.time() - st.get("session_at", 0) > self.cfg.resume_within_seconds:
+            return None
+        if st.get("session_model", self.model_for(t, run)) != self.model_for(t, run):
+            return None
+        return s
 
-    def prior_work(self, t: Task, pr: dict | None) -> str:
+    # ------------------------------------------------------------------ model tiers
+    def light_task(self, t: Task) -> bool:
+        """The planner rated every task of ``t``'s job light."""
+        return bool(self.plan) and all(self.plan.get(x.key).tier == "light" for x in self.batch(t))
+
+    def model_for(self, t: Task, run: str) -> str:
+        """The implementer model for a ``run`` of task ``t``. The light model takes conflict and
+        cleanup runs, and the first implementation of a light task; revisions (the reviewer
+        rejected the work) and anything after an escalation get the full model."""
+        a = self.cfg.agents["implementer"]
+        if not a.light_model or self.state.task(t.key).get("escalated"):
+            return a.model
+        if run in LIGHT_RUNS or (run == "impl" and self.light_task(t)):
+            return a.light_model
+        return a.model
+
+    def is_light(self, model: str) -> bool:
+        a = self.cfg.agents["implementer"]
+        return bool(a.light_model) and model == a.light_model != a.model
+
+    def escalate(self, t: Task, why: str) -> None:
+        """Run every later implementer job of ``t`` on the full model."""
+        st = self.state.task(t.key)
+        if st.get("escalated"):
+            return
+        st["escalated"] = why
+        self.state.save()
+        self.log(f"{self.what(t.key)}: moving to {self.cfg.agents['implementer'].model}: {why}")
+
+    def prior_work(self, t: Task, pr: dict | None, run: str = "impl") -> str:
         """For a fresh session on a task with history: what is already there."""
-        if self.resumable(t):
+        if self.resumable(t, run):
             return ""
         wt = self.wt(t)
         exists = (wt / ".git").exists()
@@ -1095,7 +1140,7 @@ class Pipeline:
                          + pr["body"].split("## Summary", 1)[-1].strip()[:3000])
         return "\n\n".join(parts) + "\n"
 
-    def impl_prompt(self, t: Task, issue: int, pr: dict | None) -> str:
+    def impl_prompt(self, t: Task, issue: int, pr: dict | None, run: str = "impl") -> str:
         tasks = self.batch(t)
         inside = {x.key for x in tasks}
         blockers = sorted({b for x in tasks for b in (self.plan.get(x.key).blocked_by if self.plan else [])
@@ -1105,7 +1150,7 @@ class Pipeline:
             blockers=", ".join(blockers) or "none", worktree=self.wt(t), project_dir=self.t.project_dir,
             spec_ref=self.spec_ref(t), context_list=self.context_list(),
             human_input=self.human_input(issue, pr), test_cmd=self.t.test, open_tickets=self.open_tickets(),
-            batch_section=self.batch_section(t), prior_work=self.prior_work(t, pr))
+            batch_section=self.batch_section(t), prior_work=self.prior_work(t, pr, run))
 
     def ensure_worktree(self, t: Task) -> Path:
         wt = self.wt(t)
@@ -1116,17 +1161,34 @@ class Pipeline:
             self.state.task(t.key).pop("session", None)
         return wt
 
-    def agent(self, t: Task, prompt: str, slot: str, tag: str) -> ClaudeResult:
+    def agent(self, t: Task, prompt: str, slot: str, tag: str, retry_prompt=None) -> ClaudeResult:
+        """One implementer run (``tag``: impl, revise, conflict or cleanup) on the model
+        ``model_for`` picks. A light run that hits its cap or timeout escalates the task and is
+        redone at once on the full model, from its saved WIP, with ``retry_prompt()`` (the
+        prompt for a fresh session) if given, else the same prompt."""
+        model = self.model_for(t, tag)
+        res = self.run_agent(t, prompt, slot, tag, model)
+        if self.is_light(model) and res.subtype in CAPPED:
+            what = "its turn cap" if res.subtype == MAX_TURNS else "the timeout"
+            self.escalate(t, f"a {tag} run on {model} hit {what}")
+            self.state.task(t.key).pop("session", None)
+            self.save_wip(t, f"{what} on {model}")
+            res = self.run_agent(t, retry_prompt() if retry_prompt else prompt, slot, tag,
+                                 self.model_for(t, tag))
+        return res
+
+    def run_agent(self, t: Task, prompt: str, slot: str, tag: str, model: str) -> ClaudeResult:
         st = self.state.task(t.key)
         n = st.get("runs", 0) + 1
         st["runs"] = n
         self.clean_workspace_crates(self.wt(t) / self.t.project_dir, slot)
-        res = self.claude.run(prompt, self.wt(t) / self.t.project_dir, self.agent_def("implementer"),
+        resume = self.resumable(t, tag)
+        res = self.claude.run(prompt, self.wt(t) / self.t.project_dir,
+                              replace(self.agent_def("implementer"), model=model),
                               review.IMPLEMENTER_SCHEMA, log_name=f"{t.slug}-{tag}-{n}",
-                              resume=self.resumable(t), env=self.env(slot))
+                              resume=resume, env=self.env(slot))
         if res.session_id:
-            st["session"] = res.session_id
-            st["session_at"] = time.time()
+            st.update(session=res.session_id, session_at=time.time(), session_model=model)
         self.state.save()
         if res.limited:
             raise LimitHit(res.text)
@@ -1145,7 +1207,7 @@ class Pipeline:
                       "human input, follow.\n\n" + full)
         else:
             prompt = full
-        res = self.agent(t, prompt, slot, "impl")
+        res = self.agent(t, prompt, slot, "impl", retry_prompt=lambda: self.impl_prompt(t, issue, pr))
         self.deliver(t, issue, pr, res, slot, Status.IN_PROGRESS)
 
     def merge_base(self, wt: Path, slot: str, gate: bool) -> str:
@@ -1210,6 +1272,20 @@ class Pipeline:
                 "`git restore --theirs <file>` (or `--ours`). Then return the structured output with "
                 "status `done`; in `summary`, say how you resolved each conflicted file.")
 
+    def resolve_conflict(self, t: Task, slot: str) -> ClaudeResult:
+        """A conflict run for the merge in progress in ``t``'s worktree. A light run that ends
+        without resolving it escalates the task and the full model tries once more."""
+        wt = self.wt(t)
+        model = self.model_for(t, "conflict")
+        res = self.agent(t, self.conflict_prompt(t), slot, "conflict")
+        # A capped light run was already redone on the full model inside agent().
+        still_light = self.model_for(t, "conflict") == model
+        if (self.is_light(model) and still_light and res.subtype not in CAPPED
+                and (not res.ok or self.git.merging(wt) or not self.git.is_clean(wt))):
+            self.escalate(t, f"a conflict run on {model} left the merge unresolved")
+            res = self.agent(t, self.conflict_prompt(t), slot, "conflict")
+        return res
+
     def job_revise(self, t: Task, issue: int, pr: dict, slot: str) -> None:
         wt = self.ensure_worktree(t)
         comments = self.gh.comments(pr["number"])
@@ -1230,7 +1306,7 @@ class Pipeline:
                 self.gh.set_status(issue, Status.PENDING_APPROVAL, Status.CHANGES_REQUESTED)
                 return
             if m == "conflict":
-                res = self.agent(t, self.conflict_prompt(t), slot, "conflict")
+                res = self.resolve_conflict(t, slot)
                 if res.subtype not in CAPPED and (not res.ok or self.git.merging(wt) or not self.git.is_clean(wt)):
                     self.git.merge_abort(wt)
                     self.to_decision(issue, Status.CHANGES_REQUESTED,
@@ -1245,8 +1321,10 @@ class Pipeline:
             "revise", key=t.key, round=review.rounds_used(history), max_rounds=self.cfg.max_rounds,
             feedback=last["body"] if last else "(no review found)", merge_note=merge_note,
             test_cmd=self.t.test)
-        if not self.resumable(t):
-            prompt = self.impl_prompt(t, issue, pr) + "\n\n---\n\n" + prompt
+        if not merge_note and self.light_task(t) and self.cfg.agents["implementer"].light_model:
+            self.escalate(t, "the reviewer rejected its PR")
+        if not self.resumable(t, "revise"):
+            prompt = self.impl_prompt(t, issue, pr, "revise") + "\n\n---\n\n" + prompt
         else:
             prompt += "\n\n" + self.human_input(issue, pr)
         res = self.agent(t, prompt, slot, "revise")
@@ -1317,7 +1395,7 @@ class Pipeline:
         self.git.fetch()
         # No gate here: the review runs it on whatever is pushed.
         if self.merge_base(wt, slot, gate=False) == "conflict":
-            res = self.agent(t, self.conflict_prompt(t), slot, "conflict")
+            res = self.resolve_conflict(t, slot)
             if not res.ok or self.git.merging(wt) or not self.git.is_clean(wt):
                 self.git.merge_abort(wt)
                 self.to_decision(issue, cur, "Could not resolve merge conflicts with the base branch.")

@@ -98,13 +98,19 @@ deny = [
   "PowerShell(cmd:*)", "PowerShell(bash:*)",
 ]
 
+# light_model (optional): a cheaper model for light work. Planner: the touches/tier backfill.
+# Implementer: tasks the planner rates `light`, merge-conflict and cleanup runs. A light run
+# that hits its cap or leaves a conflict unresolved is redone on `model` at once, and a task
+# whose PR is rejected (or that escalated) uses `model` from then on. Reviewer: never light.
 [agents.planner]
 model = "claude-opus-5-5"
+light_model = "claude-sonnet-5-5"
 max_turns = 60
 tools = ["Read", "Glob", "Grep", "Bash", "PowerShell"]
 
 [agents.implementer]
 model = "claude-opus-5-5"
+light_model = "claude-sonnet-5-5"
 max_turns = 100
 tools = ["Read", "Edit", "Write", "Glob", "Grep", "Bash", "PowerShell"]
 

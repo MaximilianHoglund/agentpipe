@@ -15,6 +15,8 @@ class Agent:
     tools: list[str]
     # Denied even though the tool is allowed; deny wins over allow in Claude Code.
     deny: list[str] = field(default_factory=list)
+    # A cheaper model for the light jobs (see Pipeline.model_for); "" runs everything on `model`.
+    light_model: str = ""
 
 
 @dataclass
@@ -139,7 +141,7 @@ def load(path: Path) -> Config:
     shared_deny = list(data.get("permissions", {}).get("deny", []))
     agents = {
         name: Agent(a["model"], a.get("max_turns", 100), list(a.get("tools", [])),
-                    shared_deny + list(a.get("deny", [])))
+                    shared_deny + list(a.get("deny", [])), a.get("light_model", ""))
         for name, a in data.get("agents", {}).items()
     }
     for required in ("planner", "implementer", "reviewer"):

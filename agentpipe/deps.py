@@ -25,6 +25,9 @@ from pathlib import Path
 from agentpipe.conflicts import normalize
 from agentpipe.tasks import Task
 
+# How demanding a task is for the implementer: "light" runs on the cheaper model.
+TIERS = ("light", "standard")
+
 PLAN_SCHEMA = {
     "type": "object",
     "properties": {
@@ -40,8 +43,9 @@ PLAN_SCHEMA = {
                     "batch": {"type": "string", "description": "shared id for tasks done in one PR; omit or empty for none"},
                     "touches": {"type": "array", "items": {"type": "string"},
                                 "description": "repo-relative files or directories the task will most likely change"},
+                    "tier": {"type": "string", "enum": list(TIERS)},
                 },
-                "required": ["key", "blocked_by", "autonomous"],
+                "required": ["key", "blocked_by", "autonomous", "tier"],
             },
         }
     },
@@ -57,8 +61,9 @@ TOUCHES_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {"key": {"type": "string"},
-                               "touches": {"type": "array", "items": {"type": "string"}}},
-                "required": ["key", "touches"],
+                               "touches": {"type": "array", "items": {"type": "string"}},
+                               "tier": {"type": "string", "enum": list(TIERS)}},
+                "required": ["key", "touches", "tier"],
             },
         }
     },
@@ -74,6 +79,7 @@ class TaskDeps:
     batch: str = ""
     # Repo-relative files or directories the task will likely change; None = not predicted yet.
     touches: list[str] | None = None
+    tier: str | None = None  # one of TIERS; None = not rated yet (runs as standard)
 
 
 def text_hash(t: Task) -> str:
@@ -204,7 +210,7 @@ def validate_plan(tasks: list[Task], raw: dict, fingerprint: str, max_batch: int
             errors.append(f"{key} marked non-autonomous without a human_reason")
         batch = str(entry.get("batch", "") or "").strip() if max_batch > 1 else ""
         out[key] = TaskDeps(sorted(blockers, key=key_sort), autonomous, reason, batch,
-                            clean_touches(entry.get("touches")))
+                            clean_touches(entry.get("touches")), clean_tier(entry.get("tier")))
     missing = open_keys - out.keys()
     if missing:
         errors.append("open tasks missing from plan: " + ", ".join(sorted(missing, key=key_sort)))
@@ -242,6 +248,12 @@ def clean_touches(raw) -> list[str] | None:
     if raw is None:
         return None
     return sorted({p for p in (normalize(str(x)) for x in raw) if p})
+
+
+def clean_tier(raw) -> str | None:
+    """A planner's `tier`, or None when it gave none or an unknown one."""
+    t = str(raw or "").strip().lower()
+    return t if t in TIERS else None
 
 
 def find_cycle(edges: dict[str, list[str]]) -> list[str] | None:

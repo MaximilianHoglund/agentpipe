@@ -60,6 +60,14 @@ $existing_section
    don't conflict when they merge. Be specific: a whole crate or `src/` makes the task
    wait on everything. Leave out files nearly every task edits in passing (module lists
    such as `lib.rs`, changelogs, decision logs); conflicts there are resolved mechanically.
+5. **tier**: `light` or `standard`. It picks the implementer's model: `light` runs on a
+   cheaper one. Rate a task `light` only when it is routine and its spec says exactly
+   what to do: a fixture, data entry, a config value, a rename, a doc, or a small change
+   that follows a pattern already in the code. Rate it `standard` when it designs
+   something, crosses modules, touches concurrency, determinism, unsafe code, numerics
+   or a public format, or when you are unsure. A batch is `light` only if every member is.
+   A light task that struggles is redone on the full model, so a wrong `light` costs
+   one wasted run; a wrong `standard` costs only the price difference.
 
 $answer_rule
 The dependency graph must have no cycles, also when each batch is counted as one task.

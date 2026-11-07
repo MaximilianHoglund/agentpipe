@@ -122,6 +122,20 @@ reusing the gate's build, and the checkout is reset afterwards.
 After `max_rounds` rejections a task goes to `needs decision`. Merge conflicts with
 the base branch are sent back without using up a round.
 
+## Model tiers
+
+An agent in `pipeline.toml` may set `light_model` beside `model`. The planner rates each
+task `light` (routine, fully specified) or `standard`; tasks planned earlier get rated in
+the same extra run that predicts their `touches`, on the planner's light model. The
+implementer's light model takes the first implementation of a light task (a batch only if
+every member is light) and every conflict-resolution and cleanup run. Revisions always run
+on the full model; so does every run after a task escalates, which happens when a light
+run hits its turn cap or timeout (its WIP is saved and the full model redoes it at once),
+a light conflict run leaves the merge unresolved (the full model tries once more), or the
+reviewer rejects a light task's PR. The reviewer has no light model: it is the quality
+gate. A session is resumed only by the model that started it. The log says
+`... moving to <model>: <why>` on each escalation; `state.json` keeps the reason.
+
 ## Keeping merge conflicts down
 
 Parallel PRs into one base conflict, and each conflict used to cost a full revise and a
