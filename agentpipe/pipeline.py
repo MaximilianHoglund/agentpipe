@@ -1137,8 +1137,10 @@ class Pipeline:
             # Paths relative to the project dir, which is where the mutation tool runs.
             diff_path.write_text(self.git.diff(pdir, self.base_ref(), relative=True), encoding="utf-8")
             self.log(f"phase {t.key}: mutation testing")
-            m = self.run_gate(pdir, slot, self.t.mutation.replace("{diff}", str(diff_path)),
-                              self.t.mutation_timeout)
+            # Not run_gate: the gate just built this tree in this slot, so cleaning the workspace
+            # crates again would only force a full rebuild before the first mutant.
+            m = proc.run(self.t.mutation.replace("{diff}", str(diff_path)), pdir, env=self.env(slot),
+                         timeout=self.t.mutation_timeout, check=False, shell=True)
             self.git.restore(rv)  # an in-place run killed mid-mutant must not leave a mutated file
             mutation_section = (
                 "Mutation testing on the changed lines (`" + self.t.mutation + "`). Lines starting "
