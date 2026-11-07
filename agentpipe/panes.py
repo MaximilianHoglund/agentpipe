@@ -30,7 +30,8 @@ def styles_for(theme) -> dict[str, str]:
 
     return {"tool": c(theme.primary, "cyan"), "text": "bold", "think": "",
             "error": c(theme.error, "red"), "denied": c(theme.warning, "yellow"),
-            "done": c(theme.success, "green"), "step": "bold " + c(theme.accent, "yellow"), "dim": "dim"}
+            "done": c(theme.success, "green"), "step": "bold " + c(theme.accent, "yellow"), "dim": "dim",
+            "missed": "bold " + c(theme.error, "red"), "timeout": c(theme.warning, "yellow")}
 
 
 def columns_for(n: int) -> int:
@@ -64,6 +65,7 @@ class PaneState:
     tail: Tail | None = None
     step: str = ""
     stats: w.Transcript = field(default_factory=w.Transcript)
+    mutants_seen: int = 0
 
 
 MAX_ENTRIES = 3000
@@ -294,6 +296,8 @@ class PanesApp(App):
             if step != s.step:
                 s.step = step
                 pane.event(time.strftime("%H:%M:%S"), "step", step)
+            if step == "mutation testing":
+                self.mutation_events(pane, cwd, progress)
         idle = now - active if active else None
         stalled = idle is not None and idle >= w.STALL_AFTER
         box = pane.box
@@ -301,6 +305,22 @@ class PanesApp(App):
         # Recent activity is the normal case and goes unsaid; only a quiet minute is news.
         seen = ("STALLED? " if stalled else "") + f"quiet {w._ago(idle)}" if idle is not None and idle >= 60 else ""
         box.border_subtitle = escape(" · ".join(x for x in (w._ago(now - job.started), seen, what) if x))
+
+    @staticmethod
+    def mutation_events(pane: JobPane, cwd: Path, progress: str) -> None:
+        """Missed and timed-out mutants as they finish, and a progress line every 10."""
+        outcomes = w.mutation_outcomes(cwd)
+        s, when = pane.state, time.strftime("%H:%M:%S")
+        if len(outcomes) <= s.mutants_seen:
+            return
+        for summary, name in outcomes[s.mutants_seen:]:
+            if summary == "MissedMutant":
+                pane.event(when, "missed", f"MISSED {name}")
+            elif summary == "Timeout":
+                pane.event(when, "timeout", f"TIMEOUT {name}")
+        if len(outcomes) // 10 > s.mutants_seen // 10 or s.mutants_seen == 0:
+            pane.event(when, "dim", progress.strip())
+        s.mutants_seen = len(outcomes)
 
     def save_theme(self, theme) -> None:
         for pane in self.panes.values():

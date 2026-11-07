@@ -91,9 +91,16 @@ def test_steps_without_an_agent_show_progress_and_flag_stalls(tmp_path, monkeypa
     mo.mkdir(parents=True)
     (mo / "caught.txt").write_text("a\nb\n")
     (mo / "missed.txt").write_text("c\n")
-    (mo / "outcomes.json").write_text(json.dumps({"total_mutants": 5}))
+    # outcomes.json's total_mutants counts finished mutants only; mutants.json lists them all.
+    (mo / "outcomes.json").write_text(json.dumps({"total_mutants": 3, "outcomes": [
+        {"scenario": "Baseline", "summary": "Success"},
+        {"scenario": {"Mutant": {"name": "a.rs:1: replace x"}}, "summary": "CaughtMutant"},
+        {"scenario": {"Mutant": {"name": "a.rs:2: replace y"}}, "summary": "MissedMutant"}]}))
+    (mo / "mutants.json").write_text(json.dumps([{}] * 5))
     text = watch.render("t", work, ".", color=False, now=now)
     assert "review c/1.1 (#5), 20m: mutation testing 3/5 mutants, 1 missed" in text
+    assert watch.mutation_outcomes(work / "review" / "c-1_1") == [
+        ("CaughtMutant", "a.rs:1: replace x"), ("MissedMutant", "a.rs:2: replace y")]
     # The implement job logged nothing since its start 20 minutes ago.
     assert "implement c/1.2 (#6), 20m: setting up (worktree, prompt)" in text
     assert "POSSIBLY STALLED" in text

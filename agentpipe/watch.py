@@ -323,14 +323,31 @@ def mutation_progress(cwd: Path, since: float) -> tuple[str, float | None] | Non
             counts[name] = len((out / f"{name}.txt").read_text(encoding="utf-8").splitlines())
         except OSError:
             counts[name] = 0
+    # mutants.json lists every mutant up front; outcomes.json's total_mutants counts only the
+    # finished ones, so it read "53/53" with half the run to go.
     try:
-        total = json.loads((out / "outcomes.json").read_text(encoding="utf-8")).get("total_mutants")
-    except (OSError, ValueError):
+        total = len(json.loads((out / "mutants.json").read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError):
         total = None
     text = f" {sum(counts.values())}/{total or '?'} mutants, {counts['missed']} missed"
     if counts["timeout"]:
         text += f", {counts['timeout']} timed out"
     return text, active
+
+
+def mutation_outcomes(cwd: Path) -> list[tuple[str, str]]:
+    """(summary, mutant name) for each finished mutant, in finishing order: summary is
+    CaughtMutant, MissedMutant, Timeout or Unviable."""
+    try:
+        data = json.loads((cwd / "mutants.out" / "outcomes.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    out = []
+    for o in data.get("outcomes") or []:
+        m = (o.get("scenario") or {}).get("Mutant") if isinstance(o.get("scenario"), dict) else None
+        if m:
+            out.append((o.get("summary", ""), m.get("name", "")))
+    return out
 
 
 def job_step(work_dir: Path, cwd: Path, job: Job) -> tuple[str, str, float | None]:

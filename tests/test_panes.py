@@ -121,3 +121,41 @@ def test_app_shows_a_pane_per_job_with_its_transcript(tmp_path, monkeypatch):
             assert app.screen.maximized is None
 
     asyncio.run(go())
+
+
+def test_mutation_testing_streams_missed_mutants_and_progress(tmp_path, monkeypatch):
+    monkeypatch.setattr(watch, "PROJECTS", tmp_path / "projects")
+    work = tmp_path / "work"
+    (work / "logs").mkdir(parents=True)
+    now = time.time()
+    (work / "logs" / "pipeline.log").write_text(
+        f"{_stamp(now - 60)} [arpg] start review c/1.2 (#6) on review-0\n"
+        f"{_stamp(now - 40)} [arpg] phase c/1.2: mutation testing\n", encoding="utf-8")
+    mo = watch.job_cwd(work, ".", watch.Job("review", "c/1.2", 6, "review-0", now - 60)) / "mutants.out"
+    mo.mkdir(parents=True)
+    (mo / "mutants.json").write_text(json.dumps([{}] * 30))
+
+    def finish(n, missed_at=()):
+        outcomes = [{"scenario": {"Mutant": {"name": f"a.rs:{i}: replace"}},
+                     "summary": "MissedMutant" if i in missed_at else "CaughtMutant"} for i in range(n)]
+        (mo / "outcomes.json").write_text(json.dumps({"outcomes": outcomes}))
+        (mo / "caught.txt").write_text("x\n" * (n - len([i for i in missed_at if i < n])))
+        (mo / "missed.txt").write_text("x\n" * len([i for i in missed_at if i < n]))
+
+    async def go():
+        app = panes.PanesApp("arpg", work, ".", interval=60)
+        async with app.run_test(size=(140, 40)) as pilot:
+            finish(4, missed_at=(2,))
+            app.tick()
+            await pilot.pause()
+            rev = app.panes["c/1.2"]
+            text = "\n".join(s.text for s in rev.lines)
+            assert "MISSED a.rs:2: replace" in text
+            assert "4/30 mutants, 1 missed" in text and "4/30 mutants" in str(rev.parent.border_subtitle)
+            finish(12, missed_at=(2,))
+            app.tick()
+            await pilot.pause()
+            text = "\n".join(s.text for s in rev.lines)
+            assert "12/30 mutants, 1 missed" in text and text.count("MISSED") == 1
+
+    asyncio.run(go())
