@@ -810,7 +810,9 @@ class Pipeline:
                 problems.append(f"`{c}` exits {r.code} in the dispatcher's shell: {r.tail(300)}")
         if self.t.preflight:
             agent = self.agent_def("preflight")
-            shells = [s for s in ("Bash", "PowerShell") if s in agent.tools]
+            # Claude Code offers agents a PowerShell tool only on Windows (not in WSL).
+            shells = [s for s in ("Bash", "PowerShell") if s in agent.tools
+                      and (s != "PowerShell" or os.name == "nt")]
             prompt = review.prompt("preflight", shells=" and ".join(shells),
                                    commands="\n".join(f"- `{c}`" for c in self.t.preflight))
             res = self.claude.run(prompt, cwd, agent, review.PREFLIGHT_SCHEMA,
