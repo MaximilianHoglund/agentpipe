@@ -16,10 +16,11 @@ from rich.markup import escape
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Grid
+from textual.containers import Grid, Vertical
 from textual.widgets import Footer, RichLog, Static
 
 from agentpipe import watch as w
+from agentpipe.status import TICKET_CHANGE
 
 def styles_for(theme) -> dict[str, str]:
     """Line styles from the theme's own colours. Fixed ANSI names (magenta, cyan) come out dark
@@ -78,14 +79,12 @@ class JobPane(RichLog):
 
     def __init__(self, job: w.Job, detail: bool = False):
         super().__init__(wrap=True, markup=False, highlight=False, max_lines=MAX_ENTRIES * 2,
-                         auto_scroll=True, min_width=1, classes="job")
+                         auto_scroll=True, min_width=1, classes="stream")
         self.job = job
         self.state = PaneState()
         self.detail = detail
         self.entries: list[w.Event] = []
         self.group: list[w.Event] = []  # quiet events since the last loud one, not yet summarized
-        self.border_title = escape(f"[{job.slot}] {job.kind} {job.key} #{job.issue}"
-                                   + (f"  {job.about}" if job.about else ""))
 
     def event(self, when: str, kind: str, text: str) -> None:
         ev = w.Event(when, kind, text)
@@ -126,6 +125,31 @@ class JobPane(RichLog):
         self.rerender()  # RichLog wraps at write time; re-wrap to the new width
 
 
+def pane_title(job: w.Job) -> str:
+    """'review #344', or 'implement #48 · 4.3' for a task: the slot and the change name mean
+    nothing to the watcher, and a ticket's key only repeats its issue number."""
+    change, _, ids = job.key.partition("/")
+    return f"{job.kind} #{job.issue}" + (f" · {ids}" if ids and change != TICKET_CHANGE else "")
+
+
+class JobBox(Vertical):
+    """A job's bordered pane: its description (up to two lines) above its stream."""
+
+    ALLOW_MAXIMIZE = True  # containers opt out by default
+
+    def __init__(self, pane: JobPane):
+        super().__init__(classes="job")
+        self.pane = pane
+        pane.box = self  # set before mounting finishes, unlike pane.parent
+        self.border_title = escape(pane_title(pane.job))
+
+    def compose(self) -> ComposeResult:
+        about = Static(self.pane.job.about or self.pane.job.key, classes="about")
+        about.tooltip = self.pane.job.about or None
+        yield about
+        yield self.pane
+
+
 def summarize(group: list[w.Event]) -> str:
     """'6 tool calls (Bash 4, Read 2), 1 error' for a run of quiet events."""
     names: dict[str, int] = {}
@@ -152,9 +176,11 @@ class PanesApp(App):
     #head { height: auto; max-height: 6; padding: 0 1; background: $boost; }
     #jobs { grid-gutter: 0 1; height: 1fr; }
     #idle { height: 1fr; content-align: center middle; color: $text-muted; }
-    .job { border: round $primary; scrollbar-size-vertical: 1; overflow-x: hidden; }
-    .job:focus { border: round $accent; }
+    .job { border: round $primary; height: 1fr; }
+    .job:focus-within { border: round $accent; }
     .job.stalled { border: round $error; }
+    .job .about { height: auto; max-height: 2; text-style: bold; text-overflow: ellipsis; }
+    .stream { height: 1fr; scrollbar-size-vertical: 1; overflow-x: hidden; }
     #log { height: 9; border: round $secondary; scrollbar-size-vertical: 1; overflow-x: hidden; }
     """
     BINDINGS = [
@@ -229,11 +255,11 @@ class PanesApp(App):
         grid = self.query_one("#jobs", Grid)
         live = {j.key: j for j in jobs}
         for key in [k for k, p in self.panes.items() if k not in live or live[k].started != p.job.started]:
-            self.panes.pop(key).remove()
+            self.panes.pop(key).box.remove()
         for job in sorted(jobs, key=lambda j: j.slot):
             if job.key not in self.panes:
                 self.panes[job.key] = pane = JobPane(job, self.tool_detail)
-                grid.mount(pane)
+                grid.mount(JobBox(pane))
             self.panes[job.key].job = job  # phase updates
         self.query_one("#idle").display = not self.panes
         grid.styles.grid_size_columns = columns_for(len(self.panes))
@@ -254,10 +280,12 @@ class PanesApp(App):
             for ev in tr.events:
                 pane.event(ev.when, ev.kind, ev.text)
             active = path.stat().st_mtime
-            denied = f", {s.stats.denied} denied" if s.stats.denied else ""
-            what = f"{s.stats.tool_calls} tools, {s.stats.errors} errors{denied}"
-            if now_doing := pane.now_doing():
-                what += f" · now {now_doing}"
+            # Narrow panes cut the subtitle short: what the agent is doing now goes first.
+            what = pane.now_doing() or f"{s.stats.tool_calls} tools"
+            if s.stats.errors:
+                what += f" · {s.stats.errors} err"
+            if s.stats.denied:
+                what += f" · {s.stats.denied} DENIED"
         else:
             step, progress, active = w.job_step(self.work_dir, cwd, job)
             what = step + progress
@@ -266,9 +294,11 @@ class PanesApp(App):
                 pane.event(time.strftime("%H:%M:%S"), "step", step)
         idle = now - active if active else None
         stalled = idle is not None and idle >= w.STALL_AFTER
-        pane.set_class(stalled, "stalled")
-        seen = "no activity yet" if idle is None else f"active {w._ago(idle)} ago" + (" STALLED?" if stalled else "")
-        pane.border_subtitle = escape(f"{w._ago(now - job.started)} · {what} · {seen}")
+        box = pane.box
+        box.set_class(stalled, "stalled")
+        # Recent activity is the normal case and goes unsaid; only a quiet minute is news.
+        seen = ("STALLED? " if stalled else "") + f"quiet {w._ago(idle)}" if idle is not None and idle >= 60 else ""
+        box.border_subtitle = escape(" · ".join(x for x in (w._ago(now - job.started), seen, what) if x))
 
     def save_theme(self, theme) -> None:
         for pane in self.panes.values():
@@ -289,7 +319,9 @@ class PanesApp(App):
     def action_toggle_max(self) -> None:
         if self.screen.maximized is not None:
             self.screen.minimize()
-        elif isinstance(self.focused, (JobPane, RichLog)):
+        elif isinstance(self.focused, JobPane):
+            self.screen.maximize(self.focused.box)  # keep its description and border
+        elif isinstance(self.focused, RichLog):
             self.screen.maximize(self.focused)
 
     def action_restore(self) -> None:

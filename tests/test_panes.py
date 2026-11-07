@@ -96,14 +96,18 @@ def test_app_shows_a_pane_per_job_with_its_transcript(tmp_path, monkeypatch):
             text = "\n".join(s.text for s in impl.lines)
             assert "Checking whether validate" in text and "Tests pass" in text
             assert "2 tool calls (Bash 1, Read 1)" in text and "cargo test" not in text
-            assert "3 tools" in str(impl.border_subtitle) and "now Bash: git status" in str(impl.border_subtitle)
+            box = impl.parent
+            assert box.border_title == "implement #5 · 1.1"
+            assert str(box.query_one(".about").render()) == "add a thing"
+            assert "Bash: git status" in str(box.border_subtitle) and "errors" not in str(box.border_subtitle)
+            assert app.panes["c/1.2"].parent.border_title == "review #6 · 1.2"
             assert impl.virtual_size.width <= impl.scrollable_content_region.width  # wrapped, no h-scroll
             await pilot.press("t")
             await pilot.pause()
             assert "cargo test" in "\n".join(s.text for s in impl.lines)
             assert impl.virtual_size.width <= impl.scrollable_content_region.width  # long command wraps too
             await pilot.press("t")
-            assert "test gate" in str(rev.border_subtitle)
+            assert "test gate" in str(rev.parent.border_subtitle)
             # A finished job's pane goes away on the next refresh.
             with (work / "logs" / "pipeline.log").open("a", encoding="utf-8") as f:
                 f.write(f"{_stamp(now)} [arpg] done review c/1.2\n")
@@ -112,7 +116,7 @@ def test_app_shows_a_pane_per_job_with_its_transcript(tmp_path, monkeypatch):
             assert set(app.panes) == {"c/1.1"}
             app.set_focus(impl)
             await pilot.press("m")
-            assert app.screen.maximized is impl
+            assert app.screen.maximized is impl.parent  # with its description
             await pilot.press("escape")
             assert app.screen.maximized is None
 

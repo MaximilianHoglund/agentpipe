@@ -686,7 +686,7 @@ class Pipeline:
 
     def start(self, kind: str, key: str, slot: str, issue: dict, pr: dict | None) -> None:
         fn = getattr(self, f"job_{kind}")
-        about = self.about(key)
+        about = self.about(key, 160)  # the watcher gives it two lines
         self.log(f"start {kind} {key} (#{issue['number']}) on {slot}" + (f": {about}" if about else ""))
         fut = self.pool.submit(fn, self.tasks[key], issue["number"], pr, slot)
         self.jobs[key] = Job(kind, key, slot, fut)
