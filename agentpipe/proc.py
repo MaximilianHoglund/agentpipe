@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,15 +35,34 @@ class CommandError(RuntimeError):
 
 def run(cmd, cwd: Path | None = None, *, input: str | None = None, env=None,
         timeout: int | None = None, check: bool = True, shell: bool = False) -> Result:
+    # Not subprocess.run: on timeout it kills only the direct child (the shell, with shell=True)
+    # and then waits for the output pipes, which grandchildren such as cargo-mutants hold open,
+    # so the timeout never took effect (a 30 min mutation cap ran past 49 min). Kill the tree.
+    p = subprocess.Popen(
+        cmd, cwd=cwd, env=env, shell=shell,
+        stdin=subprocess.PIPE if input is not None else None,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+        start_new_session=os.name != "nt",
+    )
     try:
-        p = subprocess.run(
-            cmd, cwd=cwd, input=input, env=env, timeout=timeout, shell=shell,
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-        )
-        r = Result(p.returncode, p.stdout or "", p.stderr or "")
-    except subprocess.TimeoutExpired as e:
-        out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-        r = Result(TIMEOUT_CODE, out, f"timed out after {timeout}s")
+        out, err = p.communicate(input, timeout=timeout)
+        r = Result(p.returncode, out or "", err or "")
+    except subprocess.TimeoutExpired:
+        kill_tree(p)
+        out, _ = p.communicate()
+        r = Result(TIMEOUT_CODE, out or "", f"timed out after {timeout}s")
     if check and not r.ok:
         raise CommandError(cmd, r)
     return r
+
+
+def kill_tree(p: subprocess.Popen) -> None:
+    """Kill a process and everything it started."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
+    else:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    p.kill()
