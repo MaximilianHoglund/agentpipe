@@ -172,6 +172,8 @@ def parse_transcript(lines: list[str]) -> Transcript:
                     tr.events.append(Event(when, "tool", _tool_summary(c.get("name", "?"), c.get("input") or {})))
             elif t == "text" and c.get("text", "").strip() and d["type"] == "assistant":
                 tr.events.append(Event(when, "text", c["text"]))
+            elif t == "thinking" and c.get("thinking", "").strip():
+                tr.events.append(Event(when, "think", c["thinking"]))
             elif t == "tool_result" and c.get("is_error"):
                 body = c.get("content")
                 if isinstance(body, list):
@@ -186,7 +188,7 @@ def parse_transcript(lines: list[str]) -> Transcript:
 
 
 # ---------------------------------------------------------------- rendering
-_COLORS = {"tool": "36", "text": "0", "error": "31", "denied": "33", "done": "32", "dim": "2", "head": "1"}
+_COLORS = {"tool": "36", "text": "0", "think": "3", "error": "31", "denied": "33", "done": "32", "dim": "2", "head": "1"}
 
 
 def _c(kind: str, s: str, color: bool) -> str:
@@ -361,7 +363,8 @@ def follow(work_dir: Path, project_dir: str, key: str, *, color: bool = True, po
             # Hold back a possibly half-written last line.
             complete = lines if path.read_bytes().endswith(b"\n") else lines[:-1]
             for ev in parse_transcript(complete[seen:]).events:
-                print(f"{ev.when} " + _c(ev.kind, ev.text if ev.kind == "text" else _short(ev.text, 400), color))
+                full = ev.kind in ("text", "think")
+                print(f"{ev.when} " + _c(ev.kind, ev.text if full else _short(ev.text, 400), color))
             seen = len(complete)
         time.sleep(poll)
 

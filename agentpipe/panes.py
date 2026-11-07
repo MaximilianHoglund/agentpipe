@@ -21,7 +21,8 @@ from textual.widgets import Footer, RichLog, Static
 
 from agentpipe import watch as w
 
-_STYLE = {"tool": "cyan", "text": "", "error": "red", "denied": "yellow", "done": "green", "step": "magenta"}
+_STYLE = {"tool": "cyan", "text": "bold", "think": "", "error": "red", "denied": "yellow", "done": "green",
+          "step": "magenta", "dim": "dim"}
 
 
 def columns_for(n: int) -> int:
@@ -57,21 +58,84 @@ class PaneState:
     stats: w.Transcript = field(default_factory=w.Transcript)
 
 
+MAX_ENTRIES = 3000
+QUIET = ("tool", "error", "denied")  # folded into one summary line unless tool detail is on
+
+
 class JobPane(RichLog):
+    """One job's stream. By default it shows the agent's reasoning and messages in full and folds
+    each run of tool calls (with their errors) into one dim summary line; ``detail`` shows every
+    call. Entries are kept so a resize or a detail toggle can re-wrap them."""
+
     can_focus = True
 
-    def __init__(self, job: w.Job):
-        super().__init__(wrap=True, markup=False, highlight=False, max_lines=3000, auto_scroll=True,
-                         classes="job")
+    def __init__(self, job: w.Job, detail: bool = False):
+        super().__init__(wrap=True, markup=False, highlight=False, max_lines=MAX_ENTRIES * 2,
+                         auto_scroll=True, min_width=1, classes="job")
         self.job = job
         self.state = PaneState()
+        self.detail = detail
+        self.entries: list[w.Event] = []
+        self.group: list[w.Event] = []  # quiet events since the last loud one, not yet summarized
         self.border_title = escape(f"[{job.slot}] {job.kind} {job.key} #{job.issue}"
                                    + (f"  {job.about}" if job.about else ""))
 
     def event(self, when: str, kind: str, text: str) -> None:
-        line = Text(f"{when} ", style="dim")
-        line.append(text if kind == "text" else w._short(text, 600), style=_STYLE.get(kind, ""))
-        self.write(line)
+        ev = w.Event(when, kind, text)
+        self.entries.append(ev)
+        if len(self.entries) > MAX_ENTRIES:
+            del self.entries[: len(self.entries) - MAX_ENTRIES]
+        self._show(ev)
+
+    def _show(self, ev: w.Event) -> None:
+        if ev.kind in QUIET:
+            self.group.append(ev)
+            if self.detail:
+                self.write(self._line(ev.when, ev.kind, w._short(ev.text, 600)))
+            return
+        if self.group and not self.detail:
+            self.write(self._line(self.group[0].when, "dim", summarize(self.group)))
+        self.group = []
+        self.write(self._line(ev.when, ev.kind, ev.text))
+
+    def _line(self, when: str, kind: str, text: str) -> Text:
+        line = Text(f"{when} ", style="dim", overflow="fold")
+        line.append(text.strip() if kind in ("text", "think") else text, style=_STYLE.get(kind, ""))
+        return line
+
+    def rerender(self) -> None:
+        self.clear()
+        self.group = []
+        for ev in self.entries:
+            self._show(ev)
+
+    def now_doing(self) -> str:
+        """The latest tool call of the run not yet summarized, for the border."""
+        tool = next((e.text for e in reversed(self.group) if e.kind == "tool"), "")
+        return w._short(tool, 70)
+
+    def on_resize(self) -> None:
+        self.rerender()  # RichLog wraps at write time; re-wrap to the new width
+
+
+def summarize(group: list[w.Event]) -> str:
+    """'6 tool calls (Bash 4, Read 2), 1 error' for a run of quiet events."""
+    names: dict[str, int] = {}
+    for e in group:
+        if e.kind == "tool":
+            name = e.text.split(":", 1)[0]
+            names[name] = names.get(name, 0) + 1
+    calls = sum(names.values())
+    text = f"⋯ {calls} tool call{'s' if calls != 1 else ''}"
+    if names:
+        text += " (" + ", ".join(f"{n} {c}" for n, c in sorted(names.items(), key=lambda x: -x[1])) + ")"
+    errors = sum(e.kind == "error" for e in group)
+    denied = sum(e.kind == "denied" for e in group)
+    if errors:
+        text += f", {errors} error{'s' if errors != 1 else ''}"
+    if denied:
+        text += f", {denied} DENIED"
+    return text
 
 
 class PanesApp(App):
@@ -80,13 +144,14 @@ class PanesApp(App):
     #head { height: auto; max-height: 6; padding: 0 1; background: $boost; }
     #jobs { grid-gutter: 0 1; height: 1fr; }
     #idle { height: 1fr; content-align: center middle; color: $text-muted; }
-    .job { border: round $primary; scrollbar-size-vertical: 1; }
+    .job { border: round $primary; scrollbar-size-vertical: 1; overflow-x: hidden; }
     .job:focus { border: round $accent; }
     .job.stalled { border: round $error; }
-    #log { height: 9; border: round $secondary; scrollbar-size-vertical: 1; }
+    #log { height: 9; border: round $secondary; scrollbar-size-vertical: 1; overflow-x: hidden; }
     """
     BINDINGS = [
         Binding("m", "toggle_max", "maximize pane"),
+        Binding("t", "toggle_tools", "tool detail"),
         Binding("escape", "restore", "restore", show=False),
         Binding("tab", "focus_next", "next pane", show=False),
         Binding("shift+tab", "focus_previous", "previous pane", show=False),
@@ -106,12 +171,14 @@ class PanesApp(App):
         self.bind("q", "quit", description="quit + stop dispatcher" if linked else "quit")
         self.target, self.work_dir, self.project_dir, self.interval = target, work_dir, project_dir, interval
         self.panes: dict[str, JobPane] = {}  # job key -> pane
+        self.tool_detail = False
         self.log_tail = Tail(work_dir / "logs" / "pipeline.log")
 
     def compose(self) -> ComposeResult:
         yield Static(id="head")
         yield Grid(Static("no running jobs", id="idle"), id="jobs")
-        yield RichLog(id="log", wrap=True, markup=False, highlight=False, max_lines=2000, auto_scroll=True)
+        yield RichLog(id="log", wrap=True, markup=False, highlight=False, max_lines=2000, auto_scroll=True,
+                      min_width=1)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -157,7 +224,7 @@ class PanesApp(App):
             self.panes.pop(key).remove()
         for job in sorted(jobs, key=lambda j: j.slot):
             if job.key not in self.panes:
-                self.panes[job.key] = pane = JobPane(job)
+                self.panes[job.key] = pane = JobPane(job, self.tool_detail)
                 grid.mount(pane)
             self.panes[job.key].job = job  # phase updates
         self.query_one("#idle").display = not self.panes
@@ -180,7 +247,9 @@ class PanesApp(App):
                 pane.event(ev.when, ev.kind, ev.text)
             active = path.stat().st_mtime
             denied = f", {s.stats.denied} denied" if s.stats.denied else ""
-            what = f"agent, {s.stats.tool_calls} tools, {s.stats.errors} errors{denied}"
+            what = f"{s.stats.tool_calls} tools, {s.stats.errors} errors{denied}"
+            if now_doing := pane.now_doing():
+                what += f" · now {now_doing}"
         else:
             step, progress, active = w.job_step(self.work_dir, cwd, job)
             what = step + progress
@@ -200,6 +269,13 @@ class PanesApp(App):
             pass
 
     # ------------------------------------------------------------ actions
+    def action_toggle_tools(self) -> None:
+        self.tool_detail = not self.tool_detail
+        for pane in self.panes.values():
+            pane.detail = self.tool_detail
+            pane.rerender()
+        self.notify("tool detail on" if self.tool_detail else "reasoning only; tool calls folded")
+
     def action_toggle_max(self) -> None:
         if self.screen.maximized is not None:
             self.screen.minimize()

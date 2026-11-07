@@ -9,6 +9,13 @@ def test_columns_grow_with_jobs():
     assert [panes.columns_for(n) for n in (0, 1, 2, 4, 5, 9, 10)] == [1, 1, 2, 2, 3, 3, 4]
 
 
+def test_summarize_counts_tools_errors_and_denials():
+    E = watch.Event
+    group = [E("t", "tool", "Bash: a"), E("t", "tool", "Read: b"), E("t", "tool", "Bash: c"),
+             E("t", "error", "boom"), E("t", "denied", "DENIED Bash: x")]
+    assert panes.summarize(group) == "⋯ 3 tool calls (Bash 2, Read 1), 1 error, 1 DENIED"
+
+
 def test_tail_returns_only_new_complete_lines(tmp_path):
     f = tmp_path / "x.log"
     f.write_bytes(b"a\nb\npart")
@@ -56,9 +63,19 @@ def test_app_shows_a_pane_per_job_with_its_transcript(tmp_path, monkeypatch):
     cwd = watch.job_cwd(work, ".", watch.Job("implement", "c/1.1", 5, "impl-0", now - 60))
     folder = watch.project_folder(cwd)
     folder.mkdir(parents=True)
-    msg = {"type": "assistant", "timestamp": "2026-11-07T10:00:00Z",
-           "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": "cargo test"}}]}}
-    (folder / "s.jsonl").write_text(json.dumps(msg) + "\n", encoding="utf-8")
+    think = "Checking whether validate covers UnitSpawn now that it is no longer Copy. " * 6
+    msgs = [{"type": "assistant", "timestamp": "2026-11-07T10:00:00Z",
+             "message": {"content": [{"type": "thinking", "thinking": think}]}},
+            {"type": "assistant", "timestamp": "2026-11-07T10:00:01Z",
+             "message": {"content": [{"type": "tool_use", "name": "Bash",
+                                      "input": {"command": "cargo test --workspace " + "x" * 300}}]}},
+            {"type": "assistant", "timestamp": "2026-11-07T10:00:02Z",
+             "message": {"content": [{"type": "tool_use", "name": "Read", "input": {"file_path": "a.rs"}}]}},
+            {"type": "assistant", "timestamp": "2026-11-07T10:00:03Z",
+             "message": {"content": [{"type": "text", "text": "Tests pass; writing the summary."}]}},
+            {"type": "assistant", "timestamp": "2026-11-07T10:00:04Z",
+             "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": "git status"}}]}}]
+    (folder / "s.jsonl").write_text("".join(json.dumps(m) + "\n" for m in msgs), encoding="utf-8")
 
     async def go():
         app = panes.PanesApp("arpg", work, ".", interval=60)
@@ -66,8 +83,16 @@ def test_app_shows_a_pane_per_job_with_its_transcript(tmp_path, monkeypatch):
             await pilot.pause()
             assert set(app.panes) == {"c/1.1", "c/1.2"}
             impl, rev = app.panes["c/1.1"], app.panes["c/1.2"]
-            assert "1 tools" in str(impl.border_subtitle)
-            assert any("cargo test" in s.text for s in impl.lines)
+            text = "\n".join(s.text for s in impl.lines)
+            assert "Checking whether validate" in text and "Tests pass" in text
+            assert "2 tool calls (Bash 1, Read 1)" in text and "cargo test" not in text
+            assert "3 tools" in str(impl.border_subtitle) and "now Bash: git status" in str(impl.border_subtitle)
+            assert impl.virtual_size.width <= impl.scrollable_content_region.width  # wrapped, no h-scroll
+            await pilot.press("t")
+            await pilot.pause()
+            assert "cargo test" in "\n".join(s.text for s in impl.lines)
+            assert impl.virtual_size.width <= impl.scrollable_content_region.width  # long command wraps too
+            await pilot.press("t")
             assert "test gate" in str(rev.border_subtitle)
             # A finished job's pane goes away on the next refresh.
             with (work / "logs" / "pipeline.log").open("a", encoding="utf-8") as f:
