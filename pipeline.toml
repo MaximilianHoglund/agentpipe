@@ -175,7 +175,10 @@ project_dir = "."
 # Godot checks); else cargo test once 1.1 creates the workspace; else pass, so tasks
 # merged before the workspace exists (e.g. 1.2's setup scripts) aren't failed for it.
 test = '''pwsh -NoProfile -Command "if (Test-Path scripts/check.ps1) { & ./scripts/check.ps1; exit $LASTEXITCODE } elseif (Test-Path Cargo.toml) { cargo test --workspace; exit $LASTEXITCODE } else { Write-Output 'No Cargo.toml or scripts/check.ps1 yet: nothing to gate.'; exit 0 }"'''
-mutation = '''pwsh -NoProfile -Command "if (Test-Path Cargo.toml) { cargo mutants --in-place --in-diff '{diff}' --baseline skip --timeout 60 --no-shuffle } else { Write-Output 'No Cargo.toml yet: no mutation run.' }"'''
+# --skip: the two `checkouts_sharing_a_target_directory_*` tests (content, bridge) check Cargo
+# rebuild behaviour with nested builds, not code, and take ~110 s; they made every bridge mutant
+# time out (run-viewer 1.1: 24 of 36 mutants, 29 min, no signal). Rest of bridge's tests: ~40 s.
+mutation = '''pwsh -NoProfile -Command "if (Test-Path Cargo.toml) { cargo mutants --in-place --in-diff '{diff}' --baseline skip --timeout 120 --no-shuffle -- -- --skip checkouts_sharing_a_target_directory } else { Write-Output 'No Cargo.toml yet: no mutation run.' }"'''
 mutation_timeout = 1800
 context = ["docs/design.md", "docs/decisions.md", "docs/roadmap.md", "docs/agent-environment.md"]
 # Godot 4.7.2 in self-contained mode, with export templates, preinstalled off the repo.
