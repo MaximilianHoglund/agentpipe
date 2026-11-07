@@ -59,6 +59,14 @@ class Target:
     # each command must exit 0 from the dispatcher's shell and from an agent's Bash tool.
     preflight: list[str] = field(default_factory=list)
     preflight_gate: bool = False  # also run `test` on the base branch
+    # Run in project_dir after the dispatcher resolves a merge conflict where both sides only
+    # added lines (it keeps both): e.g. `cargo fmt --all` re-sorts the `mod`/`use` lines it
+    # appended. Leave empty when the base branch isn't kept formatted.
+    format: str = ""
+    # Paths (fnmatch globs, repo-relative) that don't count when the scheduler keeps tasks
+    # touching the same files apart: files nearly every task edits and whose conflicts are
+    # additive, such as module lists and decision logs.
+    overlap_ignore: list[str] = field(default_factory=list)
 
     @property
     def changes_dir(self) -> Path:
@@ -151,6 +159,8 @@ def load(path: Path) -> Config:
             release_assets=list(t.get("release_assets", [])),
             preflight=list(t.get("preflight", [])),
             preflight_gate=bool(t.get("preflight_gate", False)),
+            format=t.get("format", ""),
+            overlap_ignore=list(t.get("overlap_ignore", [])),
         )
         tg = targets[name]
         if tg.milestones and not tg.release_branch:

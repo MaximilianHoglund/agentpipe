@@ -67,9 +67,36 @@ class Git:
         """True if ``ref`` is already an ancestor of HEAD."""
         return self.git("merge-base", "--is-ancestor", ref, "HEAD", cwd=wt, check=False).ok
 
+    def enable_rerere(self) -> None:
+        """Record conflict resolutions, so a branch that merges its base again isn't asked to
+        resolve the same conflict twice. Repo config, so every worktree shares the records."""
+        self.git("config", "rerere.enabled", "true")
+
     def merge(self, wt: Path, ref: str) -> bool:
-        """Merge ``ref`` into HEAD. On conflict the merge is left in progress and False returned."""
-        return self.git("merge", "--no-edit", ref, cwd=wt, check=False).ok
+        """Merge ``ref`` into HEAD. On conflict the merge is left in progress and False returned.
+
+        diff3 markers show the common ancestor, which tells an additive conflict (both sides
+        only added lines) from a real one; rerere's autoUpdate stages files it resolved from
+        an earlier resolution, so only new conflicts stay unmerged."""
+        return self.git("-c", "merge.conflictStyle=diff3", "-c", "rerere.autoUpdate=true",
+                        "merge", "--no-edit", ref, cwd=wt, check=False).ok
+
+    def conflicted(self, wt: Path) -> list[str]:
+        """Paths still unmerged in an in-progress merge."""
+        out = self.git("diff", "--name-only", "--diff-filter=U", cwd=wt, check=False).out
+        return [l.strip() for l in out.splitlines() if l.strip()]
+
+    def merge_commits(self, wt: Path, since: str, base_ref: str) -> tuple[list[str], int]:
+        """The branch's own commits after ``since``, leaving out what came in from ``base_ref``:
+        (its merge commits, newest first; how many other commits it has)."""
+        span = ["HEAD", f"^{since}", f"^{base_ref}"]
+        merges = self.git("rev-list", "--merges", *span, cwd=wt).out.split()
+        others = self.git("rev-list", "--no-merges", "--count", *span, cwd=wt).out.strip()
+        return merges, int(others or 0)
+
+    def remerge_diff(self, wt: Path, commit: str) -> str:
+        """How a merge commit differs from git's own automatic merge: its conflict resolutions."""
+        return self.git("show", "--remerge-diff", "--format=", commit, cwd=wt).out
 
     def merge_abort(self, wt: Path) -> None:
         self.git("merge", "--abort", cwd=wt, check=False)

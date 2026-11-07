@@ -13,6 +13,7 @@ from agentpipe.deps import Plan, TaskDeps
 from agentpipe.pipeline import Pipeline
 from agentpipe.status import TASK_MARKER, TICKET_MARKER, Status
 from agentpipe.tasks import parse_tasks
+from gitutil import commit_on, git, make_repo
 
 S = Status
 
@@ -211,6 +212,7 @@ def test_first_sync_starts_agents_before_creating_blocked_issues(pl):
     p.load_tasks = lambda: tasks
     p.make_plan = lambda tasks, fp, old=None: Plan(fp, deps)
     p.sync_links = lambda gh, issues: None
+    p.backfill_touches = lambda tasks, plan: False
     seen = []
     p.start = lambda kind, key, slot, issue, pr: (seen.append((key, len(gh.issues))),
                                                   p.jobs.__setitem__(key, _Job(kind, slot)))
@@ -627,3 +629,128 @@ def test_config_edits_apply_without_restart(pl, tmp_path, monkeypatch):
     os.utime(path, (time.time() + 10, time.time() + 10))
     p.reload_config()
     assert p.cfg.max_implementers == 5  # a broken file keeps the current settings
+
+
+# ------------------------------------------------------------------ merge conflicts
+
+
+def touching(p, **paths):
+    for k, ps in paths.items():
+        p.plan.tasks["c/" + k.replace("_", ".")].touches = ps
+
+
+def test_a_fresh_task_waits_while_another_in_flight_touches_its_files(pl):
+    p, gh = pl
+    p.t.overlap_ignore = ["**/lib.rs"]
+    touching(p, **{"1_1": ["src/run.rs"], "1_2": ["src/run.rs", "src/lib.rs"], "1_3": ["src/lib.rs"],
+                   "1_4": ["src/map.rs"]})
+    task_issue(gh, "c/1.1", S.PENDING_APPROVAL)
+    for k in ("c/1.2", "c/1.3", "c/1.4"):
+        task_issue(gh, k, S.PENDING_IMPLEMENTATION)
+    gh.prs = [{"number": 20, "headRefOid": "s", "body": TASK_MARKER.format(key="c/1.1"), "files": []}]
+    gh.comments_by[20] = [{"body": "<!-- pipeline-review sha=s verdict=request_changes round=1 -->"}]
+    p.tick()
+    # 1.2 shares run.rs with 1.1's open PR; lib.rs is ignored, so 1.3 and 1.4 go.
+    assert [s[1] for s in p.started if s[0] == "implement"] == ["c/1.3", "c/1.4"]
+    assert "c/1.2" in p.held and "PR #20" in p.held["c/1.2"]
+
+
+def test_a_pr_holds_back_tasks_by_the_files_it_actually_changed(pl):
+    p, gh = pl
+    touching(p, **{"1_2": ["src/run.rs"]})
+    task_issue(gh, "c/1.1", S.APPROVED)
+    task_issue(gh, "c/1.2", S.PENDING_IMPLEMENTATION)
+    gh.prs = [{"number": 20, "headRefOid": "s", "body": TASK_MARKER.format(key="c/1.1"),
+               "files": [{"path": "src/run.rs"}]}]
+    p.tick()
+    assert not [s for s in p.started if s[0] == "implement"]
+    gh.issues[1]["labels"] = ["pipeline", S.NEEDS_DECISION.label]  # parked with a human: no longer holds
+    p.tick()
+    assert ("implement", "c/1.2", "impl-0") in p.started
+
+
+def test_work_under_way_resumes_even_if_it_overlaps(pl):
+    p, gh = pl
+    touching(p, **{"1_1": ["src/run.rs"], "1_2": ["src/run.rs"]})
+    task_issue(gh, "c/1.1", S.IN_PROGRESS)
+    task_issue(gh, "c/1.2", S.IN_PROGRESS)
+    p.tick()
+    assert [s[1] for s in p.started] == ["c/1.1", "c/1.2"]
+
+
+def test_tickets_are_held_back_by_the_files_they_name_under_the_project_dir(pl):
+    p, gh = pl
+    p.t.project_dir = "game"
+    touching(p, **{"1_1": ["game/src/run.rs"]})
+    task_issue(gh, "c/1.1", S.IN_PROGRESS)
+    t = gh.add(TICKET_MARKER + "\n`src/run.rs:12` panics", S.PENDING_IMPLEMENTATION, title="Fix run")
+    p.state.data["tickets"] = [t]
+    p.load_tickets(p.issues_by_key(gh.list_issues()))
+    p.tick()
+    assert [s[1] for s in p.started] == ["c/1.1"]
+    assert "c/1.1" in next(iter(p.held.values()))
+
+
+def merge_repo(tmp_path):
+    return make_repo(tmp_path), commit_on, git
+
+
+def pipeline_on(p, repo):
+    from agentpipe.git import Git
+    p.git = Git(repo)
+    p.base_ref = lambda: "base"
+    p.t.project_dir = "."
+    return p
+
+
+def test_merge_base_resolves_additive_conflicts_and_formats(pl, tmp_path):
+    p, _ = pl
+    repo, commit_on, git = merge_repo(tmp_path)
+    commit_on(repo, "base", "lib.rs", "mod a;\nmod c;\nmod z;\n")
+    commit_on(repo, "feature", "lib.rs", "mod a;\nmod b;\nmod z;\n")
+    pipeline_on(p, repo).t.format = "echo formatted> fmt.txt"
+    assert p.merge_base(repo, "s", gate=False) == "auto"
+    assert (repo / "lib.rs").read_text() == "mod a;\nmod b;\nmod c;\nmod z;\n"
+    assert not p.git.merging(repo) and git(repo, "status", "--porcelain").strip() == "?? fmt.txt"
+    assert p.merge_base(repo, "s", gate=False) == "current"
+
+
+def test_merge_base_leaves_a_real_conflict_for_an_agent(pl, tmp_path):
+    p, _ = pl
+    repo, commit_on, git = merge_repo(tmp_path)
+    commit_on(repo, "base", "run.rs", "x = 1\n")
+    commit_on(repo, "feature", "run.rs", "x = 2\n")
+    pipeline_on(p, repo)
+    assert p.merge_base(repo, "s", gate=False) == "conflict"
+    assert p.git.merging(repo) and p.git.conflicted(repo) == ["run.rs"]
+
+
+def test_a_mechanical_resolution_that_fails_the_gate_goes_to_an_agent(pl, tmp_path):
+    p, _ = pl
+    repo, commit_on, git = merge_repo(tmp_path)
+    commit_on(repo, "base", "lib.rs", "mod a;\nmod c;\nmod z;\n")
+    commit_on(repo, "feature", "lib.rs", "mod a;\nmod b;\nmod z;\n")
+    before = pipeline_on(p, repo).git.head(repo)
+    p.t.test = "exit 1"
+    assert p.merge_base(repo, "s", gate=True) == "conflict"
+    assert p.git.merging(repo) and p.git.conflicted(repo) == ["lib.rs"]
+    assert git(repo, "rev-parse", "HEAD").strip() == before
+
+
+def test_a_clean_merge_after_approval_is_approved_without_an_agent(pl, tmp_path):
+    p, _ = pl
+    repo, commit_on, git = merge_repo(tmp_path)
+    commit_on(repo, "feature", "run.rs", "x = 1\n")
+    pipeline_on(p, repo)
+    approved = p.git.head(repo)
+    commit_on(repo, "base", "lib.rs", "mod a;\nmod c;\nmod z;\n")
+    git(repo, "checkout", "-q", "feature")
+    assert p.git.merge(repo, "base")
+    history = [{"sha": approved, "verdict": "approve"}, {"sha": approved, "verdict": "conflict"}]
+    p.claude = None  # any agent call would fail
+    t = p.tasks["c/1.1"]
+    v = p.resolution_verdict(t, {"number": 5, "headRefOid": p.git.head(repo)}, repo, repo, "s", history)
+    assert v["verdict"] == "approve"
+    # New work since the approval needs the full review.
+    commit_on(repo, "feature", "run.rs", "x = 9\n")
+    assert p.resolution_verdict(t, {"number": 5, "headRefOid": p.git.head(repo)}, repo, repo, "s", history) is None

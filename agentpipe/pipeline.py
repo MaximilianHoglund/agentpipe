@@ -20,8 +20,9 @@ from pathlib import Path
 from agentpipe import milestones, proc, review, service, syncplan
 from agentpipe.claude import CAPPED, MAX_TURNS, Claude, ClaudeResult
 from agentpipe.config import Agent, Config, Milestone, Target
-from agentpipe.deps import (PLAN_SCHEMA, Plan, PlanError, key_sort, merge_plans, stale_keys, text_hash,
-                            validate_plan)
+from agentpipe import conflicts
+from agentpipe.deps import (PLAN_SCHEMA, TOUCHES_SCHEMA, Plan, PlanError, clean_touches, key_sort, merge_plans,
+                            stale_keys, text_hash, validate_plan)
 from agentpipe.git import Git
 from agentpipe.github import GitHub
 from agentpipe.status import (GRAPH_OWNED, TASK_MARKER, TICKET_CHANGE, TICKET_MARKER, Status,
@@ -150,6 +151,8 @@ class Pipeline:
         self.last_sync = 0.0
         self.jobs: dict[str, Job] = {}
         self.reviewed: dict[int, str] = {}  # PR number -> head sha already reviewed
+        self.touches_tried: set[str] = set()  # task keys sent to backfill_touches this run
+        self.held: dict[str, str] = {}  # task key -> why it waits for another's files (logged once)
         # Threads start lazily, so a generous cap costs nothing and lets a config reload
         # raise the slot counts without replacing the pool.
         self.pool = ThreadPoolExecutor(max_workers=64)
@@ -317,6 +320,37 @@ class Pipeline:
                 self.log(f"plan rejected: {errors}")
         raise PlanError(f"planner failed twice: {errors}")
 
+    def backfill_touches(self, tasks: list[Task], plan: Plan) -> bool:
+        """Predict `touches` for open tasks planned before the planner gave them (one run).
+
+        A failed run is logged and not retried until a restart: without a prediction a task
+        is simply scheduled as before. Returns True if the plan changed."""
+        need = [t for t in tasks if not t.done and t.key in plan.tasks and plan.tasks[t.key].touches is None
+                and plan.tasks[t.key].autonomous and t.key not in self.touches_tried]
+        if not need:
+            return False
+        self.touches_tried |= {t.key for t in need}
+        self.log(f"predicting the files {len(need)} planned task(s) touch")
+        prompt = review.prompt(
+            "touches", repo_root=self.base_wt, target=self.t.name, project_dir=self.t.project_dir,
+            tasks="\n".join(f"- {t.key} | {t.section} | {t.text}" for t in need))
+        res = self.claude.run(prompt, self.base_wt, self.cfg.agents["planner"], TOUCHES_SCHEMA,
+                              log_name=f"touches-{len(need)}")
+        if res.limited:
+            raise LimitHit(res.text)
+        if not res.ok:
+            self.log(f"predicting touched files failed ({res.subtype}); scheduling without them")
+            return False
+        asked = {t.key for t in need}
+        n = 0
+        for e in res.structured.get("tasks", []):
+            key = str(e.get("key", "")).strip()
+            if key in asked and (touches := clean_touches(e.get("touches"))) is not None:
+                plan.tasks[key].touches = touches
+                n += 1
+        self.log(f"predicted touched files for {n} of {len(need)} task(s)")
+        return n > 0
+
     def planner_prompt(self, tasks: list[Task], plan_t: list[Task], old: Plan | None, removed: set[str]) -> str:
         def line(t: Task) -> str:
             return f"- {t.key} | {t.section} | {t.text}"
@@ -383,6 +417,9 @@ class Pipeline:
         self.load_tickets(issues)
         self.sync_links(gh, issues)
         self.check_waiters(issues)
+        # After the ready agents started: a task without a prediction is simply never held back.
+        if self.backfill_touches(tasks, plan):
+            plan.save(self.plan_path)
         self.last_sync = time.time()
         return actions
 
@@ -750,6 +787,14 @@ class Pipeline:
                         self.log(f"{self.what(key)}: could not register its wait; retrying next tick: "
                                  f"{str(e)[-200:]}")
                 continue
+            # Only fresh starts wait: work already under way resumes, or two waiting on each
+            # other would never run.
+            if status is Status.PENDING_IMPLEMENTATION and (why := self.overlap_hold(key, issues, prs)):
+                if self.held.get(key) != why:
+                    self.held[key] = why
+                    self.log(f"{self.what(key)} {why}")
+                continue
+            self.held.pop(key, None)
             self.start(kind, key, free_impl.pop(0), issues[key], prs.get(key))
         for key in by_status(Status.PENDING_APPROVAL):
             if not free_rev:
@@ -762,6 +807,43 @@ class Pipeline:
                 if key in prs:
                     self.start("merge", key, "merge", issues[key], prs[key])
                     break
+
+    def touches_of(self, key: str) -> list[str]:
+        """Repo-relative paths a task (with its batch) will likely change: the planner's
+        prediction, or for a ticket the files its body names."""
+        if key.startswith(TICKET_CHANGE + "/"):
+            pd = conflicts.normalize(self.t.project_dir)
+            paths = conflicts.ticket_paths(self.ticket_bodies.get(key, ""))
+            if pd in ("", "."):
+                return paths
+            return [p if p.startswith(pd + "/") else f"{pd}/{p}" for p in paths]
+        if self.plan is None:
+            return []
+        return [p for k in self.plan.batch_of(key) for p in (self.plan.get(k).touches or [])]
+
+    def overlap_hold(self, key: str, issues: dict[str, dict], prs: dict[str, dict]) -> str:
+        """Why ``key`` should wait before starting: another task in flight touches its files.
+
+        In flight means being implemented, or having an open PR that isn't parked with a human.
+        Its files are its predicted ones plus, once it has a PR, the files the PR changes.
+        Returns "" when the task may start (also when nothing about its files is known)."""
+        mine = self.touches_of(key)
+        if not mine:
+            return ""
+        active = {Status.IN_PROGRESS, Status.PENDING_APPROVAL, Status.CHANGES_REQUESTED, Status.APPROVED}
+        for k, i in sorted(issues.items(), key=lambda kv: key_sort(kv[0])):
+            if k == key:
+                continue
+            job = self.jobs.get(k)
+            if not ((job and job.kind in IMPL_KINDS) or status_from_labels(i["labels"]) in active):
+                continue
+            pr = prs.get(k)
+            theirs = self.touches_of(k) + [f.get("path", "") for f in (pr or {}).get("files") or []]
+            if both := conflicts.overlapping(mine, theirs, self.t.overlap_ignore):
+                shown = ", ".join(f"`{p}`" for p in both[:3]) + (f" and {len(both) - 3} more" if len(both) > 3 else "")
+                via = f"PR #{pr['number']}" if pr else f"#{i['number']}"
+                return f"waits for {k} ({via}) to merge first: both touch {shown}"
+        return ""
 
     def record_awaiting(self, issues: dict[str, dict], prs: dict[str, dict]) -> None:
         """Save the issues waiting on Max, for the watcher's header.
@@ -890,6 +972,10 @@ class Pipeline:
         self.pid_file.write_text(str(os.getpid()), encoding="utf-8")
         self.had_watcher = False
         self.gh.ensure_labels()
+        try:
+            self.git.enable_rerere()
+        except proc.CommandError as e:
+            self.log(f"could not enable git rerere: {str(e)[-200:]}")
         self.log(f"running (pid {os.getpid()}); implementers={self.cfg.max_implementers} "
                  f"reviewers={self.cfg.max_reviewers}")
         try:
@@ -1057,6 +1143,68 @@ class Pipeline:
         res = self.agent(t, prompt, slot, "impl")
         self.deliver(t, issue, pr, res, slot, Status.IN_PROGRESS)
 
+    def merge_base(self, wt: Path, slot: str, gate: bool) -> str:
+        """Bring the branch checked out in ``wt`` up to date with the base branch.
+
+        Returns "current" (it already contains the base), "clean" (merged without conflicts, or
+        rerere replayed earlier resolutions of all of them), "auto" (the dispatcher resolved
+        conflicts where both sides only added lines, by keeping both, then ran `format`), or
+        "conflict": a real conflict, left in progress for an agent. With ``gate``, a merge that
+        needed resolving ("auto", or a rerere replay) must pass the test gate, else it is undone
+        and redone as "conflict" so an agent looks at it.
+        """
+        if self.git.contains(wt, self.base_ref()):
+            return "current"
+        before = self.git.head(wt)
+        if self.git.merge(wt, self.base_ref()):
+            return "clean"
+        paths = self.git.conflicted(wt)
+        fixed: dict[str, bytes] = {}
+        for p in paths:
+            try:
+                text = (wt / p).read_bytes()
+            except OSError:
+                return "conflict"  # deleted on one side, or not a file
+            if (resolved := conflicts.resolve_additive(text)) is None:
+                return "conflict"
+            fixed[p] = resolved
+        for p, data in fixed.items():
+            (wt / p).write_bytes(data)
+            self.git.git("add", "--", p, cwd=wt)
+        if fixed and self.t.format:
+            f = proc.run(self.t.format, wt / self.t.project_dir, env=self.env(slot), timeout=900,
+                         check=False, shell=True)
+            if not f.ok:
+                self.log(f"`{self.t.format}` failed after resolving a merge in {wt.name}: {f.tail(300)}")
+            self.git.git("add", "-u", cwd=wt)
+        # rerere off for this commit: it should remember agents' tested resolutions, not ours.
+        self.git.git("-c", "rerere.enabled=false", "commit", "--no-edit", "--no-verify", "--quiet", cwd=wt)
+        how =("kept both sides of additive conflicts in " + ", ".join(f"`{p}`" for p in fixed)
+               if fixed else "replayed earlier resolutions (rerere)")
+        if gate:
+            g = self.run_gate(wt / self.t.project_dir, slot, self.t.test, self.t.test_timeout)
+            if not g.ok:
+                self.log(f"merging {self.base_ref()} in {wt.name}: {how}, but the gate fails; "
+                         "handing the conflict to an agent")
+                self.git.git("reset", "--hard", "--quiet", before, cwd=wt)
+                # Without rerere, so the agent sees the raw conflicts rather than a replayed
+                # resolution that just failed the gate.
+                self.git.git("-c", "merge.conflictStyle=diff3", "-c", "rerere.enabled=false", "merge",
+                             "--no-edit", self.base_ref(), cwd=wt, check=False)
+                return "conflict"
+        self.log(f"merged {self.base_ref()} in {wt.name}: {how}")
+        return "auto"
+
+    def conflict_prompt(self, t: Task) -> str:
+        return (f"You are an implementer agent in an unattended pipeline, working on **{t.key}** — {t.text} "
+                f"({self.spec_ref(t)}). `{self.base_ref()}` has moved on and is being merged into your "
+                "branch; the merge is in progress in this worktree and conflicts. Resolve every conflict "
+                "keeping both sides' intent (the base's changes are merged work: keep them), change "
+                f"nothing the merge doesn't need, run `{self.t.test}` from the project dir until it "
+                "passes, and commit the merge. `git checkout` is denied: take one side of a file with "
+                "`git restore --theirs <file>` (or `--ours`). Then return the structured output with "
+                "status `done`; in `summary`, say how you resolved each conflicted file.")
+
     def job_revise(self, t: Task, issue: int, pr: dict, slot: str) -> None:
         wt = self.ensure_worktree(t)
         comments = self.gh.comments(pr["number"])
@@ -1064,10 +1212,30 @@ class Pipeline:
         last = history[-1] if history else None
         merge_note = ""
         if last and last["verdict"] == review.CONFLICT:
+            # Only the base moved: update the branch without a full revise. A clean or mechanical
+            # merge needs no agent at all; a real conflict gets a short conflict-only run.
             self.git.fetch()
-            if not self.git.merge(wt, self.base_ref()):
-                merge_note = (f"`{self.base_ref()}` has been merged into your branch and has conflicts. "
-                              "Resolve them keeping both sides' intent, run the tests, and commit the merge.")
+            m = self.merge_base(wt, slot, gate=True)
+            if m in ("clean", "auto"):
+                self.git.push(wt, t.branch)
+                self.gh.comment(pr["number"], review.bot(
+                    f"**Updated.** Merged `{self.base_ref()}` into the branch" +
+                    (" and resolved its conflicts mechanically (both sides only added lines); the gate passes."
+                     if m == "auto" else "; it merged cleanly.")))
+                self.gh.set_status(issue, Status.PENDING_APPROVAL, Status.CHANGES_REQUESTED)
+                return
+            if m == "conflict":
+                res = self.agent(t, self.conflict_prompt(t), slot, "conflict")
+                if res.subtype not in CAPPED and (not res.ok or self.git.merging(wt) or not self.git.is_clean(wt)):
+                    self.git.merge_abort(wt)
+                    self.to_decision(issue, Status.CHANGES_REQUESTED,
+                                     "Could not resolve merge conflicts with the base branch.")
+                    return
+                return self.deliver(t, issue, pr, res, slot, Status.CHANGES_REQUESTED)
+            # "current": the branch has the base, yet GitHub refused the merge: let the agent look.
+            merge_note = (f"The branch already contains `{self.base_ref()}`, yet GitHub reported it as not "
+                          "mergeable. Check `git status` and the branch history, fix what blocks the merge, "
+                          "run the tests, and commit.")
         prompt = review.prompt(
             "revise", key=t.key, round=review.rounds_used(history), max_rounds=self.cfg.max_rounds,
             feedback=last["body"] if last else "(no review found)", merge_note=merge_note,
@@ -1142,10 +1310,9 @@ class Pipeline:
             self.to_decision(issue, cur, "The implementer reported done but committed nothing.\n\n" + out["summary"])
             return
         self.git.fetch()
-        if not self.git.contains(wt, self.base_ref()) and not self.git.merge(wt, self.base_ref()):
-            res = self.agent(t, f"`{self.base_ref()}` was merged into your branch and conflicts. Resolve "
-                                "the conflicts keeping both sides' intent, run the tests, commit the merge, "
-                                "and return the structured output.", slot, "conflict")
+        # No gate here: the review runs it on whatever is pushed.
+        if self.merge_base(wt, slot, gate=False) == "conflict":
+            res = self.agent(t, self.conflict_prompt(t), slot, "conflict")
             if not res.ok or self.git.merging(wt) or not self.git.is_clean(wt):
                 self.git.merge_abort(wt)
                 self.to_decision(issue, cur, "Could not resolve merge conflicts with the base branch.")
@@ -1216,7 +1383,9 @@ class Pipeline:
                      "findings": [], "probes": [], "details": gate.tail(6000)}
             else:
                 try:
-                    v = self.reviewer_verdict(t, pr, rv, pdir, slot, history, issue)
+                    v = self.resolution_verdict(t, pr, rv, pdir, slot, history)
+                    if v is None:
+                        v = self.reviewer_verdict(t, pr, rv, pdir, slot, history, issue)
                 except CappedRun as e:
                     return self.capped(t, issue, Status.PENDING_APPROVAL, e.result, "reviewer")
             self.gh.comment(pr["number"], review.render_review(v, sha, round_, self.cfg.max_rounds))
@@ -1231,6 +1400,46 @@ class Pipeline:
                 self.gh.set_status(issue, Status.CHANGES_REQUESTED, Status.PENDING_APPROVAL)
         finally:
             self.git.worktree_remove(rv)
+
+    def resolution_verdict(self, t: Task, pr: dict, rv: Path, pdir: Path, slot: str, history) -> dict | None:
+        """A short review for a PR that was approved, hit a conflict, and since then only merged
+        the base: check the merges' conflict resolutions, not the whole PR again (no mutation run).
+
+        Merges that resolved nothing (clean ones) are approved without an agent: the gate has
+        passed and nobody wrote any code. Returns None when a full review is needed."""
+        approved = next((i for i in range(len(history) - 1, -1, -1) if history[i]["verdict"] == review.APPROVE), None)
+        if approved is None or not any(h["verdict"] == review.CONFLICT for h in history[approved + 1:]):
+            return None
+        sha = history[approved]["sha"]
+        if not self.git.contains(rv, sha):
+            return None  # rewritten since the approval
+        merges, others = self.git.merge_commits(rv, sha, self.base_ref())
+        if others or not merges:
+            return None
+        diffs = [d for d in (self.git.remerge_diff(rv, c).strip() for c in merges) if d]
+        if not diffs:
+            return {"verdict": review.APPROVE, "findings": [], "probes": [],
+                    "summary": f"Since the approval at `{sha[:10]}` the branch only merged `{self.base_ref()}`, "
+                               "without conflicts to resolve, and the gate passes."}
+        resolution = "\n".join(diffs)
+        if len(resolution) > 40000:
+            return None  # too big to judge from the resolution alone
+        prompt = review.prompt(
+            "resolution", pr=pr["number"], key=t.key, text=t.text, approved=sha[:10],
+            base_ref=self.base_ref(), head=pr["headRefOid"][:10], project_dir=self.t.project_dir,
+            test_cmd=self.t.test, resolution=resolution)
+        self.log(f"phase {t.key}: agent (reviewer, conflict resolution only)")
+        res = self.claude.run(prompt, pdir, self.agent_def("reviewer"), review.REVIEW_SCHEMA,
+                              log_name=f"{t.slug}-resolution-{pr['headRefOid'][:8]}", env=self.env(slot))
+        if res.limited:
+            raise LimitHit(res.text)
+        if res.subtype in CAPPED:
+            raise CappedRun(res)
+        if not res.ok:
+            self.git.git("checkout", "--force", "--detach", pr["headRefOid"], cwd=rv)
+            return None  # fall back to the full review
+        self.file_tickets(f"the review of PR #{pr['number']} ({t.key})", res.structured.get("tickets"))
+        return review.normalize_verdict(res.structured)
 
     def reviewer_verdict(self, t: Task, pr: dict, rv: Path, pdir: Path, slot: str, history,
                          issue: int | None = None) -> dict:
@@ -1297,12 +1506,19 @@ class Pipeline:
                 time.sleep(MERGE_RETRY_SECONDS)
                 self.git.fetch()
             if not self.git.contains(wt, self.base_ref()):
-                if not self.git.merge(wt, self.base_ref()):
+                # The gate runs just below in any case, so merge_base needn't run it.
+                m = self.merge_base(wt, slot, gate=False)
+                if m == "conflict":
                     self.git.merge_abort(wt)
                     return self.merge_conflict(issue, pr, f"The approved branch no longer merges cleanly "
                                                           f"with `{self.base_ref()}`.")
                 self.log(f"phase {t.key}: test gate (after merging {self.base_ref()})")
                 gate = self.run_gate(wt / self.t.project_dir, slot, self.t.test, self.t.test_timeout)
+                if not gate.ok and m == "auto":
+                    # The dispatcher's own resolution broke it: nobody's fault, no round used.
+                    self.git.git("reset", "--hard", pr["headRefOid"], cwd=wt)
+                    return self.merge_conflict(issue, pr, f"Merging `{self.base_ref()}` conflicts; keeping "
+                                                          f"both sides fails `{self.t.test}`.")
                 if not gate.ok:
                     history = review.review_history(self.gh.comments(pr["number"]))
                     round_ = review.rounds_used(history) + 1

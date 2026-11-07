@@ -173,6 +173,13 @@ context = ["docs/design.md", "docs/decisions.md", "docs/roadmap.md", "docs/agent
 # PATH: agents' Git Bash otherwise can't find pwsh (a Store app alias in WindowsApps).
 # Ticket #217: slots reuse a target dir across branches; clean the game's crates first.
 clean_workspace_crates = true
+# The gate checks rustfmt, so dev stays formatted: after keeping both sides of an additive
+# conflict, fmt re-sorts the appended `mod`/`use` lines.
+format = "cargo fmt --all"
+# Files most tasks edit in passing; their conflicts are additive and resolved mechanically,
+# so they don't hold tasks apart (top conflict files in Nov 2026: design.md, lib.rs).
+overlap_ignore = ["**/lib.rs", "**/mod.rs", "**/Cargo.toml", "Cargo.lock", "README.md", "docs/*.md",
+                  "openspec/**"]
 env = { GODOT ="E:/Programs/Godot/4.7.2/Godot_v4.7.2-stable_win64_console.exe", PATH = "C:/Users/Max/AppData/Local/Microsoft/WindowsApps;{PATH}" }
 preflight = ["cargo --version", 'pwsh -NoProfile -Command "exit 0"',
              "E:/Programs/Godot/4.7.2/Godot_v4.7.2-stable_win64_console.exe --version"]

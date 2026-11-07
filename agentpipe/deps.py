@@ -22,6 +22,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from agentpipe.conflicts import normalize
 from agentpipe.tasks import Task
 
 PLAN_SCHEMA = {
@@ -37,8 +38,27 @@ PLAN_SCHEMA = {
                     "autonomous": {"type": "boolean"},
                     "human_reason": {"type": "string"},
                     "batch": {"type": "string", "description": "shared id for tasks done in one PR; omit or empty for none"},
+                    "touches": {"type": "array", "items": {"type": "string"},
+                                "description": "repo-relative files or directories the task will most likely change"},
                 },
                 "required": ["key", "blocked_by", "autonomous"],
+            },
+        }
+    },
+    "required": ["tasks"],
+}
+
+
+TOUCHES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tasks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"key": {"type": "string"},
+                               "touches": {"type": "array", "items": {"type": "string"}}},
+                "required": ["key", "touches"],
             },
         }
     },
@@ -52,6 +72,8 @@ class TaskDeps:
     autonomous: bool = True
     human_reason: str = ""
     batch: str = ""
+    # Repo-relative files or directories the task will likely change; None = not predicted yet.
+    touches: list[str] | None = None
 
 
 def text_hash(t: Task) -> str:
@@ -181,7 +203,8 @@ def validate_plan(tasks: list[Task], raw: dict, fingerprint: str, max_batch: int
         if not autonomous and not reason:
             errors.append(f"{key} marked non-autonomous without a human_reason")
         batch = str(entry.get("batch", "") or "").strip() if max_batch > 1 else ""
-        out[key] = TaskDeps(sorted(blockers, key=key_sort), autonomous, reason, batch)
+        out[key] = TaskDeps(sorted(blockers, key=key_sort), autonomous, reason, batch,
+                            clean_touches(entry.get("touches")))
     missing = open_keys - out.keys()
     if missing:
         errors.append("open tasks missing from plan: " + ", ".join(sorted(missing, key=key_sort)))
@@ -212,6 +235,13 @@ def validate_plan(tasks: list[Task], raw: dict, fingerprint: str, max_batch: int
     if errors:
         raise PlanError("; ".join(errors))
     return Plan(fingerprint, out, {k: text_hash(by_key[k]) for k in out})
+
+
+def clean_touches(raw) -> list[str] | None:
+    """A planner's `touches` as sorted, normalized paths; None when it gave none."""
+    if raw is None:
+        return None
+    return sorted({p for p in (normalize(str(x)) for x in raw) if p})
 
 
 def find_cycle(edges: dict[str, list[str]]) -> list[str] | None:

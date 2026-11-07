@@ -118,6 +118,32 @@ reusing the gate's build, and the checkout is reset afterwards.
 After `max_rounds` rejections a task goes to `needs decision`. Merge conflicts with
 the base branch are sent back without using up a round.
 
+## Keeping merge conflicts down
+
+Parallel PRs into one base conflict, and each conflict used to cost a full revise and a
+full re-review. Four things cut that:
+
+- **Scheduling by files.** The planner predicts each task's `touches` (repo-relative
+  files or directories; tasks planned earlier get theirs in one extra planner run). A
+  task in `pending implementation` waits while another task in flight (being
+  implemented, or with an open PR not parked in `needs decision`) touches the same
+  files, by prediction or by the PR's actual changed files. Tickets use the files their
+  body names. Paths in the target's `overlap_ignore` don't count. Work already under
+  way always resumes. The log says `... waits for <key> (PR #n) to merge first`.
+- **Mechanical resolution.** Merges use diff3 markers. A conflict where both sides only
+  added lines (a `mod` line, a decision at the end of a doc) is resolved by keeping
+  both, then the target's `format` command runs. A real conflict goes to an agent.
+- **rerere** is enabled on the repo, so a branch that merges its base again replays
+  earlier (agent-made, tested) resolutions.
+- **Light updates.** An approved PR that conflicts gets no full revise: a clean or
+  mechanical merge (gated) is pushed straight back to review, a real one gets a short
+  conflict-only agent run. The re-review then sees only the merges' resolutions
+  (`git show --remerge-diff`), with no mutation run; a clean merge is approved without
+  an agent. New commits besides merges get the full review.
+
+Implementers are also told not to number new entries in shared logs, since parallel
+PRs claim the same number.
+
 ## What runs where
 
 - Agents run as headless `claude -p` on your subscription, with `--permission-mode

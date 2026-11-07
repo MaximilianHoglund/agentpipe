@@ -54,6 +54,12 @@ $existing_section
    otherwise run in parallel on independent parts, or non-autonomous tasks. A batch
    waits for every member's outside blockers, so don't batch a task whose blockers
    would hold up the others for long. Most tasks stay unbatched.
+4. **touches**: the repo-relative files (or, when you can't tell which file, the
+   narrowest directory) the task will most likely change, tests included. The
+   scheduler keeps tasks whose `touches` overlap from running at the same time, so they
+   don't conflict when they merge. Be specific: a whole crate or `src/` makes the task
+   wait on everything. Leave out files nearly every task edits in passing (module lists
+   such as `lib.rs`, changelogs, decision logs); conflicts there are resolved mechanically.
 
 $answer_rule
 The dependency graph must have no cycles, also when each batch is counted as one task.

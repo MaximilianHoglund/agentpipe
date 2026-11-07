@@ -71,6 +71,11 @@ add Co-Authored-By or any other attribution lines. Do not push, open PRs, switch
 branches, or rewrite history; the pipeline does that. Leave nothing untracked outside
 git-ignored paths.
 
+Other agents work on other tasks at the same time and merge into the same base. In shared
+lists (decision logs, design notes, changelogs) don't claim the next free number or id for a
+new entry: a parallel PR will likely claim the same one. Give the entry a descriptive title
+without a number, and refer to it by that title.
+
 You may delete files and folders, recursively too, but only inside your working
 directory; never delete anything outside it. Put throwaway files and probe folders in a
 git-ignored directory (see `.gitignore`, e.g. `target/` or `.scratch/`).

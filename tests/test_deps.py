@@ -69,3 +69,17 @@ def test_plan_round_trips_through_disk(tmp_path):
     plan.save(tmp_path / "p.json")
     assert Plan.load(tmp_path / "p.json") == plan
     assert Plan.load(tmp_path / "missing.json") is None
+
+
+def test_touches_are_normalized_kept_through_save_and_unknown_until_predicted(tmp_path):
+    from agentpipe.deps import Plan, validate_plan
+    from agentpipe.tasks import parse_tasks
+    tasks = parse_tasks("c", "- [ ] 1.1 a\n- [ ] 1.2 b\n")
+    plan = validate_plan(tasks, {"tasks": [
+        {"key": "c/1.1", "blocked_by": [], "autonomous": True, "touches": ["./src\\run.rs", "src/run.rs", " "]},
+        {"key": "c/1.2", "blocked_by": [], "autonomous": True}]}, "fp")
+    assert plan.get("c/1.1").touches == ["src/run.rs"]
+    assert plan.get("c/1.2").touches is None
+    plan.save(tmp_path / "plan.json")
+    again = Plan.load(tmp_path / "plan.json")
+    assert again.get("c/1.1").touches == ["src/run.rs"] and again.get("c/1.2").touches is None
