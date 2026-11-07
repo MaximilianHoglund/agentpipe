@@ -1555,16 +1555,32 @@ class Pipeline:
             pdir = rv / self.t.project_dir
             history = review.review_history(self.gh.comments(pr["number"]))
             round_ = review.rounds_used(history) + 1
-            self.log(f"phase {t.key}: test gate")
-            gate = self.run_gate(pdir, slot, self.t.test, self.t.test_timeout)
+            # Mutation testing runs in copies of the tree with target dirs of their own, so it
+            # starts alongside the gate rather than after it (arpg: 3-17 min each, Nov 2026). Not
+            # when a conflict-resolution review may do instead, which needs no mutation run.
+            mutation = None
+            if (self.t.mutation and self.t.mutation_alongside_gate
+                    and not review.resolution_review_possible(history)):
+                self.log(f"phase {t.key}: test gate and mutation testing")
+                mutation = self.start_mutation(t, rv, pdir, slot)
+            else:
+                self.log(f"phase {t.key}: test gate")
+            try:
+                gate = self.run_gate(pdir, slot, self.t.test, self.t.test_timeout)
+            except BaseException:
+                if mutation:
+                    mutation.kill()
+                raise
             if not gate.ok:
+                if mutation:
+                    mutation.kill()
                 v = {"verdict": review.TESTS_FAILED, "summary": f"`{self.t.test}` failed on this commit.",
                      "findings": [], "probes": [], "details": gate.tail(6000)}
             else:
                 try:
-                    v = self.resolution_verdict(t, pr, rv, pdir, slot, history)
+                    v = None if mutation else self.resolution_verdict(t, pr, rv, pdir, slot, history)
                     if v is None:
-                        v = self.reviewer_verdict(t, pr, rv, pdir, slot, history, issue)
+                        v = self.reviewer_verdict(t, pr, rv, pdir, slot, history, issue, mutation)
                 except CappedRun as e:
                     return self.capped(t, issue, Status.PENDING_APPROVAL, e.result, "reviewer")
             self.gh.comment(pr["number"], review.render_review(v, sha, round_, self.cfg.max_rounds))
@@ -1586,10 +1602,9 @@ class Pipeline:
 
         Merges that resolved nothing (clean ones) are approved without an agent: the gate has
         passed and nobody wrote any code. Returns None when a full review is needed."""
-        approved = next((i for i in range(len(history) - 1, -1, -1) if history[i]["verdict"] == review.APPROVE), None)
-        if approved is None or not any(h["verdict"] == review.CONFLICT for h in history[approved + 1:]):
+        if not review.resolution_review_possible(history):
             return None
-        sha = history[approved]["sha"]
+        sha = history[review.last_approval(history)]["sha"]
         if not self.git.contains(rv, sha):
             return None  # rewritten since the approval
         merges, others = self.git.merge_commits(rv, sha, self.base_ref())
@@ -1620,18 +1635,24 @@ class Pipeline:
         self.file_tickets(f"the review of PR #{pr['number']} ({t.key})", res.structured.get("tickets"))
         return review.normalize_verdict(res.structured)
 
+    def start_mutation(self, t: Task, rv: Path, pdir: Path, slot: str) -> proc.Background:
+        diff_path = rv.parent / f"{t.slug}.diff"
+        # Paths relative to the project dir, which is where the mutation tool runs.
+        diff_path.write_text(self.git.diff(pdir, self.base_ref(), relative=True), encoding="utf-8")
+        # Not run_gate: cleaning the workspace crates is the gate's business, not the mutants'.
+        return proc.Background(self.t.mutation.replace("{diff}", str(diff_path)), pdir, env=self.env(slot),
+                               timeout=self.t.mutation_timeout, shell=True)
+
     def reviewer_verdict(self, t: Task, pr: dict, rv: Path, pdir: Path, slot: str, history,
-                         issue: int | None = None) -> dict:
+                         issue: int | None = None, mutation: proc.Background | None = None) -> dict:
         mutation_section = ""
         if self.t.mutation:
-            diff_path = rv.parent / f"{t.slug}.diff"
-            # Paths relative to the project dir, which is where the mutation tool runs.
-            diff_path.write_text(self.git.diff(pdir, self.base_ref(), relative=True), encoding="utf-8")
-            self.log(f"phase {t.key}: mutation testing")
-            # Not run_gate: the gate just built this tree in this slot, so cleaning the workspace
-            # crates again would only force a full rebuild before the first mutant.
-            m = proc.run(self.t.mutation.replace("{diff}", str(diff_path)), pdir, env=self.env(slot),
-                         timeout=self.t.mutation_timeout, check=False, shell=True)
+            if mutation is None:
+                self.log(f"phase {t.key}: mutation testing")
+                mutation = self.start_mutation(t, rv, pdir, slot)
+            else:
+                self.log(f"phase {t.key}: waiting for mutation testing")
+            m = mutation.result()
             self.git.restore(rv)  # an in-place run killed mid-mutant must not leave a mutated file
             mutation_section = (
                 "Mutation testing on the changed lines (`" + self.t.mutation + "`). Lines starting "

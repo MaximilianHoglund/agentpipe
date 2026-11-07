@@ -47,6 +47,10 @@ class Target:
     work_dir: Path
     test_timeout: int = 3600
     mutation_timeout: int = 3600
+    # True starts the mutation run alongside the reviewer's gate instead of after it. Only for a
+    # mutation command that works on copies of the tree: an `--in-place` run edits the files the
+    # gate is building.
+    mutation_alongside_gate: bool = False
     # Appended to the implementer's and reviewer's allowed tools for this target only.
     extra_tools: list[str] = field(default_factory=list)
     # Extra environment variables for this target's agents, gate and mutation runs.
@@ -210,6 +214,7 @@ def load(path: Path) -> Config:
             work_dir=work_root / name,
             test_timeout=t.get("test_timeout", 3600),
             mutation_timeout=t.get("mutation_timeout", 3600),
+            mutation_alongside_gate=bool(t.get("mutation_alongside_gate", False)),
             extra_tools=list(t.get("extra_tools", [])),
             env={k: str(v) for k, v in t.get("env", {}).items()},
             clean_workspace_crates=bool(t.get("clean_workspace_crates", False)),

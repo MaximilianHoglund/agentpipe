@@ -183,6 +183,18 @@ def rounds_used(history: list[dict]) -> int:
     return sum(1 for h in history if h["verdict"] in COUNTED)
 
 
+def last_approval(history: list[dict]) -> int | None:
+    """Index of the latest approval in `history`, if any."""
+    return next((i for i in range(len(history) - 1, -1, -1) if history[i]["verdict"] == APPROVE), None)
+
+
+def resolution_review_possible(history: list[dict]) -> bool:
+    """True when the PR was approved and has since hit a merge conflict: then a review of the
+    conflict resolution alone may do, if the branch only merged the base since the approval."""
+    approved = last_approval(history)
+    return approved is not None and any(h["verdict"] == CONFLICT for h in history[approved + 1:])
+
+
 def human_comments(comments: list[dict]) -> list[dict]:
     return [c for c in comments if not is_bot_comment(c["body"])]
 

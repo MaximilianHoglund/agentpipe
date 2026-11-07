@@ -188,6 +188,9 @@ test = '''pwsh -NoProfile -Command "if (Test-Path scripts/check.ps1) { & ./scrip
 # so CARGO_TARGET_DIR is cleared or they'd share one. PR #367's 86 mutants: 8 min, vs ~1 h serial.
 mutation = '''pwsh -NoProfile -Command "if (Test-Path Cargo.toml) { Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue; cargo mutants -j 6 --in-diff '{diff}' --baseline skip --timeout 120 --no-shuffle -- -- --skip checkouts_sharing_a_target_directory } else { Write-Output 'No Cargo.toml yet: no mutation run.' }"'''
 mutation_timeout = 1800
+# The mutants build in their own tree copies, so they run alongside the reviewer's gate (the two
+# were ~10 min each, one after the other, in Nov 2026). The benchmark has ~10x headroom (170 ms of 1.8 s).
+mutation_alongside_gate = true
 context = ["docs/design.md", "docs/decisions.md", "docs/roadmap.md", "docs/agent-environment.md"]
 # Godot 4.7.2 in self-contained mode, with export templates, preinstalled off the repo.
 # PATH: agents' Git Bash otherwise can't find pwsh (a Store app alias in WindowsApps).

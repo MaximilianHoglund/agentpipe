@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,6 +55,40 @@ def run(cmd, cwd: Path | None = None, *, input: str | None = None, env=None,
     if check and not r.ok:
         raise CommandError(cmd, r)
     return r
+
+
+class Background:
+    """A command started now and collected later, with `run`'s timeout and tree kill."""
+
+    def __init__(self, cmd, cwd: Path | None = None, *, env=None, timeout: int | None = None,
+                 shell: bool = False):
+        self.p = subprocess.Popen(
+            cmd, cwd=cwd, env=env, shell=shell, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", start_new_session=os.name != "nt")
+        self._result: Result | None = None
+        self._thread = threading.Thread(target=self._collect, args=(timeout,), daemon=True)
+        self._thread.start()
+
+    def _collect(self, timeout: int | None) -> None:
+        try:
+            out, err = self.p.communicate(timeout=timeout)
+            self._result = Result(self.p.returncode, out or "", err or "")
+        except subprocess.TimeoutExpired:
+            kill_tree(self.p)
+            out, _ = self.p.communicate()
+            self._result = Result(TIMEOUT_CODE, out or "", f"timed out after {timeout}s")
+
+    def result(self) -> Result:
+        """Waits for the command to finish (or time out) and returns its result."""
+        self._thread.join()
+        assert self._result is not None
+        return self._result
+
+    def kill(self) -> None:
+        """Stops the command and everything it started, and waits for that."""
+        if self.p.poll() is None:
+            kill_tree(self.p)
+        self._thread.join()
 
 
 def kill_tree(p: subprocess.Popen) -> None:

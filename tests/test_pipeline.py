@@ -543,7 +543,14 @@ def test_mutation_run_does_not_clean_what_the_gate_just_built(pl, tmp_path, monk
     rv.mkdir()
     cleaned, ran = [], []
     monkeypatch.setattr(p, "clean_workspace_crates", lambda cwd, slot: cleaned.append(slot))
-    monkeypatch.setattr(proc_mod, "run", lambda cmd, *a, **kw: (ran.append(cmd), proc_mod.Result(0, "ok", ""))[1])
+    class FakeBackground:
+        def __init__(self, cmd, *a, **kw):
+            ran.append(cmd)
+
+        def result(self):
+            return proc_mod.Result(0, "ok", "")
+
+    monkeypatch.setattr(proc_mod, "Background", FakeBackground)
     p.git = type("G", (), {"diff": lambda self, *a, **kw: "", "restore": lambda self, *a: None})()
     verdict = {"verdict": "approve", "summary": "s", "findings": [], "probes": [], "tickets": []}
     p.claude = type("C", (), {"run": lambda self, *a, **kw: ClaudeResult(
