@@ -21,8 +21,15 @@ from textual.widgets import Footer, RichLog, Static
 
 from agentpipe import watch as w
 
-_STYLE = {"tool": "cyan", "text": "bold", "think": "", "error": "red", "denied": "yellow", "done": "green",
-          "step": "magenta", "dim": "dim"}
+def styles_for(theme) -> dict[str, str]:
+    """Line styles from the theme's own colours. Fixed ANSI names (magenta, cyan) come out dark
+    and unreadable in the Windows console (Max, 2026-11-07)."""
+    def c(value, fallback):
+        return str(value) if value else fallback
+
+    return {"tool": c(theme.primary, "cyan"), "text": "bold", "think": "",
+            "error": c(theme.error, "red"), "denied": c(theme.warning, "yellow"),
+            "done": c(theme.success, "green"), "step": "bold " + c(theme.accent, "yellow"), "dim": "dim"}
 
 
 def columns_for(n: int) -> int:
@@ -100,7 +107,8 @@ class JobPane(RichLog):
 
     def _line(self, when: str, kind: str, text: str) -> Text:
         line = Text(f"{when} ", style="dim", overflow="fold")
-        line.append(text.strip() if kind in ("text", "think") else text, style=_STYLE.get(kind, ""))
+        line.append(text.strip() if kind in ("text", "think") else text,
+                    style=styles_for(self.app.current_theme).get(kind, ""))
         return line
 
     def rerender(self) -> None:
@@ -263,6 +271,8 @@ class PanesApp(App):
         pane.border_subtitle = escape(f"{w._ago(now - job.started)} · {what} · {seen}")
 
     def save_theme(self, theme) -> None:
+        for pane in self.panes.values():
+            pane.rerender()  # line colours come from the theme
         try:
             self.theme_file.write_text(theme.name, encoding="utf-8")
         except OSError:

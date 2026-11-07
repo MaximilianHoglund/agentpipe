@@ -9,6 +9,16 @@ def test_columns_grow_with_jobs():
     assert [panes.columns_for(n) for n in (0, 1, 2, 4, 5, 9, 10)] == [1, 1, 2, 2, 3, 3, 4]
 
 
+def test_step_lines_use_the_theme_accent_not_ansi_magenta():
+    from textual.app import App
+    themes = App().available_themes
+    s = panes.styles_for(themes["textual-dark"])
+    assert s["step"] == "bold #FFA62B" or s["step"].lower() == "bold #ffa62b"
+    assert "magenta" not in s.values() and "cyan" not in s.values()
+    for name, theme in themes.items():
+        assert all(v for k, v in panes.styles_for(theme).items() if k != "think"), name
+
+
 def test_summarize_counts_tools_errors_and_denials():
     E = watch.Event
     group = [E("t", "tool", "Bash: a"), E("t", "tool", "Read: b"), E("t", "tool", "Bash: c"),
