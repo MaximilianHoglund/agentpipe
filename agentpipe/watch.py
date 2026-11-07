@@ -212,6 +212,22 @@ def _dispatcher_state(work_dir: Path) -> str:
     return f"stopping, pid {pid}" if (work_dir / "stop").exists() else f"running, pid {pid}"
 
 
+def awaiting_input(work_dir: Path) -> list[int] | None:
+    """Issue numbers the dispatcher last saw waiting on Max; None before its first GitHub poll."""
+    try:
+        state = json.loads((work_dir / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None  # missing, or caught mid-write
+    awaiting = state.get("awaiting_input")
+    return awaiting if isinstance(awaiting, list) else None
+
+
+def awaiting_label(work_dir: Path) -> str:
+    """Header text such as "3 waiting on you", or "" when the dispatcher hasn't counted yet."""
+    awaiting = awaiting_input(work_dir)
+    return "" if awaiting is None else f"{len(awaiting)} waiting on you"
+
+
 def _state_notes(work_dir: Path, now: float) -> list[str]:
     """Progress the log doesn't show: a usage-limit pause, and blocked-by linking."""
     notes = []
@@ -248,7 +264,8 @@ def render(target: str, work_dir: Path, project_dir: str, *, events: int = 8,
         or ["  (no log yet)"]
     out += [f"  {line}" for line in _state_notes(work_dir, now)]
 
-    out.append(_c("head", f"\nRunning jobs: {len(st.jobs)}", color))
+    waiting = awaiting_label(work_dir)
+    out.append(_c("head", f"\nRunning jobs: {len(st.jobs)}" + (f"  ·  {waiting}" if waiting else ""), color))
     if not st.jobs:
         out.append("  none: waiting on sync, GitHub polling, or nothing is ready")
     for job in sorted(st.jobs, key=lambda j: j.slot):

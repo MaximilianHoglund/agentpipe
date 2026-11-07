@@ -247,7 +247,9 @@ class PanesApp(App):
         for pane in self.panes.values():
             self.update_pane(pane, now)
         quiet = f", quiet for {w._ago(now - st.last_time)}" if st.last_time else ""
-        head = [f"Dispatcher: {w._dispatcher_state(self.work_dir)}{quiet}  ·  {len(st.jobs)} running"]
+        waiting = w.awaiting_label(self.work_dir)
+        head = [f"Dispatcher: {w._dispatcher_state(self.work_dir)}{quiet}  ·  {len(st.jobs)} running"
+                + (f"  ·  {waiting}" if waiting else "")]
         head += w._state_notes(self.work_dir, now)
         self.query_one("#head", Static).update("\n".join(head))
 

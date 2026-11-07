@@ -661,6 +661,7 @@ class Pipeline:
                             and not self.state.task(key).get("runs"))
                 if key not in prs and not proposal:
                     self.to_decision(issues[key]["number"], s, f"Status is `{s.value}` but no open PR was found.")
+        self.record_awaiting(issues, prs)
         for key in by_status(Status.IN_PROGRESS) + by_status(Status.CHANGES_REQUESTED) + \
                 by_status(Status.PENDING_IMPLEMENTATION):
             if not free_impl:
@@ -683,6 +684,26 @@ class Pipeline:
                 if key in prs:
                     self.start("merge", key, "merge", issues[key], prs[key])
                     break
+
+    def record_awaiting(self, issues: dict[str, dict], prs: dict[str, dict]) -> None:
+        """Save the issues waiting on Max, for the watcher's header.
+
+        These are issues in needs decision, plus tickets in pending approval that nobody has
+        worked on and that have no PR. A ticket with a PR is in review, so it isn't counted.
+        """
+        awaiting = []
+        for key, i in issues.items():
+            s = status_from_labels(i["labels"])
+            proposal = (s is Status.PENDING_APPROVAL and key.startswith(TICKET_CHANGE + "/")
+                        and key not in prs and not self.state.task(key).get("runs"))
+            if s is Status.NEEDS_DECISION or proposal:
+                awaiting.append(i["number"])
+        awaiting.sort()
+        with self.state.lock:
+            if self.state.data.get("awaiting_input") == awaiting:
+                return
+            self.state.data["awaiting_input"] = awaiting
+        self.state.save()
 
     def start(self, kind: str, key: str, slot: str, issue: dict, pr: dict | None) -> None:
         fn = getattr(self, f"job_{kind}")

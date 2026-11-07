@@ -128,6 +128,25 @@ def test_status_without_pr_goes_to_needs_decision_but_fresh_tickets_wait(pl):
     assert not any(k == f"ticket/{t}" for _, k, _ in p.started)
 
 
+def test_records_issues_waiting_on_max_for_the_watcher(pl):
+    from agentpipe import watch
+    p, gh = pl
+    assert watch.awaiting_label(p.t.work_dir) == ""  # nothing counted before the first poll
+    d = task_issue(gh, "c/1.1", S.NEEDS_DECISION)
+    task_issue(gh, "c/1.2", S.PENDING_APPROVAL)  # PR open: in review, not his
+    gh.prs = [{"number": 20, "headRefOid": "sha", "body": TASK_MARKER.format(key="c/1.2")}]
+    task_issue(gh, "c/1.3", S.PENDING_IMPLEMENTATION)
+    t = gh.add(TICKET_MARKER + "\nfix it", S.PENDING_APPROVAL, title="Dedupe parser")
+    p.state.data["tickets"] = [t]
+    p.load_tickets(p.issues_by_key(gh.list_issues()))
+    p.tick()
+    assert p.state.data["awaiting_input"] == sorted([d, t])
+    assert watch.awaiting_label(p.t.work_dir) == "2 waiting on you"
+    gh.set_status(d, S.PENDING_IMPLEMENTATION, S.NEEDS_DECISION)  # Max answered
+    p.tick()
+    assert watch.awaiting_label(p.t.work_dir) == "1 waiting on you"
+
+
 def test_approved_ticket_is_implemented_with_its_body_as_spec(pl):
     p, gh = pl
     t = gh.add(TICKET_MARKER + "\nThe parser in a.rs duplicates b.rs", S.PENDING_IMPLEMENTATION,
