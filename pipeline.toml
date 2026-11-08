@@ -191,8 +191,10 @@ release_test = '''pwsh -NoProfile -File scripts/check.ps1 -Full'''
 mutation = '''pwsh -NoProfile -Command "if (Test-Path scripts/mutants.ps1) { & ./scripts/mutants.ps1 -Diff '{diff}'; exit $LASTEXITCODE } elseif (Test-Path Cargo.toml) { Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue; cargo mutants -j 6 --in-diff '{diff}' --baseline skip --timeout 120 --no-shuffle -- -- --skip checkouts_sharing_a_target_directory } else { Write-Output 'No Cargo.toml yet: no mutation run.' }"'''
 mutation_timeout = 1800
 # The mutants build in their own tree copies, so they run alongside the reviewer's gate (the two
-# were ~10 min each, one after the other, in Nov 2026). The benchmark has ~10x headroom (170 ms of 1.8 s).
-mutation_alongside_gate = true
+# were ~10 min each, one after the other, in Nov 2026). Off since 2026-11-08: the "large packs"
+# benchmark case (51 units) has no such headroom and failed under the load on PR #394 (fastest
+# 1.95 s of 1.8 s, with the standard map varying 0.27-0.80 s in the same gate).
+mutation_alongside_gate = false
 context = ["docs/design.md", "docs/decisions.md", "docs/roadmap.md", "docs/agent-environment.md"]
 # Godot 4.7.2 in self-contained mode, with export templates, preinstalled off the repo.
 # PATH: agents' Git Bash otherwise can't find pwsh (a Store app alias in WindowsApps).
