@@ -237,7 +237,7 @@ changes = ["skill-gems", "monster-variety"]
 [[targets.arpg.milestones]]
 tag = "step-4-full-loop"
 title = "Step 4: The full loop"
-changes = ["map-progression", "map-juicing", "crafting", "character-progression"]
+changes = ["map-progression", "map-juicing", "crafting", "character-progression", "story"]
 play = ["balance-and-content/3.1", "balance-and-content/3.4"]
 
 [[targets.arpg.milestones]]
