@@ -254,13 +254,15 @@ changes = ["balance-and-content"]
 
 [machines.desktop]
 hostnames = ["Amiariel"]
-targets = ["arpg"]
+# arpg moved to the laptop 2026-11-08 so it runs while the desktop is off; move it back the same way.
+targets = []
 
 # The laptop runs agentpipe inside WSL2 Ubuntu-24.04: Smart App Control blocks unsigned
 # native binaries (rustc), so Windows-side builds don't work there. 12 threads, 12 GB for WSL.
 [machines.laptop]
 hostnames = ["DESKTOP-AJ9U89K"]
-targets = ["riftbound", "dota"]
+# Only arpg runs here since 2026-11-08 (Max); riftbound and dota run nowhere until listed again.
+targets = ["arpg"]
 claude_bin = "~/.local/bin/claude"
 gh_bin = "~/.local/bin/gh"
 work_root = "~/pipeline-work"
@@ -276,3 +278,24 @@ test_timeout = 7200
 # dota moved here 2026-11-08. ureq's native-tls needs libssl-dev (installed in WSL).
 [machines.laptop.target.dota]
 repo_root = "~/dota2-draft-helper"
+
+# arpg moved here 2026-11-08 (Max: keep working while the desktop sleeps). Linux Godot 4.7.2 in
+# self-contained mode at ~/godot/4.7.2 with the desktop's Windows export templates; PowerShell
+# 7.6 at ~/.local/pwsh (linked from ~/.local/bin), so check.ps1 and mutants.ps1 run unchanged.
+# WSLg gives the windowed Godot tests a display. The release export needs a Windows bridge DLL,
+# which Linux doesn't build: cut the Step 1 release from the desktop.
+[machines.laptop.target.arpg]
+repo_root = "~/arpg-manager"
+# The laptop has 12 threads and 12 GB for WSL, against [run]'s 5+3 sized for the desktop
+# (Max, 2026-11-08: fewer agents there).
+max_implementers = 3
+max_reviewers = 2
+# DISPLAY: the windowed Godot tests draw on Xvfb :99 (software Vulkan), which preflight starts
+# with ~/bin/ensure-xvfb.sh; WSLg's display restarted under the tests' load and hung them
+# (2026-11-09). WAYLAND_DISPLAY is blanked so Godot doesn't pick WSLg's Wayland.
+# DBUS_SESSION_BUS_ADDRESS: WSL has no session bus, and without an address Godot blocks in
+# `dbus-launch --autolaunch` until the test's 120 s deadline kills it.
+env = { GODOT = "/home/max/godot/4.7.2/Godot_v4.7.2-stable_linux.x86_64", DISPLAY = ":99", WAYLAND_DISPLAY = "", DBUS_SESSION_BUS_ADDRESS = "unix:path=/nonexistent-session-bus" }
+preflight = ["/home/max/bin/ensure-xvfb.sh", "cargo --version", 'pwsh -NoProfile -Command "exit 0"',
+             "/home/max/godot/4.7.2/Godot_v4.7.2-stable_linux.x86_64 --headless --version"]
+test_timeout = 7200
