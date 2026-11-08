@@ -9,4 +9,5 @@ $commands
 
 Then return one result per command per tool: the tool, the command exactly as listed,
 its exit code (use -1 if the call was denied or could not run), and the first line or
-two of its output or error.
+two of its output or error. A tool that shows no exit code shows one only on failure:
+a call that ran and completed without a reported error or exit code exited 0.
