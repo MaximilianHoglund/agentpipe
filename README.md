@@ -209,3 +209,14 @@ builds there): code in `~/agentpipe`, work dir `~/pipeline-work`, launched by
 
 `uv run pytest` — parsing, the dependency graph, sync decisions, verdict rules, ticket
 filing and the scheduler (against an in-memory GitHub).
+
+## Repository layout
+
+- `agentpipe/`: the dispatcher, agents' prompts in `agentpipe/prompts/`.
+- `openspec/changes/agentpipe-*`: the plan to make agentpipe a configurable framework.
+- `tools/`: log analysis. `py tools/friction.py <logs dir>` groups agents' failed tool calls;
+  `py tools/reviews.py <logs dir> <since ISO date> [category|all]` lists review verdicts and
+  blocking findings.
+
+agentpipe lived in `E:\Source\Claude\pipeline` (monorepo `MaximilianHoglund/PoEEyes`) until
+2026-11-08; its history came along with it.
