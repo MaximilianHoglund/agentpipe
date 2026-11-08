@@ -1026,9 +1026,13 @@ def train_setup(p, gh, tmp_path, monkeypatch, branches, gate_ok=True):
         order.append((t, task_issue(gh, key, S.APPROVED), {"number": 20 + i,
                                                            "headRefOid": git(repo, "rev-parse", "HEAD").strip()}))
     git(repo, "checkout", "-q", "base")
-    monkeypatch.setattr(p, "run_gate", lambda cwd, *a, **kw: (
-        seen["gates"].append(sorted(f.name for f in Path(cwd).iterdir() if f.suffix == ".rs")),
-        proc_mod.Result(0 if gate_ok else 1, "", ""))[1])
+    passes = gate_ok if callable(gate_ok) else (lambda files: gate_ok)
+
+    def run_gate(cwd, *a, **kw):
+        files = sorted(f.name for f in Path(cwd).iterdir() if f.suffix == ".rs")
+        seen["gates"].append(files)
+        return proc_mod.Result(0 if passes(files) else 1, "", "gate output")
+    monkeypatch.setattr(p, "run_gate", run_gate)
     gh.merge_pr = lambda n, sha: seen["merged"].append(n)
     monkeypatch.setattr(p, "finish_merge", lambda t, issue, pr: seen["finished"].append(t.key))
     return order, seen
@@ -1051,20 +1055,46 @@ def test_a_pr_that_conflicts_with_the_batch_is_left_for_later(pl, tmp_path, monk
     assert seen["merged"] == [20, 22]  # c/1.2 changed the same line as c/1.1
 
 
-def test_a_failed_batch_gate_falls_back_to_single_merges(pl, tmp_path, monkeypatch):
+FOUR = {"c/1.1": ("a.rs", "a\n"), "c/1.2": ("b.rs", "b\n"), "c/1.3": ("c.rs", "c\n"), "c/1.4": ("d.rs", "d\n")}
+
+
+def test_a_failed_batch_is_bisected_and_its_passing_front_merges(pl, tmp_path, monkeypatch):
+    p, gh = pl
+    # c/1.3 breaks the build; everything before it is fine.
+    order, seen = train_setup(p, gh, tmp_path, monkeypatch, FOUR, gate_ok=lambda files: "c.rs" not in files)
+    assert p.merge_train(order, "merge") == "merged"
+    # Whole batch fails, then the first half passes, then the first three fail: c/1.3 is it.
+    assert [len([f for f in g if f in "a.rs b.rs c.rs d.rs"]) for g in seen["gates"]] == [4, 2, 3]
+    assert seen["merged"] == [20, 21] and seen["finished"] == ["c/1.1", "c/1.2"]
+    assert p.state.task("c/1.3")["batch_culprit"] == order[2][2]["headRefOid"]
+    assert (p.logs / "merge-batch-20-21-22.log").read_text() == "gate output"
+    assert "batch_culprit" not in p.state.task("c/1.4")  # waits for the next batch
+
+
+def test_a_pr_that_broke_a_batch_is_left_out_of_the_next_and_merges_alone(pl, tmp_path, monkeypatch):
+    p, gh = pl
+    order, seen = train_setup(p, gh, tmp_path, monkeypatch, FOUR)
+    p.state.task("c/1.3")["batch_culprit"] = order[2][2]["headRefOid"]
+    p.merge_order = order[2:]
+    singles = []
+    monkeypatch.setattr(p, "merge_one", lambda t, issue, pr, slot: singles.append(t.key))
+    p.job_merge(*order[2], "merge")
+    assert singles == ["c/1.3"] and seen["gates"] == []  # no batch around the culprit
+    assert p.merge_train(order[2:], "merge") == "too few"  # c/1.4 alone is no batch
+    p.state.task("c/1.3")["batch_culprit"] = "an older head"  # revised since: batched again
+    assert p.merge_train(order, "merge") == "merged" and seen["merged"] == [20, 21, 22, 23]
+
+
+def test_a_batch_whose_first_pr_fails_merges_nothing(pl, tmp_path, monkeypatch):
     p, gh = pl
     order, seen = train_setup(p, gh, tmp_path, monkeypatch,
                               {"c/1.1": ("a.rs", "a\n"), "c/1.2": ("b.rs", "b\n")}, gate_ok=False)
-    p.t.merge_batch = 6
     p.merge_order = order
     singles = []
     monkeypatch.setattr(p, "merge_one", lambda t, issue, pr, slot: singles.append(t.key))
-    t, issue, pr = order[0]
-    p.job_merge(t, issue, pr, "merge")
-    assert seen["merged"] == [] and singles == ["c/1.1"] and p.single_merges_left == 1
-    p.merge_order = order[1:] + order[:1]  # next round: no batch while the singles run
-    p.job_merge(order[1][0], order[1][1], order[1][2], "merge")
-    assert len(seen["gates"]) == 1 and singles == ["c/1.1", "c/1.2"] and p.single_merges_left == 0
+    p.job_merge(*order[0], "merge")
+    assert len(seen["gates"]) == 2 and seen["merged"] == [] and singles == ["c/1.1"]
+    assert p.state.task("c/1.1")["batch_culprit"] == order[0][2]["headRefOid"]
 
 
 def test_review_worktree_gets_the_base_merged_in_locally(pl, tmp_path):

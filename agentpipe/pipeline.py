@@ -152,7 +152,6 @@ class Pipeline:
         self.tasks: dict[str, Task] = {}
         self.ticket_bodies: dict[str, str] = {}  # ticket key -> issue body (the ticket's spec)
         self.merge_order: list[tuple[Task, int, dict]] = []  # approved PRs the next merge job may batch
-        self.single_merges_left = 0  # after a batch fails its gate, merge this many one at a time
         self.plan: Plan | None = None
         self.last_sync = 0.0
         self.jobs: dict[str, Job] = {}
@@ -1851,45 +1850,55 @@ class Pipeline:
 
     def job_merge(self, t: Task, issue: int, pr: dict, slot: str) -> None:
         order = self.merge_order
-        if self.single_merges_left:
-            self.single_merges_left -= 1
-        elif len(order) > 1 and order[0][0].key == t.key:
-            outcome = self.merge_train(order, slot)
-            if outcome == "merged":
-                return
-            if outcome == "gate failed":
-                # Find the culprit the slow way, rather than pay for the same failing batch again.
-                self.single_merges_left = len(order) - 1
+        if (not self.broke_a_batch(t, pr) and len(order) > 1 and order[0][0].key == t.key
+                and self.merge_train(order, slot) == "merged"):
+            return
         self.merge_one(t, issue, pr, slot)
+
+    def broke_a_batch(self, t: Task, pr: dict) -> bool:
+        """True if a batch bisect found that this PR, at this head, fails the gate. It then
+        merges alone, where a failing gate sends it back with the output. A new head clears it."""
+        return self.state.task(t.key).get("batch_culprit") == pr["headRefOid"]
 
     def merge_train(self, order: list[tuple[Task, int, dict]], slot: str) -> str:
         """Merge several approved PRs with one gate: merge them all onto the base in a scratch
         worktree, gate the result once, then squash-merge each on GitHub in the same order.
-        A PR whose head moved or that doesn't merge into the batch cleanly is left for later.
+        A PR whose head moved, that doesn't merge into the batch cleanly, or that broke an
+        earlier batch is left for later. If the gate fails, the batch is bisected: the longest
+        passing prefix merges, and the PR after it is marked so it merges alone next time.
         Returns "merged" (at least the first PR landed), "too few" (under two PRs fit, nothing
         was gated) or "gate failed"; for the last two the caller merges the first PR alone."""
         train = self.t.work_dir / "train"
         self.git.fetch()
         self.git.worktree_detached(train, self.base_ref())
         try:
-            members = []
+            members, heads = [], []  # heads[i]: the batch's commit once members[:i+1] are merged
             for t, issue, pr in order:
                 ref = f"origin/{t.branch}"
-                if self.git.rev(train, ref) != pr["headRefOid"]:
+                if self.broke_a_batch(t, pr):
+                    self.log(f"merge batch: {self.what(t.key)} left out, it broke an earlier batch")
+                elif self.git.rev(train, ref) != pr["headRefOid"]:
                     self.log(f"merge batch: {self.what(t.key)} left out, its head moved after approval")
                 elif self.git.merge(train, ref):
                     members.append((t, issue, pr))
+                    heads.append(self.git.head(train))
                 else:
                     self.git.merge_abort(train)
                     self.log(f"merge batch: {self.what(t.key)} left out, it conflicts with the batch")
             if len(members) < 2:
                 return "too few"
+            good = self.bisect_batch(train, members, heads, slot)
+            if good < len(members):
+                t, _, pr = members[good]
+                self.state.task(t.key)["batch_culprit"] = pr["headRefOid"]
+                self.state.save()
+                self.log(f"merge batch: {self.what(t.key)} PR #{pr['number']} fails the gate "
+                         f"{'on its own' if good == 0 else 'on top of the PRs before it'}; it merges alone")
+                if good == 0:
+                    return "gate failed"
+                members = members[:good]
+                self.git.git("reset", "--hard", heads[good - 1], cwd=train)
             prs = ", ".join(f"#{pr['number']}" for _, _, pr in members)
-            self.log(f"phase merge batch: test gate on {len(members)} PRs together ({prs})")
-            gate = self.run_gate(train / self.t.project_dir, slot, self.t.test, self.t.test_timeout)
-            if not gate.ok:
-                self.log(f"merge batch {prs}: the gate fails on the batch; merging one at a time")
-                return "gate failed"
             tree = self.git.rev(train, "HEAD^{tree}")
             merged = []
             for t, issue, pr in members:
@@ -1906,6 +1915,34 @@ class Pipeline:
             return "merged" if merged else "too few"
         finally:
             self.git.worktree_remove(train)
+
+    def bisect_batch(self, train: Path, members: list, heads: list[str], slot: str) -> int:
+        """How many of ``members``, from the front, pass the gate together (all of them if the
+        whole batch passes). Binary search over prefixes, assuming the base itself passes: a
+        bad PR costs about log2(n) extra gates instead of n single merges, and a failing gate
+        is usually quick (it stops at the first failing check)."""
+        if self.gate_batch(train, members, slot):
+            return len(members)
+        good, bad = 0, len(members)  # prefix `good` passes (the base), prefix `bad` fails
+        while bad - good > 1:
+            mid = (good + bad) // 2
+            self.git.git("reset", "--hard", heads[mid - 1], cwd=train)
+            if self.gate_batch(train, members[:mid], slot):
+                good = mid
+            else:
+                bad = mid
+        return good
+
+    def gate_batch(self, train: Path, members: list, slot: str) -> bool:
+        prs = ", ".join(f"#{pr['number']}" for _, _, pr in members)
+        self.log(f"phase merge batch: test gate on {len(members)} PR(s) together ({prs})")
+        gate = self.run_gate(train / self.t.project_dir, slot, self.t.test, self.t.test_timeout)
+        if not gate.ok:
+            out = self.logs / f"merge-batch-{'-'.join(str(pr['number']) for _, _, pr in members)}.log"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(gate.tail(20000), encoding="utf-8")
+            self.log(f"merge batch {prs}: the gate fails (output in {out.name})")
+        return gate.ok
 
     def squash_merge(self, t: Task, pr: dict) -> bool:
         """Squash-merge ``pr`` at its approved head, retrying while GitHub is still computing
