@@ -888,6 +888,21 @@ def test_work_under_way_resumes_even_if_it_overlaps(pl):
     assert [s[1] for s in p.started] == ["c/1.1", "c/1.2"]
 
 
+def test_later_work_in_flight_does_not_hold_back_a_milestone_task(pl):
+    from agentpipe.milestones import Milestone
+    p, gh = pl
+    p.t.milestones = [Milestone("m1", "Milestone 1", ["c"])]
+    touching(p, **{"1_2": ["src/run.rs"]})
+    task_issue(gh, "c/1.2", S.PENDING_IMPLEMENTATION)
+    t = gh.add(TICKET_MARKER + "\n`src/run.rs:12` panics", S.IN_PROGRESS, title="Fix run")
+    p.state.data["tickets"] = [t]
+    p.load_tickets(p.issues_by_key(gh.list_issues()))
+    p.tick()
+    # The ticket ranks after the milestone's tasks, so its open work doesn't make c/1.2 wait.
+    assert "c/1.2" in [s[1] for s in p.started]
+    assert "c/1.2" not in p.held
+
+
 def test_tickets_are_held_back_by_the_files_they_name_under_the_project_dir(pl):
     p, gh = pl
     p.t.project_dir = "game"

@@ -895,18 +895,10 @@ class Pipeline:
                     if f"review-{i}" not in {j.slot for j in self.jobs.values()}]
         merging = any(j.kind == "merge" for j in self.jobs.values())
 
-        def priority(k: str) -> tuple:
-            # Milestone work first (the next test build), then by task key.
-            if self.tasks[k].change == TICKET_CHANGE:
-                st = self.state.task(k)
-                return milestones.ticket_rank(self.t.milestones, st.get("origin"),
-                                              st.get("unblocks", False)), key_sort(k)
-            return milestones.rank(self.t.milestones, self.tasks[k].change), key_sort(k)
-
         def by_status(s: Status) -> list[str]:
             return sorted((k for k, i in issues.items()
                            if status_from_labels(i["labels"]) is s and k not in self.jobs
-                           and k not in self.merging), key=priority)
+                           and k not in self.merging), key=lambda k: (self.rank_of(k), key_sort(k)))
 
         for s in (Status.PENDING_REVIEW, Status.CHANGES_REQUESTED, Status.APPROVED):
             for key in by_status(s):
@@ -989,18 +981,28 @@ class Pipeline:
             return []
         return [p for k in self.plan.batch_of(key) for p in (self.plan.get(k).touches or [])]
 
+    def rank_of(self, key: str) -> float:
+        """Milestone priority of a task or ticket: lower runs first (the next test build)."""
+        if self.tasks[key].change == TICKET_CHANGE:
+            st = self.state.task(key)
+            return milestones.ticket_rank(self.t.milestones, st.get("origin"), st.get("unblocks", False))
+        return milestones.rank(self.t.milestones, self.tasks[key].change)
+
     def overlap_hold(self, key: str, issues: dict[str, dict], prs: dict[str, dict]) -> str:
         """Why ``key`` should wait before starting: another task in flight touches its files.
 
         In flight means being implemented, or having an open PR that isn't parked with a human.
         Its files are its predicted ones plus, once it has a PR, the files the PR changes.
+        Work of a later milestone never holds back an earlier milestone's task: that one starts,
+        and the later work resolves the conflict when it merges second.
         Returns "" when the task may start (also when nothing about its files is known)."""
         mine = self.touches_of(key)
         if not mine:
             return ""
+        my_rank = self.rank_of(key)
         active = {Status.IN_PROGRESS, Status.PENDING_REVIEW, Status.CHANGES_REQUESTED, Status.APPROVED}
         for k, i in sorted(issues.items(), key=lambda kv: key_sort(kv[0])):
-            if k == key:
+            if k == key or (k in self.tasks and self.rank_of(k) > my_rank):
                 continue
             job = self.jobs.get(k)
             if not ((job and job.kind in IMPL_KINDS) or status_from_labels(i["labels"]) in active):
