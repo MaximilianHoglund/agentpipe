@@ -1195,3 +1195,14 @@ def test_review_worktree_keeps_the_branch_when_the_base_conflicts(pl, tmp_path):
     assert p.merge_base_for_review(repo) is None  # the gate will cover only the branch
     assert git(repo, "rev-parse", "HEAD").strip() == head
     assert not p.git.merging(repo) and git(repo, "status", "--porcelain").strip() == ""
+
+
+def test_a_target_can_run_fewer_agents_than_run_says(pl):
+    p, gh = pl
+    p.t.max_implementers, p.t.max_reviewers = 1, 1
+    for k in ("c/1.1", "c/1.2", "c/1.3"):
+        task_issue(gh, k, S.PENDING_IMPLEMENTATION)
+    p.tick()
+    assert len([s for s in p.started if s[0] == "implement"]) == 1
+    p.overrides = {"max_implementers": 2}  # a command-line count still wins
+    assert p.implementers() == p.cfg.max_implementers and p.reviewers() == 1

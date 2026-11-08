@@ -92,6 +92,9 @@ class Target:
     # Agent-filed tickets get one triage run: purely technical ones are approved without Max,
     # the rest wait for him in proposed with the triage's reason as a comment.
     auto_approve: bool = False
+    # Per-target agent counts, overriding [run] (e.g. a smaller machine): None keeps [run]'s.
+    max_implementers: int | None = None
+    max_reviewers: int | None = None
 
     def is_parked(self, key: str, number: int) -> bool:
         return (number in self.parked or key in self.parked
@@ -238,6 +241,8 @@ def load(path: Path) -> Config:
             parked=list(t.get("parked", [])),
             archive=t.get("archive", "openspec archive {change} --yes"),
             auto_approve=bool(t.get("auto_approve", False)),
+            max_implementers=t.get("max_implementers"),
+            max_reviewers=t.get("max_reviewers"),
         )
         tg = targets[name]
         if tg.milestones and not tg.release_branch:

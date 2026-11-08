@@ -889,9 +889,9 @@ class Pipeline:
         for pr in self.gh.list_prs():
             if key := task_key_from_body(pr["body"]):
                 prs[key] = pr
-        free_impl = [f"impl-{i}" for i in range(self.cfg.max_implementers)
+        free_impl = [f"impl-{i}" for i in range(self.implementers())
                      if f"impl-{i}" not in {j.slot for j in self.jobs.values()}]
-        free_rev = [f"review-{i}" for i in range(self.cfg.max_reviewers)
+        free_rev = [f"review-{i}" for i in range(self.reviewers())
                     if f"review-{i}" not in {j.slot for j in self.jobs.values()}]
         merging = any(j.kind == "merge" for j in self.jobs.values())
 
@@ -980,6 +980,19 @@ class Pipeline:
         if self.plan is None:
             return []
         return [p for k in self.plan.batch_of(key) for p in (self.plan.get(k).touches or [])]
+
+    def implementers(self) -> int:
+        """Implementer slots: the target's own count (set per machine for a smaller one), else [run]'s.
+
+        A command-line count still wins: it is written into ``cfg``, and the target's only applies
+        while ``cfg`` has the file's."""
+        return self.t.max_implementers if self.t.max_implementers is not None and not self.overrides.get(
+            "max_implementers") else self.cfg.max_implementers
+
+    def reviewers(self) -> int:
+        """Reviewer slots, as ``implementers``."""
+        return self.t.max_reviewers if self.t.max_reviewers is not None and not self.overrides.get(
+            "max_reviewers") else self.cfg.max_reviewers
 
     def rank_of(self, key: str) -> float:
         """Milestone priority of a task or ticket: lower runs first (the next test build)."""
@@ -1158,8 +1171,8 @@ class Pipeline:
             self.git.enable_rerere()
         except proc.CommandError as e:
             self.log(f"could not enable git rerere: {str(e)[-200:]}")
-        self.log(f"running (pid {os.getpid()}); implementers={self.cfg.max_implementers} "
-                 f"reviewers={self.cfg.max_reviewers}")
+        self.log(f"running (pid {os.getpid()}); implementers={self.implementers()} "
+                 f"reviewers={self.reviewers()}")
         try:
             while True:
                 reason = self.stop_reason()
