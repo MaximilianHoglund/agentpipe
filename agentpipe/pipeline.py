@@ -152,6 +152,12 @@ class Pipeline:
         self.tasks: dict[str, Task] = {}
         self.ticket_bodies: dict[str, str] = {}  # ticket key -> issue body (the ticket's spec)
         self.merge_order: list[tuple[Task, int, dict]] = []  # approved PRs the next merge job may batch
+        # Batch members a merge job is landing: their PR may already be merged (no longer open)
+        # before finish_merge relabels them, so the sync mustn't call them stuck.
+        self.merging: set[str] = set()
+        # The base worktree is shared by the sync loop and merge jobs (ticks, archives); two
+        # git commands in it at once collide on its index.lock.
+        self.base_lock = threading.RLock()
         self.plan: Plan | None = None
         self.last_sync = 0.0
         self.jobs: dict[str, Job] = {}
@@ -282,11 +288,12 @@ class Pipeline:
     # ------------------------------------------------------------------ sync
     def refresh_base(self) -> None:
         self.git.fetch()
-        if not (self.base_wt / ".git").exists():
-            self.git.worktree_detached(self.base_wt, self.base_ref())
-        else:
-            self.git.git("checkout", "--force", "--detach", self.base_ref(), cwd=self.base_wt)
-            self.git.git("clean", "-fdq", cwd=self.base_wt)
+        with self.base_lock:
+            if not (self.base_wt / ".git").exists():
+                self.git.worktree_detached(self.base_wt, self.base_ref())
+            else:
+                self.git.git("checkout", "--force", "--detach", self.base_ref(), cwd=self.base_wt)
+                self.git.git("clean", "-fdq", cwd=self.base_wt)
 
     def load_tasks(self) -> list[Task]:
         tasks = []
@@ -897,7 +904,8 @@ class Pipeline:
 
         def by_status(s: Status) -> list[str]:
             return sorted((k for k, i in issues.items()
-                           if status_from_labels(i["labels"]) is s and k not in self.jobs), key=priority)
+                           if status_from_labels(i["labels"]) is s and k not in self.jobs
+                           and k not in self.merging), key=priority)
 
         for s in (Status.PENDING_REVIEW, Status.CHANGES_REQUESTED, Status.APPROVED):
             for key in by_status(s):
@@ -1904,6 +1912,7 @@ class Pipeline:
                 self.git.git("reset", "--hard", heads[good - 1], cwd=train)
             prs = ", ".join(f"#{pr['number']}" for _, _, pr in members)
             tree = self.git.rev(train, "HEAD^{tree}")
+            self.merging.update(t.key for t, _, _ in members)
             merged = []
             for t, issue, pr in members:
                 if not self.squash_merge(t, pr):
@@ -1914,10 +1923,19 @@ class Pipeline:
             if len(merged) == len(members) and self.git.rev(train, f"{self.base_ref()}^{{tree}}") != tree:
                 self.log(f"merge batch {prs}: WARNING {self.base_ref()} doesn't match the gated tree; "
                          "the next gate on it will tell")
+            # Each PR is already merged on GitHub: one failing follow-up mustn't skip the rest.
+            failed = None
             for t, issue, pr in merged:
-                self.finish_merge(t, issue, pr)
+                try:
+                    self.finish_merge(t, issue, pr)
+                except Exception as e:
+                    self.log(f"merge batch: finishing PR #{pr['number']} ({t.key}) failed: {str(e)[-300:]}")
+                    failed = failed or e
+            if failed:
+                raise failed
             return "merged" if merged else "too few"
         finally:
+            self.merging.difference_update(t.key for t, _, _ in order)
             self.git.worktree_remove(train)
 
     def bisect_batch(self, train: Path, members: list, heads: list[str], slot: str) -> int:
@@ -2056,20 +2074,21 @@ class Pipeline:
         """Tick ``tasks`` (all of one change: a batch never mixes changes) in one commit."""
         t = tasks[0]
         rel = self.t.changes_dir / t.change / "tasks.md"
-        for _ in range(3):
-            self.refresh_base()
-            path = self.base_wt / rel
-            text = path.read_text(encoding="utf-8")
-            new = text
-            for x in tasks:
-                new = mark_done(new, x.id)
-            if new == text:
-                return
-            path.write_text(new, encoding="utf-8")
-            self.git.git("add", str(rel).replace("\\", "/"), cwd=self.base_wt)
-            self.git.git("commit", "-m", message, cwd=self.base_wt)
-            if self.git.git("push", "origin", f"HEAD:refs/heads/{self.t.base}", cwd=self.base_wt, check=False).ok:
-                return
+        with self.base_lock:
+            for _ in range(3):
+                self.refresh_base()
+                path = self.base_wt / rel
+                text = path.read_text(encoding="utf-8")
+                new = text
+                for x in tasks:
+                    new = mark_done(new, x.id)
+                if new == text:
+                    return
+                path.write_text(new, encoding="utf-8")
+                self.git.git("add", str(rel).replace("\\", "/"), cwd=self.base_wt)
+                self.git.git("commit", "-m", message, cwd=self.base_wt)
+                if self.git.git("push", "origin", f"HEAD:refs/heads/{self.t.base}", cwd=self.base_wt, check=False).ok:
+                    return
         self.log(f"could not push the tick for {t.key}; the next sync will retry via Close")
 
     def archive_if_finished(self, change: str) -> None:
@@ -2084,30 +2103,34 @@ class Pipeline:
         if not self.t.archive:
             return
         rel = self.t.changes_dir / change / "tasks.md"
-        for _ in range(3):
-            self.refresh_base()
-            if not (self.base_wt / rel).exists() or not milestones.change_done(self.base_wt, change):
+        with self.base_lock:
+            for _ in range(3):
+                self.refresh_base()
+                if not (self.base_wt / rel).exists() or not milestones.change_done(self.base_wt, change):
+                    return
+                cmd = self.t.archive.replace("{change}", change)
+                r = proc.run(cmd, self.base_wt, timeout=600, check=False, shell=True)
+                if not r.ok or (self.base_wt / rel).exists():
+                    self.log(f"archiving finished change {change} failed: {r.tail(500)}")
+                    break
+                self.git.git("add", "-A", "--", "openspec", cwd=self.base_wt)
+                self.git.git("commit", "-m", f"Archive {change}: every task is done; its specs are synced "
+                                             "into openspec/specs", cwd=self.base_wt)
+                if self.git.git("push", "origin", f"HEAD:refs/heads/{self.t.base}", cwd=self.base_wt, check=False).ok:
+                    self.log(f"archived {change}: its specs are synced into openspec/specs")
+                    return
+            else:
+                self.log(f"could not push the archive of {change}; run `{self.t.archive.replace('{change}', change)}` by hand")
                 return
-            cmd = self.t.archive.replace("{change}", change)
-            r = proc.run(cmd, self.base_wt, timeout=600, check=False, shell=True)
-            if not r.ok or (self.base_wt / rel).exists():
-                self.log(f"archiving finished change {change} failed: {r.tail(500)}")
-                self.file_tickets("the pipeline's archive step", [{
-                    "kind": "defect", "title": f"Archive the finished change {change}",
-                    "body": (f"Every task of `{change}` is ticked, but `{cmd}` at the repo root "
-                             f"failed, so its spec deltas never reached `openspec/specs/`:"
-                             + fence(r.tail(3000)) +
-                             "\nFix what the output names (usually a delta whose MODIFIED or "
-                             "REMOVED requirement doesn't match the main spec), run the command, "
-                             "and commit the result.")}])
-                return
-            self.git.git("add", "-A", "--", "openspec", cwd=self.base_wt)
-            self.git.git("commit", "-m", f"Archive {change}: every task is done; its specs are synced "
-                                         "into openspec/specs", cwd=self.base_wt)
-            if self.git.git("push", "origin", f"HEAD:refs/heads/{self.t.base}", cwd=self.base_wt, check=False).ok:
-                self.log(f"archived {change}: its specs are synced into openspec/specs")
-                return
-        self.log(f"could not push the archive of {change}; run `{self.t.archive.replace('{change}', change)}` by hand")
+        # The archive command failed; the ticket is filed outside the lock.
+        self.file_tickets("the pipeline's archive step", [{
+            "kind": "defect", "title": f"Archive the finished change {change}",
+            "body": (f"Every task of `{change}` is ticked, but `{cmd}` at the repo root "
+                     f"failed, so its spec deltas never reached `openspec/specs/`:"
+                     + fence(r.tail(3000)) +
+                     "\nFix what the output names (usually a delta whose MODIFIED or "
+                     "REMOVED requirement doesn't match the main spec), run the command, "
+                     "and commit the result.")}])
 
     # ------------------------------------------------------------------ milestones
     def release_state(self, m: Milestone) -> dict:

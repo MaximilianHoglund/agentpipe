@@ -1110,6 +1110,25 @@ def test_a_batch_whose_first_pr_fails_merges_nothing(pl, tmp_path, monkeypatch):
     assert p.state.task("c/1.1")["batch_culprit"] == order[0][2]["headRefOid"]
 
 
+def test_one_failing_finish_doesnt_skip_the_rest_of_a_merged_batch(pl, tmp_path, monkeypatch):
+    p, gh = pl
+    order, seen = train_setup(p, gh, tmp_path, monkeypatch, {"c/1.1": ("a.rs", "a\n"), "c/1.2": ("b.rs", "b\n"),
+                                                             "c/1.3": ("c.rs", "c\n")})
+    in_flight = []
+
+    def finish(t, issue, pr):
+        in_flight.append(set(p.merging))
+        if t.key == "c/1.2":
+            raise RuntimeError("index.lock exists")
+        seen["finished"].append(t.key)
+    monkeypatch.setattr(p, "finish_merge", finish)
+    with pytest.raises(RuntimeError, match="index.lock"):
+        p.merge_train(order, "merge")
+    assert seen["finished"] == ["c/1.1", "c/1.3"]
+    # Merged on GitHub but not yet relabelled: the sync must not call them stuck meanwhile.
+    assert in_flight[0] == {"c/1.1", "c/1.2", "c/1.3"} and p.merging == set()
+
+
 def test_review_worktree_gets_the_base_merged_in_locally(pl, tmp_path):
     p, _ = pl
     repo, commit_on, git = merge_repo(tmp_path)
