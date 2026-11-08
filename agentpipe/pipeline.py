@@ -367,8 +367,8 @@ class Pipeline:
     def triage_tickets(self, gh: GitHub, issues: dict[str, dict]) -> None:
         """Approve purely technical proposals without Max (target `auto_approve`).
 
-        One run on the full planner model over every untriaged ticket in pending approval that
-        nobody has worked on. `approve` moves it to pending implementation; `ask` leaves it for
+        One run on the full planner model over every untriaged ticket in proposed that nobody
+        has worked on. `approve` moves it to pending implementation; `ask` leaves it for
         Max. Both comment the reason. Each ticket is triaged once (state `triaged`), so an `ask`
         isn't re-asked and Max can always override by hand. A failed run is retried next sync."""
         if not self.t.auto_approve:
@@ -376,8 +376,7 @@ class Pipeline:
         done = set(self.state.data.get("triaged", []))
         need = [k for k, i in issues.items()
                 if k in self.tasks and k.startswith(TICKET_CHANGE + "/") and i["state"].upper() == "OPEN"
-                and status_from_labels(i["labels"]) is Status.PENDING_APPROVAL
-                and not self.state.task(k).get("runs") and k not in done
+                and status_from_labels(i["labels"]) is Status.PROPOSED and k not in done
                 and not self.t.is_parked(k, i["number"])]
         if not need:
             return
@@ -400,9 +399,9 @@ class Pipeline:
             reason = str(e.get("reason", "")).strip() or "no reason given"
             n = issues[key]["number"]
             if e.get("verdict") == "approve":
-                gh.set_status(n, Status.PENDING_IMPLEMENTATION, Status.PENDING_APPROVAL)
+                gh.set_status(n, Status.PENDING_IMPLEMENTATION, Status.PROPOSED)
                 issues[key]["labels"] = [Status.PENDING_IMPLEMENTATION.label] + [
-                    l for l in issues[key]["labels"] if l != Status.PENDING_APPROVAL.label]
+                    l for l in issues[key]["labels"] if l != Status.PROPOSED.label]
                 gh.comment(n, review.bot(f"**Approved by triage** (technical, no change a player sees): "
                                          f"{reason} Close the issue to reject it."))
                 approved += 1
@@ -566,7 +565,7 @@ class Pipeline:
             self.log(f"{a.key}: decision cleared by a human")
 
     def load_tickets(self, issues: dict[str, dict]) -> None:
-        """Agent-filed tickets become tasks too; they wait in pending approval until a human approves."""
+        """Agent-filed tickets become tasks too; they wait in proposed until a human (or triage) approves."""
         self.ticket_bodies = {}
         for key, i in issues.items():
             if key.startswith(TICKET_CHANGE + "/") and i["state"].upper() == "OPEN":
@@ -666,7 +665,7 @@ class Pipeline:
             kind = tk["kind"] if tk.get("kind") in ("defect", "improvement") else "improvement"
             body = (f"{TICKET_MARKER}\n{tk.get('body', '').strip()}\n\n---\n_Filed by the pipeline from "
                     f"{source}. Approve by setting `{Status.PENDING_IMPLEMENTATION.label}`; close it to reject._\n")
-            n = self.gh.create_issue(title, body, Status.PENDING_APPROVAL, (f"kind: {kind}",))
+            n = self.gh.create_issue(title, body, Status.PROPOSED, (f"kind: {kind}",))
             with self.state.lock:
                 self.state.data.setdefault("tickets", []).append(n)
             self.state.save()
@@ -865,14 +864,20 @@ class Pipeline:
             return sorted((k for k, i in issues.items()
                            if status_from_labels(i["labels"]) is s and k not in self.jobs), key=priority)
 
-        for s in (Status.PENDING_APPROVAL, Status.CHANGES_REQUESTED, Status.APPROVED):
+        for s in (Status.PENDING_REVIEW, Status.CHANGES_REQUESTED, Status.APPROVED):
             for key in by_status(s):
-                # A ticket nobody has worked on yet sits in pending approval waiting for a human.
-                proposal = (s is Status.PENDING_APPROVAL and key.startswith(TICKET_CHANGE + "/")
-                            and not self.state.task(key).get("runs"))
-                if key not in prs and not proposal:
-                    self.to_decision(issues[key]["number"], s, f"Status is `{s.value}` but no open PR was found.")
-        self.record_awaiting(issues, prs)
+                if key in prs:
+                    continue
+                if (s is Status.PENDING_REVIEW and key.startswith(TICKET_CHANGE + "/")
+                        and not self.state.task(key).get("runs")):
+                    # A ticket nobody has worked on is a proposal: carried over from the old
+                    # shared "pending approval" label, or set by hand.
+                    self.gh.set_status(issues[key]["number"], Status.PROPOSED, None)
+                    issues[key]["labels"] = [Status.PROPOSED.label]
+                    self.log(f"{self.what(key)}: no PR and never worked on, so it is a proposal")
+                    continue
+                self.to_decision(issues[key]["number"], s, f"Status is `{s.value}` but no open PR was found.")
+        self.record_awaiting(issues)
         for key in by_status(Status.IN_PROGRESS) + by_status(Status.CHANGES_REQUESTED) + \
                 by_status(Status.PENDING_IMPLEMENTATION):
             if not free_impl:
@@ -902,7 +907,7 @@ class Pipeline:
                 continue
             self.held.pop(key, None)
             self.start(kind, key, free_impl.pop(0), issues[key], prs.get(key))
-        for key in by_status(Status.PENDING_APPROVAL):
+        for key in by_status(Status.PENDING_REVIEW):
             if not free_rev:
                 break
             pr = prs.get(key)
@@ -936,7 +941,7 @@ class Pipeline:
         mine = self.touches_of(key)
         if not mine:
             return ""
-        active = {Status.IN_PROGRESS, Status.PENDING_APPROVAL, Status.CHANGES_REQUESTED, Status.APPROVED}
+        active = {Status.IN_PROGRESS, Status.PENDING_REVIEW, Status.CHANGES_REQUESTED, Status.APPROVED}
         for k, i in sorted(issues.items(), key=lambda kv: key_sort(kv[0])):
             if k == key:
                 continue
@@ -951,21 +956,17 @@ class Pipeline:
                 return f"waits for {k} ({via}) to merge first: both touch {shown}"
         return ""
 
-    def record_awaiting(self, issues: dict[str, dict], prs: dict[str, dict]) -> None:
+    def record_awaiting(self, issues: dict[str, dict]) -> None:
         """Save the issues waiting on Max, for the watcher's header.
 
-        These are issues in needs decision, plus tickets in pending approval that nobody has
-        worked on and that have no PR. A ticket with a PR is in review, so it isn't counted.
-        Parked items (target `parked`, milestone `deferred`) aren't counted either.
+        These are issues in needs decision or proposed. Parked items (target `parked`,
+        milestone `deferred`) aren't counted.
         """
         awaiting = []
         for key, i in issues.items():
             if self.t.is_parked(key, i["number"]):
                 continue
-            s = status_from_labels(i["labels"])
-            proposal = (s is Status.PENDING_APPROVAL and key.startswith(TICKET_CHANGE + "/")
-                        and key not in prs and not self.state.task(key).get("runs"))
-            if s is Status.NEEDS_DECISION or proposal:
+            if status_from_labels(i["labels"]) in (Status.NEEDS_DECISION, Status.PROPOSED):
                 awaiting.append(i["number"])
         awaiting.sort()
         with self.state.lock:
@@ -1399,7 +1400,7 @@ class Pipeline:
                     f"**Updated.** Merged `{self.base_ref()}` into the branch" +
                     (" and resolved its conflicts mechanically (both sides only added lines); the gate passes."
                      if m == "auto" else "; it merged cleanly.")))
-                self.gh.set_status(issue, Status.PENDING_APPROVAL, Status.CHANGES_REQUESTED)
+                self.gh.set_status(issue, Status.PENDING_REVIEW, Status.CHANGES_REQUESTED)
                 return
             if m == "conflict":
                 res = self.resolve_conflict(t, slot)
@@ -1512,7 +1513,7 @@ class Pipeline:
         else:
             self.gh.comment(pr["number"], review.bot(f"**Revised.**\n\n{out['summary']}\n\n**Tests:** {out['tests']}"
                                                   f"\n\n**Docs:** {out.get('docs') or 'none'}"))
-        self.gh.set_status(issue, Status.PENDING_APPROVAL, cur)
+        self.gh.set_status(issue, Status.PENDING_REVIEW, cur)
         st = self.state.task(t.key)
         st.pop("fail_implement", None)
         st.pop("fail_revise", None)
@@ -1585,17 +1586,17 @@ class Pipeline:
                     if v is None:
                         v = self.reviewer_verdict(t, pr, rv, pdir, slot, history, issue, mutation)
                 except CappedRun as e:
-                    return self.capped(t, issue, Status.PENDING_APPROVAL, e.result, "reviewer")
+                    return self.capped(t, issue, Status.PENDING_REVIEW, e.result, "reviewer")
             self.gh.comment(pr["number"], review.render_review(v, sha, round_, self.cfg.max_rounds))
             self.reviewed[pr["number"]] = sha
             self.log(review_line(self.what(t.key), pr["number"], v, round_, self.cfg.max_rounds))
             if v["verdict"] == review.APPROVE:
-                self.gh.set_status(issue, Status.APPROVED, Status.PENDING_APPROVAL)
+                self.gh.set_status(issue, Status.APPROVED, Status.PENDING_REVIEW)
             elif round_ >= self.cfg.max_rounds:
-                self.to_decision(issue, Status.PENDING_APPROVAL,
+                self.to_decision(issue, Status.PENDING_REVIEW,
                                  f"The reviewer rejected PR #{pr['number']} {round_} times; see the PR.")
             else:
-                self.gh.set_status(issue, Status.CHANGES_REQUESTED, Status.PENDING_APPROVAL)
+                self.gh.set_status(issue, Status.CHANGES_REQUESTED, Status.PENDING_REVIEW)
         finally:
             self.git.worktree_remove(rv)
 

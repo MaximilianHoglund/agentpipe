@@ -87,7 +87,7 @@ class Target:
     # archiving off.
     archive: str = "openspec archive {change} --yes"
     # Agent-filed tickets get one triage run: purely technical ones are approved without Max,
-    # the rest wait for him in pending approval with the triage's reason as a comment.
+    # the rest wait for him in proposed with the triage's reason as a comment.
     auto_approve: bool = False
 
     def is_parked(self, key: str, number: int) -> bool:

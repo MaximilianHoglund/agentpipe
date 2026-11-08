@@ -104,8 +104,8 @@ def test_fills_implementer_slots_resuming_interrupted_work_first(pl):
 
 def test_reviews_only_unreviewed_heads_and_merges_one_at_a_time(pl):
     p, gh = pl
-    task_issue(gh, "c/1.1", S.PENDING_APPROVAL)
-    task_issue(gh, "c/1.2", S.PENDING_APPROVAL)
+    task_issue(gh, "c/1.1", S.PENDING_REVIEW)
+    task_issue(gh, "c/1.2", S.PENDING_REVIEW)
     task_issue(gh, "c/1.3", S.APPROVED)
     task_issue(gh, "c/1.4", S.APPROVED)
     gh.prs = [{"number": 10 + i, "headRefOid": f"sha{i}", "body": TASK_MARKER.format(key=f"c/1.{i}")}
@@ -118,16 +118,25 @@ def test_reviews_only_unreviewed_heads_and_merges_one_at_a_time(pl):
     assert [s for s in p.started if s[0] == "merge"] == [("merge", "c/1.3", "merge")]
 
 
-def test_status_without_pr_goes_to_needs_decision_but_fresh_tickets_wait(pl):
+def test_review_without_pr_goes_to_needs_decision_but_untouched_tickets_become_proposals(pl):
     p, gh = pl
-    n = task_issue(gh, "c/1.1", S.PENDING_APPROVAL)
-    t = gh.add(TICKET_MARKER + "\nfix it", S.PENDING_APPROVAL, title="Dedupe parser")
-    p.state.data["tickets"] = [t]
+    n = task_issue(gh, "c/1.1", S.PENDING_REVIEW)
+    fresh = gh.add(TICKET_MARKER + "\nfix it", S.PROPOSED, title="Dedupe parser")
+    legacy = gh.add(TICKET_MARKER + "\nfix it", S.PENDING_REVIEW, title="Old shared label")
+    legacy_label = gh.add(TICKET_MARKER + "\nfix it", S.PENDING_REVIEW, title="Not renamed yet")
+    gh.issues[legacy_label]["labels"] = ["pipeline", "status: pending approval"]
+    worked = gh.add(TICKET_MARKER + "\nfix it", S.PENDING_REVIEW, title="PR got closed")
+    p.state.task(f"ticket/{worked}")["runs"] = 1
+    p.state.data["tickets"] = [fresh, legacy, legacy_label, worked]
     p.load_tickets(p.issues_by_key(gh.list_issues()))
     p.tick()
     assert S.NEEDS_DECISION.label in gh.issues[n]["labels"]
-    assert S.PENDING_APPROVAL.label in gh.issues[t]["labels"]  # proposal waits for a human
-    assert not any(k == f"ticket/{t}" for _, k, _ in p.started)
+    for t in (fresh, legacy, legacy_label):  # proposals wait for a human
+        assert S.PROPOSED.label in gh.issues[t]["labels"]
+        assert not any(k == f"ticket/{t}" for _, k, _ in p.started)
+    assert S.NEEDS_DECISION.label in gh.issues[worked]["labels"]
+    p.tick()  # to_decision shows in the count from the next tick
+    assert sorted(p.state.data["awaiting_input"]) == sorted([n, fresh, legacy, legacy_label, worked])
 
 
 def test_parked_and_deferred_items_are_not_waiting_on_max(pl):
@@ -136,7 +145,7 @@ def test_parked_and_deferred_items_are_not_waiting_on_max(pl):
     d = task_issue(gh, "c/1.1", S.NEEDS_DECISION)
     by_key = task_issue(gh, "c/1.2", S.NEEDS_DECISION)
     deferred = task_issue(gh, "c/1.3", S.NEEDS_DECISION)
-    by_number = gh.add(TICKET_MARKER + "\nfix it", S.PENDING_APPROVAL, title="Needs a GPU")
+    by_number = gh.add(TICKET_MARKER + "\nfix it", S.PROPOSED, title="Needs a GPU")
     p.state.data["tickets"] = [by_number]
     p.load_tickets(p.issues_by_key(gh.list_issues()))
     p.t.parked = ["c/1.2", by_number]
@@ -152,10 +161,10 @@ def test_records_issues_waiting_on_max_for_the_watcher(pl):
     p, gh = pl
     assert watch.awaiting_label(p.t.work_dir) == ""  # nothing counted before the first poll
     d = task_issue(gh, "c/1.1", S.NEEDS_DECISION)
-    task_issue(gh, "c/1.2", S.PENDING_APPROVAL)  # PR open: in review, not his
+    task_issue(gh, "c/1.2", S.PENDING_REVIEW)  # PR open: in review, not his
     gh.prs = [{"number": 20, "headRefOid": "sha", "body": TASK_MARKER.format(key="c/1.2")}]
     task_issue(gh, "c/1.3", S.PENDING_IMPLEMENTATION)
-    t = gh.add(TICKET_MARKER + "\nfix it", S.PENDING_APPROVAL, title="Dedupe parser")
+    t = gh.add(TICKET_MARKER + "\nfix it", S.PROPOSED, title="Dedupe parser")
     p.state.data["tickets"] = [t]
     p.load_tickets(p.issues_by_key(gh.list_issues()))
     p.tick()
@@ -164,7 +173,7 @@ def test_records_issues_waiting_on_max_for_the_watcher(pl):
     gh.set_status(d, S.PENDING_IMPLEMENTATION, S.NEEDS_DECISION)  # Max answered
     p.tick()
     assert watch.awaiting_label(p.t.work_dir) == "1 waiting on you"
-    gh.set_status(t, S.AWAITING_TASK, S.PENDING_APPROVAL)  # decided, waits for another task
+    gh.set_status(t, S.AWAITING_TASK, S.PROPOSED)  # decided, waits for another task
     p.tick()
     assert watch.awaiting_label(p.t.work_dir) == "0 waiting on you"
     assert S.AWAITING_TASK.label in gh.issues[t]["labels"]  # the pipeline leaves it alone
@@ -184,7 +193,7 @@ def test_approved_ticket_is_implemented_with_its_body_as_spec(pl):
     assert "duplicates b.rs" in p.spec_ref(task) and "<!--" not in p.spec_ref(task)
 
 
-def test_file_tickets_creates_pending_approval_issues_and_skips_duplicates(pl):
+def test_file_tickets_creates_proposed_issues_and_skips_duplicates(pl):
     p, gh = pl
     p.file_tickets("the review of PR #3", [
         {"kind": "defect", "title": "Off-by-one in pager", "body": "pager.rs:10"},
@@ -194,7 +203,7 @@ def test_file_tickets_creates_pending_approval_issues_and_skips_duplicates(pl):
     ])
     created = list(gh.issues.values())
     assert [i["title"] for i in created] == ["Off-by-one in pager", "Unify config loading"]
-    assert all(S.PENDING_APPROVAL.label in i["labels"] for i in created)
+    assert all(S.PROPOSED.label in i["labels"] for i in created)
     assert "kind: improvement" in created[1]["labels"]  # unknown kind falls back
     assert set(p.state.data["tickets"]) == {i["number"] for i in created}
     # They belong to this target and are offered to later agents as known tickets.
@@ -432,8 +441,8 @@ def test_a_waiter_is_released_only_when_its_last_blocker_is_done(linked):
     p, gh = linked
     a = task_issue(gh, "c/1.1", S.IN_PROGRESS)
     b = task_issue(gh, "c/1.2", S.IN_PROGRESS)
-    w = gh.add(TICKET_MARKER + "\nlater", S.PENDING_APPROVAL)
-    p.register_wait(w, [a, b], S.PENDING_APPROVAL)
+    w = gh.add(TICKET_MARKER + "\nlater", S.PROPOSED)
+    p.register_wait(w, [a, b], S.PROPOSED)
     assert status_of(gh, w) == S.AWAITING_TASK.label
     assert gh.blocking(a) == [w] and gh.blocking(b) == [w]  # each blocker links back to it
     assert any(f"#{w} waits for this" in c["body"] for c in gh.comments(a))
@@ -449,8 +458,8 @@ def test_a_waiter_is_released_only_when_its_last_blocker_is_done(linked):
 def test_sweep_releases_waiters_whose_blockers_closed_outside_the_pipeline(linked):
     p, gh = linked
     a = task_issue(gh, "c/1.1", S.IN_PROGRESS)
-    w = gh.add(TICKET_MARKER + "\nlater", S.PENDING_APPROVAL)
-    p.register_wait(w, [a], S.PENDING_APPROVAL)
+    w = gh.add(TICKET_MARKER + "\nlater", S.PROPOSED)
+    p.register_wait(w, [a], S.PROPOSED)
     gh.close_issue(a)  # e.g. merged by hand while the dispatcher was down
     p.check_waiters({"x": gh.issue(w)})
     assert status_of(gh, w) == S.PENDING_IMPLEMENTATION.label
@@ -459,8 +468,8 @@ def test_sweep_releases_waiters_whose_blockers_closed_outside_the_pipeline(linke
 def test_waiter_on_a_dropped_blocker_or_on_nothing_goes_to_a_human(linked):
     p, gh = linked
     a = task_issue(gh, "c/1.1", S.IN_PROGRESS)
-    w = gh.add(TICKET_MARKER + "\nlater", S.PENDING_APPROVAL)
-    p.register_wait(w, [a], S.PENDING_APPROVAL)
+    w = gh.add(TICKET_MARKER + "\nlater", S.PROPOSED)
+    p.register_wait(w, [a], S.PROPOSED)
     gh.close_issue(a, "not_planned")  # rejected: what it waited for will never land
     p.release_waiters(a)
     assert status_of(gh, w) == S.NEEDS_DECISION.label
@@ -672,7 +681,7 @@ def test_a_fresh_task_waits_while_another_in_flight_touches_its_files(pl):
     p.t.overlap_ignore = ["**/lib.rs"]
     touching(p, **{"1_1": ["src/run.rs"], "1_2": ["src/run.rs", "src/lib.rs"], "1_3": ["src/lib.rs"],
                    "1_4": ["src/map.rs"]})
-    task_issue(gh, "c/1.1", S.PENDING_APPROVAL)
+    task_issue(gh, "c/1.1", S.PENDING_REVIEW)
     for k in ("c/1.2", "c/1.3", "c/1.4"):
         task_issue(gh, k, S.PENDING_IMPLEMENTATION)
     gh.prs = [{"number": 20, "headRefOid": "s", "body": TASK_MARKER.format(key="c/1.1"), "files": []}]

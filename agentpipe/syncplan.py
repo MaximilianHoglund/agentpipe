@@ -10,7 +10,7 @@ from agentpipe.tasks import Task
 
 # Statuses meaning an agent owns the task right now; a human tick in tasks.md
 # does not close these, because the agent's PR would then land on a closed issue.
-AGENT_OWNED = {Status.IN_PROGRESS, Status.PENDING_APPROVAL, Status.CHANGES_REQUESTED, Status.APPROVED}
+AGENT_OWNED = {Status.IN_PROGRESS, Status.PENDING_REVIEW, Status.CHANGES_REQUESTED, Status.APPROVED}
 
 _STATUS_FOR = {
     "ready": Status.PENDING_IMPLEMENTATION,

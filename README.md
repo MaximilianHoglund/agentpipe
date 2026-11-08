@@ -9,7 +9,7 @@ tasks.md ──planner──▶ dependency plan ──sync──▶ GitHub issue
              pending implementation ◀──────────────┘
                      │ implementer agent (own worktree, own cargo target dir)
                      ▼
-              PR opened ── pending approval ── reviewer agent (watches GitHub PRs)
+              PR opened ── pending review ─── reviewer agent (watches GitHub PRs)
                      ▲                              │
      changes requested ◀── reject (≤ max_rounds) ───┤
                                                     │ approve
@@ -77,10 +77,11 @@ release branch.
 |---|---|---|
 | `status: blocked by task` | A blocker is unfinished (see the issue's blocked-by links) | sync |
 | `status: needs decision` | Needs information or a decision; the question is in the latest comment | **you** |
+| `status: proposed` | Agent-filed ticket waiting for approval (triage approves technical ones when `auto_approve` is on) | **you** / triage |
 | `status: awaiting task` | Decided, but waits for other issues (its blocked-by links) to be done | dispatcher |
 | `status: pending implementation` | Unblocked, waiting for a free agent | dispatcher |
 | `status: in progress` | Implementer working | implementer |
-| `status: pending approval` | PR waiting for the reviewer, **or** an agent-filed ticket waiting for you | reviewer / **you** |
+| `status: pending review` | PR open, waiting for the reviewer agent | reviewer |
 | `status: changes requested` | Reviewer rejected; implementer revising | implementer |
 | `status: approved` | Being merged | dispatcher |
 | `status: finished` | Merged, issue closed | — |
@@ -102,7 +103,7 @@ ticket whose text names unfinished tasks is registered the same way.
 
 **Agent-filed tickets:** implementers and the reviewer report defects and improvements
 they notice outside their scope. They arrive as issues labelled `kind: defect` or
-`kind: improvement` in `status: pending approval`. Approve by setting `status: pending
+`kind: improvement` in `status: proposed`. Approve by setting `status: pending
 implementation` (the ticket body is the spec); reject by closing it.
 
 ## The review gate

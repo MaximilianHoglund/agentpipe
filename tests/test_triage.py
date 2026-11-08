@@ -8,7 +8,7 @@ from test_pipeline import pl  # noqa: F401  (pytest fixture)
 
 def proposals(p, gh):
     issues = {}
-    for status in (Status.PENDING_APPROVAL, Status.PENDING_APPROVAL, Status.PENDING_APPROVAL,
+    for status in (Status.PROPOSED, Status.PROPOSED, Status.PENDING_REVIEW,
                    Status.PENDING_IMPLEMENTATION):
         n = gh.add(TICKET_MARKER + "\nbody", status)
         k = f"ticket/{n}"
@@ -32,7 +32,7 @@ def test_triage_approves_technical_and_leaves_the_rest_once(pl):
     p.t.auto_approve = True
     issues = proposals(p, gh)
     a, b, c, d = sorted(issues, key=lambda k: int(k.split("/")[1]))
-    p.state.task(c)["runs"] = 1  # already worked on: not a proposal
+    p.state.task(c)["runs"] = 1  # in review: not a proposal
     p.claude = Triage([{"key": a, "verdict": "approve", "reason": "Test infra only."},
                        {"key": b, "verdict": "ask", "reason": "Changes unit targeting."}])
     p.triage_tickets(gh, issues)
@@ -43,7 +43,7 @@ def test_triage_approves_technical_and_leaves_the_rest_once(pl):
     na, nb = issues[a]["number"], issues[b]["number"]
     assert Status.PENDING_IMPLEMENTATION.label in gh.issues[na]["labels"]
     assert Status.PENDING_IMPLEMENTATION.label in issues[a]["labels"]  # rate_tickets sees it this sync
-    assert Status.PENDING_APPROVAL.label in gh.issues[nb]["labels"]
+    assert Status.PROPOSED.label in gh.issues[nb]["labels"]
     assert "Approved by triage" in gh.comments(na)[0]["body"]
     assert "Changes unit targeting." in gh.comments(nb)[0]["body"]
 

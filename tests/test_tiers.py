@@ -148,7 +148,7 @@ def ticket_pl(p):
     p.cfg.agents["implementer"] = Agent(FULL, 1, [], light_model=LIGHT)
     p.cfg.agents["planner"] = Agent(FULL, 1, [], light_model=LIGHT)
     issues = {}
-    for n, s in ((7, Status.PENDING_IMPLEMENTATION), (8, Status.PENDING_APPROVAL), (9, Status.PENDING_IMPLEMENTATION)):
+    for n, s in ((7, Status.PENDING_IMPLEMENTATION), (8, Status.PROPOSED), (9, Status.PENDING_IMPLEMENTATION)):
         k = f"ticket/{n}"
         issues[k] = {"number": n, "state": "OPEN", "labels": [s.label], "body": f"{TICKET_MARKER}\nbody {n}"}
         p.tasks[k] = Task("ticket", str(n), f"title {n}", False, "defect", 0)

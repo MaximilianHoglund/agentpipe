@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from agentpipe import proc
-from agentpipe.status import KIND_LABELS, LABEL_INFO, PIPELINE_LABEL, Status
+from agentpipe.status import KIND_LABELS, LABEL_INFO, LEGACY_PENDING_APPROVAL, PIPELINE_LABEL, Status
 
 
 class GitHub:
@@ -31,6 +31,12 @@ class GitHub:
     def ensure_labels(self) -> None:
         self._gh("label", "create", PIPELINE_LABEL, "-R", self.repo, "--color", "ededed",
                  "--description", "Managed by agentpipe", "--force")
+        try:
+            # Renaming keeps the label on its issues; it fails once the old label is gone.
+            self._gh("label", "edit", LEGACY_PENDING_APPROVAL, "-R", self.repo,
+                     "--name", Status.PENDING_REVIEW.label)
+        except proc.CommandError:
+            pass
         for status, (color, desc) in LABEL_INFO.items():
             self._gh("label", "create", status.label, "-R", self.repo, "--color", color,
                      "--description", desc, "--force")
