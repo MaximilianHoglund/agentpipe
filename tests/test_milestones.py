@@ -98,6 +98,25 @@ def test_rank_puts_earlier_milestones_first():
         ["ticket/7", "c/2.1", "b/1.2", "a/1.1", "loose/1.1"]
 
 
+def test_only_unblocking_tickets_jump_the_queue():
+    ms = [Milestone("m1", "", ["b"]), Milestone("m2", "", ["a"])]
+    assert milestones.ticket_rank(ms, "a", True) == -1
+    # Other tickets go after their origin milestone's tasks and before the next milestone's.
+    assert milestones.rank(ms, "b") < milestones.ticket_rank(ms, "b", False) < milestones.rank(ms, "a")
+    assert milestones.rank(ms, "a") < milestones.ticket_rank(ms, "a", False) < milestones.rank(ms, "loose")
+    assert milestones.ticket_rank(ms, None, False) == milestones.ticket_rank(ms, "b", False)
+
+
+def test_filed_from_reads_the_pipeline_footer():
+    from agentpipe.tickets import filed_from
+    assert filed_from("x\n_Filed by the pipeline from the implementer of strategy-rules/3.4 (#203).") \
+        == "strategy-rules/3.4"
+    assert filed_from("_Filed by the pipeline from the reviewer of ticket/361._") == "ticket/361"
+    assert filed_from("_Filed by the pipeline from the implementer of combat-simulation/2.1b.") \
+        == "combat-simulation/2.1b"
+    assert filed_from("a ticket Max wrote") is None
+
+
 def test_release_merges_the_cut_commit_into_main_and_tags_it(repo):
     tmp_path, work, origin, cut = repo
     p, gh = make(tmp_path, work)

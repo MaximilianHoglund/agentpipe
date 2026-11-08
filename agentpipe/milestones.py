@@ -43,7 +43,8 @@ def rank(milestones: list[Milestone], change: str) -> int:
     """Scheduling priority of a task in ``change``: lower runs first.
 
     Work toward an earlier milestone goes before work toward a later one, and work in no milestone
-    goes last. Tickets rank first, since they fix what blocks the work in progress.
+    goes last. ``schedule`` ranks tickets with ``ticket_rank``; this ranks a bare ``ticket``
+    change first, as an unrated ticket that unblocks work.
     """
     if change == TICKET_CHANGE:
         return -1
@@ -51,6 +52,19 @@ def rank(milestones: list[Milestone], change: str) -> int:
         if change in m.changes:
             return i
     return len(milestones)
+
+
+def ticket_rank(milestones: list[Milestone], origin: str | None, unblocks: bool) -> float:
+    """Scheduling priority of an approved ticket, on the same scale as ``rank``.
+
+    A ticket that fixes something broken now (the gate, build, export or release) goes before
+    everything. Any other ticket goes after the tasks of the milestone its origin belongs to, and
+    before the next milestone's: it was filed while that work was done, but that work doesn't
+    need it. With no known origin it counts as coming from the first milestone.
+    """
+    if unblocks:
+        return -1
+    return (rank(milestones, origin) if origin else 0) + 0.5
 
 
 def task_paths(m: Milestone) -> list[str]:

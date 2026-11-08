@@ -15,6 +15,16 @@ BARE_ID = re.compile(r"(?<![\w/.-])(\d+\.\d+)(?![\w]|\.\d)")
 SOURCE = re.compile(r"from the (?:implementer|reviewer) of ([a-z][a-z0-9-]*/\d+\.\d+)")
 
 
+FILED_FROM = re.compile(r"Filed by the pipeline from the [a-z ]+? of ([a-z][a-z0-9-]*/\d+(?:\.\d+[a-z]*)?)")
+
+
+def filed_from(body: str) -> str | None:
+    """The task or ticket key whose agent filed this ticket (``combat-simulation/2.1`` or
+    ``ticket/361``), from the pipeline's footer, or None."""
+    m = FILED_FROM.search(body)
+    return m.group(1) if m else None
+
+
 def ticket_blockers(body: str, task_keys: set[str]) -> set[str]:
     """Task keys (from ``task_keys``, the target's OpenSpec tasks) that ``body`` depends on."""
     found = {f"{c}/{n}" for c, n in FULL_KEY.findall(body)}

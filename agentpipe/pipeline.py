@@ -28,7 +28,7 @@ from agentpipe.github import GitHub
 from agentpipe.status import (GRAPH_OWNED, TASK_MARKER, TICKET_CHANGE, TICKET_MARKER, Status,
                               status_from_labels, task_key_from_body)
 from agentpipe.tasks import Task, fingerprint, mark_done, parse_tasks
-from agentpipe.tickets import ticket_blockers
+from agentpipe.tickets import filed_from, ticket_blockers
 
 IMPL_KINDS = {"implement", "revise"}
 # Implementer runs that go to the light model whatever the task's tier: resolving a merge and
@@ -415,19 +415,41 @@ class Pipeline:
         self.state.save()
         self.log(f"triaged {len(need)} ticket(s); {approved} approved")
 
+    def ticket_origin(self, key: str, seen: frozenset[str] = frozenset()) -> str | None:
+        """The OpenSpec change whose work led to this ticket, following tickets filed while
+        working other tickets back to a task. Cached in state.json as `origin`, since a parent
+        ticket's body is gone from view once it closes."""
+        st = self.state.task(key)
+        if st.get("origin"):
+            return st["origin"]
+        src = filed_from(self.ticket_bodies.get(key, ""))
+        if not src or key in seen:
+            return None
+        origin = self.ticket_origin(src, seen | {key}) if src.startswith(TICKET_CHANGE + "/") \
+            else src.split("/")[0]
+        if origin:
+            st["origin"] = origin
+        return origin
+
     def rate_tickets(self, issues: dict[str, dict]) -> None:
-        """Rate approved tickets that haven't started `light` or `standard` (one run, on the
-        planner's light model), into state.json. Tickets aren't planned, so this is where they
-        get the tier the plan gives tasks. Only approved ones: a proposal may never be built.
+        """Rate approved tickets (one run, on the planner's light model), into state.json:
+        `tier` (`light` or `standard`) for those not yet started, and for every one `unblocks`,
+        whether it fixes something broken now. Tickets aren't planned, so this is where they get
+        the tier the plan gives tasks; `unblocks` and the ticket's origin set its place in the
+        queue (``milestones.ticket_rank``). Only approved ones: a proposal may never be built.
         A failed run is logged and not retried until a restart; an unrated ticket runs as
-        `standard`."""
+        `standard`, after its milestone's tasks."""
+        open_tickets = [k for k, i in issues.items()
+                        if k in self.tasks and k.startswith(TICKET_CHANGE + "/") and i["state"].upper() == "OPEN"]
+        if any(self.ticket_origin(k) for k in open_tickets if "origin" not in self.state.task(k)):
+            self.state.save()
         if not self.cfg.agents["implementer"].light_model:
             return
-        need = [k for k, i in issues.items()
-                if k in self.tasks and k.startswith(TICKET_CHANGE + "/") and i["state"].upper() == "OPEN"
-                and status_from_labels(i["labels"]) is Status.PENDING_IMPLEMENTATION
-                and "tier" not in self.state.task(k) and not self.state.task(k).get("runs")
-                and k not in self.tiers_tried]
+        live = (Status.PENDING_IMPLEMENTATION, Status.IN_PROGRESS, Status.CHANGES_REQUESTED)
+        need = [k for k in open_tickets
+                if status_from_labels(issues[k]["labels"]) in live and k not in self.tiers_tried
+                and ("unblocks" not in self.state.task(k)
+                     or ("tier" not in self.state.task(k) and not self.state.task(k).get("runs")))]
         if not need:
             return
         self.tiers_tried |= set(need)
@@ -443,14 +465,20 @@ class Pipeline:
         if not res.ok:
             self.log(f"rating tickets failed ({res.subtype}); they run as standard")
             return
-        light = 0
+        light = unblocking = 0
         for e in res.structured.get("tickets", []):
             key = str(e.get("key", "")).strip()
-            if key in need and (tier := clean_tier(e.get("tier"))):
-                self.state.task(key)["tier"] = tier
+            if key not in need:
+                continue
+            st = self.state.task(key)
+            if (tier := clean_tier(e.get("tier"))) and "tier" not in st and not st.get("runs"):
+                st["tier"] = tier
                 light += tier == "light"
+            if isinstance(e.get("unblocks"), bool):
+                st["unblocks"] = e["unblocks"]
+                unblocking += e["unblocks"]
         self.state.save()
-        self.log(f"rated {len(need)} ticket(s); {light} light")
+        self.log(f"rated {len(need)} ticket(s); {light} light, {unblocking} unblocking")
 
     def planner_prompt(self, tasks: list[Task], plan_t: list[Task], old: Plan | None, removed: set[str]) -> str:
         def line(t: Task) -> str:
@@ -858,6 +886,10 @@ class Pipeline:
 
         def priority(k: str) -> tuple:
             # Milestone work first (the next test build), then by task key.
+            if self.tasks[k].change == TICKET_CHANGE:
+                st = self.state.task(k)
+                return milestones.ticket_rank(self.t.milestones, st.get("origin"),
+                                              st.get("unblocks", False)), key_sort(k)
             return milestones.rank(self.t.milestones, self.tasks[k].change), key_sort(k)
 
         def by_status(s: Status) -> list[str]:

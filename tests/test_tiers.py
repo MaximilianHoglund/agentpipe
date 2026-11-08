@@ -165,17 +165,32 @@ def test_approved_unstarted_tickets_are_rated_once_on_the_light_planner(pl):
     class C:
         def run(self, prompt, cwd, agent, schema, *, log_name, resume=None, env=None):
             seen.append((agent.model, prompt))
-            return ClaudeResult(True, "s", "", {"tickets": [{"key": "ticket/7", "tier": "light"}]}, False,
-                                subtype="success")
+            return ClaudeResult(True, "s", "", {"tickets": [
+                {"key": "ticket/7", "tier": "light", "unblocks": True},
+                {"key": "ticket/9", "tier": "light", "unblocks": False}]}, False, subtype="success")
 
     p.claude = C()
     p.rate_tickets(issues)
     p.rate_tickets(issues)
     assert len(seen) == 1 and seen[0][0] == LIGHT
-    assert "ticket/7" in seen[0][1] and "ticket/8" not in seen[0][1] and "ticket/9" not in seen[0][1]
-    assert p.state.task("ticket/7")["tier"] == "light"
+    # A started ticket is still rated for its queue place, but keeps the model it ran on.
+    assert "ticket/7" in seen[0][1] and "ticket/8" not in seen[0][1] and "ticket/9" in seen[0][1]
+    assert p.state.task("ticket/7")["tier"] == "light" and "tier" not in p.state.task("ticket/9")
+    assert p.state.task("ticket/7")["unblocks"] is True and p.state.task("ticket/9")["unblocks"] is False
     assert p.model_for(p.tasks["ticket/7"], "impl") == LIGHT
     assert p.model_for(p.tasks["ticket/9"], "impl") == FULL
+
+
+def test_ticket_origin_follows_tickets_filed_from_tickets(pl):
+    p, _ = pl
+    issues = ticket_pl(p)
+    p.ticket_bodies["ticket/7"] += "\n_Filed by the pipeline from the implementer of ticket/9 (#9)._"
+    p.ticket_bodies["ticket/9"] += "\n_Filed by the pipeline from the reviewer of combat-simulation/2.1 (#30)._"
+    assert p.ticket_origin("ticket/7") == "combat-simulation"
+    del p.ticket_bodies["ticket/9"]  # closed: its origin was cached while it was open
+    p.state.task("ticket/7").pop("origin")
+    assert p.ticket_origin("ticket/7") == "combat-simulation"
+    assert p.ticket_origin("ticket/8") is None
 
 
 def test_ticket_rating_is_skipped_without_a_light_model(pl):
