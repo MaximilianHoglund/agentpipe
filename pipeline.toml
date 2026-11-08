@@ -195,6 +195,9 @@ mutation_timeout = 1800
 # benchmark case (51 units) has no such headroom and failed under the load on PR #394 (fastest
 # 1.95 s of 1.8 s, with the standard map varying 0.27-0.80 s in the same gate).
 mutation_alongside_gate = false
+# Approved PRs merge in batches of up to 6 with one gate (Max, 2026-11-08: seven approved PRs had
+# waited up to 13 h behind a merge slot that gated each one alone).
+merge_batch = 6
 context = ["docs/design.md", "docs/decisions.md", "docs/roadmap.md", "docs/agent-environment.md"]
 # Godot 4.7.2 in self-contained mode, with export templates, preinstalled off the repo.
 # PATH: agents' Git Bash otherwise can't find pwsh (a Store app alias in WindowsApps).

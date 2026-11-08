@@ -51,6 +51,9 @@ class Target:
     # mutation command that works on copies of the tree: an `--in-place` run edits the files the
     # gate is building.
     mutation_alongside_gate: bool = False
+    # Up to this many approved PRs are merged together onto the base in a scratch worktree,
+    # gated once, then squash-merged one by one. 1 merges each PR alone with its own gate.
+    merge_batch: int = 1
     # Appended to the implementer's and reviewer's allowed tools for this target only.
     extra_tools: list[str] = field(default_factory=list)
     # Extra environment variables for this target's agents, gate and mutation runs.
@@ -217,6 +220,7 @@ def load(path: Path) -> Config:
             test_timeout=t.get("test_timeout", 3600),
             mutation_timeout=t.get("mutation_timeout", 3600),
             mutation_alongside_gate=bool(t.get("mutation_alongside_gate", False)),
+            merge_batch=max(1, int(t.get("merge_batch", 1))),
             extra_tools=list(t.get("extra_tools", [])),
             env={k: str(v) for k, v in t.get("env", {}).items()},
             clean_workspace_crates=bool(t.get("clean_workspace_crates", False)),

@@ -151,6 +151,8 @@ class Pipeline:
         self._log = log
         self.tasks: dict[str, Task] = {}
         self.ticket_bodies: dict[str, str] = {}  # ticket key -> issue body (the ticket's spec)
+        self.merge_order: list[tuple[Task, int, dict]] = []  # approved PRs the next merge job may batch
+        self.single_merges_left = 0  # after a batch fails its gate, merge this many one at a time
         self.plan: Plan | None = None
         self.last_sync = 0.0
         self.jobs: dict[str, Job] = {}
@@ -959,10 +961,12 @@ class Pipeline:
                      and (self.state.task(k).get("gated") or {}).get("base") == base
                      and (self.state.task(k).get("gated") or {}).get("head") == prs[k]["headRefOid"]]
             approved = fresh + [k for k in approved if k not in fresh]
-            for key in approved:
-                if key in prs:
-                    self.start("merge", key, "merge", issues[key], prs[key])
-                    break
+            order = [(self.tasks[k], issues[k]["number"], prs[k]) for k in approved if k in prs]
+            if order:
+                # The merge job may take the next ones along in a batch (merge_train).
+                self.merge_order = order[:self.t.merge_batch]
+                t0 = order[0][0]
+                self.start("merge", t0.key, "merge", issues[t0.key], prs[t0.key])
 
     def touches_of(self, key: str) -> list[str]:
         """Repo-relative paths a task (with its batch) will likely change: the planner's
@@ -1846,6 +1850,79 @@ class Pipeline:
         raise RuntimeError(f"reviewer failed twice ({res.subtype}): {res.text[:1000]}")
 
     def job_merge(self, t: Task, issue: int, pr: dict, slot: str) -> None:
+        order = self.merge_order
+        if self.single_merges_left:
+            self.single_merges_left -= 1
+        elif len(order) > 1 and order[0][0].key == t.key:
+            outcome = self.merge_train(order, slot)
+            if outcome == "merged":
+                return
+            if outcome == "gate failed":
+                # Find the culprit the slow way, rather than pay for the same failing batch again.
+                self.single_merges_left = len(order) - 1
+        self.merge_one(t, issue, pr, slot)
+
+    def merge_train(self, order: list[tuple[Task, int, dict]], slot: str) -> str:
+        """Merge several approved PRs with one gate: merge them all onto the base in a scratch
+        worktree, gate the result once, then squash-merge each on GitHub in the same order.
+        A PR whose head moved or that doesn't merge into the batch cleanly is left for later.
+        Returns "merged" (at least the first PR landed), "too few" (under two PRs fit, nothing
+        was gated) or "gate failed"; for the last two the caller merges the first PR alone."""
+        train = self.t.work_dir / "train"
+        self.git.fetch()
+        self.git.worktree_detached(train, self.base_ref())
+        try:
+            members = []
+            for t, issue, pr in order:
+                ref = f"origin/{t.branch}"
+                if self.git.rev(train, ref) != pr["headRefOid"]:
+                    self.log(f"merge batch: {self.what(t.key)} left out, its head moved after approval")
+                elif self.git.merge(train, ref):
+                    members.append((t, issue, pr))
+                else:
+                    self.git.merge_abort(train)
+                    self.log(f"merge batch: {self.what(t.key)} left out, it conflicts with the batch")
+            if len(members) < 2:
+                return "too few"
+            prs = ", ".join(f"#{pr['number']}" for _, _, pr in members)
+            self.log(f"phase merge batch: test gate on {len(members)} PRs together ({prs})")
+            gate = self.run_gate(train / self.t.project_dir, slot, self.t.test, self.t.test_timeout)
+            if not gate.ok:
+                self.log(f"merge batch {prs}: the gate fails on the batch; merging one at a time")
+                return "gate failed"
+            tree = self.git.rev(train, "HEAD^{tree}")
+            merged = []
+            for t, issue, pr in members:
+                if not self.squash_merge(t, pr):
+                    self.log(f"merge batch: GitHub won't merge PR #{pr['number']} yet; the rest wait for the next merge")
+                    break
+                merged.append((t, issue, pr))
+            self.git.fetch()
+            if len(merged) == len(members) and self.git.rev(train, f"{self.base_ref()}^{{tree}}") != tree:
+                self.log(f"merge batch {prs}: WARNING {self.base_ref()} doesn't match the gated tree; "
+                         "the next gate on it will tell")
+            for t, issue, pr in merged:
+                self.finish_merge(t, issue, pr)
+            return "merged" if merged else "too few"
+        finally:
+            self.git.worktree_remove(train)
+
+    def squash_merge(self, t: Task, pr: dict) -> bool:
+        """Squash-merge ``pr`` at its approved head, retrying while GitHub is still computing
+        mergeability. False if it still refuses."""
+        for attempt in range(MERGE_ATTEMPTS):
+            if attempt:
+                time.sleep(MERGE_RETRY_SECONDS)
+            try:
+                self.gh.merge_pr(pr["number"], pr["headRefOid"])
+                return True
+            except proc.CommandError as e:
+                if "not mergeable" not in str(e).lower():
+                    raise
+                self.log(f"merge {self.what(t.key)} PR #{pr['number']}: not mergeable yet (attempt {attempt + 1}); retrying")
+        return False
+
+    def merge_one(self, t: Task, issue: int, pr: dict, slot: str) -> None:
         wt = self.ensure_worktree(t)
         self.git.fetch()
         self.git.git("checkout", "--force", "-B", t.branch, f"origin/{t.branch}", cwd=wt)
@@ -1902,6 +1979,11 @@ class Pipeline:
                                                   f"{MERGE_ATTEMPTS} attempts to bring it up to date with "
                                                   f"`{self.base_ref()}`; rebase it onto `{self.base_ref()}` "
                                                   f"and resolve the conflicts.")
+        self.finish_merge(t, issue, pr)
+
+    def finish_merge(self, t: Task, issue: int, pr: dict) -> None:
+        """After a PR merged: close its issues, release what waited on it, tick tasks.md."""
+        wt = self.wt(t)
         tasks = self.batch(t)
         self.log(f"merged PR #{pr['number']}: {', '.join(self.what(x.key) for x in tasks)}")
         self.gh.set_status(issue, Status.FINISHED, Status.APPROVED)
