@@ -193,6 +193,16 @@ def test_ticket_origin_follows_tickets_filed_from_tickets(pl):
     assert p.ticket_origin("ticket/8") is None
 
 
+def test_rating_records_every_open_tickets_origin(pl):
+    p, _ = pl
+    issues = ticket_pl(p)
+    for k in ("ticket/7", "ticket/8", "ticket/9"):
+        p.ticket_bodies[k] += "\n_Filed by the pipeline from the implementer of combat-simulation/2.1 (#30)._"
+    p.cfg.agents["implementer"] = Agent(FULL, 1, [])  # no light model: no rating run, origins only
+    p.rate_tickets(issues)
+    assert all(p.state.task(k).get("origin") == "combat-simulation" for k in ("ticket/7", "ticket/8", "ticket/9"))
+
+
 def test_ticket_rating_is_skipped_without_a_light_model(pl):
     p, _ = pl
     issues = ticket_pl(p)

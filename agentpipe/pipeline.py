@@ -441,7 +441,8 @@ class Pipeline:
         `standard`, after its milestone's tasks."""
         open_tickets = [k for k, i in issues.items()
                         if k in self.tasks and k.startswith(TICKET_CHANGE + "/") and i["state"].upper() == "OPEN"]
-        if any(self.ticket_origin(k) for k in open_tickets if "origin" not in self.state.task(k)):
+        found = [self.ticket_origin(k) for k in open_tickets if "origin" not in self.state.task(k)]
+        if any(found):  # a list, so every ticket gets its origin, not just the first
             self.state.save()
         if not self.cfg.agents["implementer"].light_model:
             return
