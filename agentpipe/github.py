@@ -75,9 +75,12 @@ class GitHub:
         self._gh("issue", "close", str(number), "-R", self.repo, "--reason", "completed")
 
     def comments(self, number: int) -> list[dict]:
-        pages = self._api(f"issues/{number}/comments?per_page=100", "--paginate", "--slurp") or []
-        return [{"body": c["body"], "user": c["user"]["login"], "created_at": c["created_at"]}
-                for page in pages for c in page]
+        # One JSON object per line across all pages. Not `--slurp`: gh before 2.48 (Ubuntu
+        # 24.04 ships 2.45, the laptop's) rejects it, which crashed every job on 2026-11-07.
+        out = self._gh("api", f"repos/{self.repo}/issues/{number}/comments?per_page=100",
+                       "--paginate", "--jq",
+                       ".[] | {body, user: .user.login, created_at}")
+        return [json.loads(line) for line in out.splitlines() if line.strip()]
 
     def issue_db_id(self, number: int) -> int:
         return int(self._api(f"issues/{number}")["id"])
