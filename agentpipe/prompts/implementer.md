@@ -94,6 +94,18 @@ lists (decision logs, design notes, changelogs) don't claim the next free number
 new entry: a parallel PR will likely claim the same one. Give the entry a descriptive title
 without a number, and refer to it by that title.
 
+Working habits that past runs got wrong:
+- Commit (or at least `git add`) your work before a deliberate-break probe. `git restore
+  <file>` resets the file to the index, so it throws away your own uncommitted edits along
+  with the probe.
+- Make edits with the Edit tool. Shell rewrites (`sed -i`, heredoc scripts, PowerShell
+  `.Replace`) fail silently when the pattern misses and trip over quoting. On Windows,
+  `python` is a Microsoft Store stub that exits 49; if you need a script, use `py`
+  (Windows) or `python3` (Linux).
+- Run the gate and long tests in the foreground with a timeout (up to 10 minutes). Don't
+  background them and `sleep`; long sleeps are blocked, and the Monitor tool must be loaded
+  through ToolSearch before you call it.
+
 You may delete files and folders, recursively too, but only inside your working
 directory; never delete anything outside it. Put throwaway files and probe folders in a
 git-ignored directory (see `.gitignore`, e.g. `target/` or `.scratch/`).

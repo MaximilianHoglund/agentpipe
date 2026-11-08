@@ -47,6 +47,8 @@ retry it in another form:
 - `kill`/`taskkill`/`Stop-Process`: other agents run on this machine. Run tests in the
   foreground with a timeout rather than in the background.
 - `git checkout`: use `git restore <file>`.
+- `python` on Windows is a Microsoft Store stub that exits 49; use `py` (or `python3` on
+  Linux), or simply the Edit tool for probes.
 
 ## Criteria (category in brackets)
 
