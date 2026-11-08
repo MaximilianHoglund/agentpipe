@@ -14,7 +14,7 @@ sync_seconds = 600        # how often tasks.md is re-read and issues reconciled
 limit_backoff_seconds = 1800  # pause after a usage/capacity limit (or until the window resets, if known)
 # Start nothing new once a usage window reaches this share; resume when it resets.
 # Running jobs finish, so the gap below 1.0 is their headroom.
-throttle = { five_hour = 0.85, seven_day = 0.93 }
+throttle = { five_hour = 0.95, seven_day = 0.93 }  # 5h raised from 0.85 with the 10x plan (Max, 2026-11-08)
 # Caps: a run that hits one goes to "needs decision" instead of being retried, since a
 # stuck run's late turns are its most expensive (its context only grows). The longest
 # task so far took 49 turns.
