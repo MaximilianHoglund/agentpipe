@@ -130,6 +130,19 @@ def test_the_oldest_approval_merges_first_whatever_its_milestone(pl):
     assert [s for s in p.started if s[0] == "merge"] == [("merge", "c/1.4", "merge")]
 
 
+def test_an_approval_gated_on_the_current_base_merges_before_older_ones(pl, monkeypatch):
+    p, gh = pl
+    task_issue(gh, "c/1.3", S.APPROVED)
+    task_issue(gh, "c/1.4", S.APPROVED)
+    gh.prs = [{"number": 10 + i, "headRefOid": f"sha{i}", "body": TASK_MARKER.format(key=f"c/1.{i}")}
+              for i in (3, 4)]
+    p.state.task("c/1.3").update(approved_at=100.0, gated={"head": "sha3", "base": "old"})
+    p.state.task("c/1.4").update(approved_at=200.0, gated={"head": "sha4", "base": "now"})
+    monkeypatch.setattr(p, "current_base", lambda: "now")
+    p.tick()
+    assert [s for s in p.started if s[0] == "merge"] == [("merge", "c/1.4", "merge")]
+
+
 def merge_job(p, gh, monkeypatch, *, gated, base_now):
     """Run job_merge on an approved c/1.1 with stubbed git; returns the gates it ran."""
     n = task_issue(gh, "c/1.1", S.APPROVED)

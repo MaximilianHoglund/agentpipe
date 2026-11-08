@@ -952,6 +952,13 @@ class Pipeline:
             # an approved PR holds (`touches`), and a PR left waiting conflicts with a moving base.
             # Approvals from before this was recorded count as oldest.
             approved = sorted(by_status(Status.APPROVED), key=lambda k: self.state.task(k).get("approved_at", 0))
+            # But one the review gated against the current base needs no gate (job_merge), so it
+            # takes about a minute and goes first, before the base moves and it goes stale.
+            base = self.current_base()
+            fresh = [k for k in approved if base and k in prs
+                     and (self.state.task(k).get("gated") or {}).get("base") == base
+                     and (self.state.task(k).get("gated") or {}).get("head") == prs[k]["headRefOid"]]
+            approved = fresh + [k for k in approved if k not in fresh]
             for key in approved:
                 if key in prs:
                     self.start("merge", key, "merge", issues[key], prs[key])
@@ -1710,6 +1717,14 @@ class Pipeline:
                 self.gh.set_status(issue, Status.CHANGES_REQUESTED, Status.PENDING_REVIEW)
         finally:
             self.git.worktree_remove(rv)
+
+    def current_base(self) -> str:
+        """The base commit as of the last fetch, or "" when it can't be read. Only a scheduling
+        hint: job_merge fetches and checks again before it skips a gate."""
+        try:
+            return self.git.rev(self.base_wt, self.base_ref())
+        except Exception:  # no base worktree yet, or a test's stub git
+            return ""
 
     def merge_base_for_review(self, rv: Path) -> str | None:
         """Merges the base into the review worktree, locally (nothing is pushed), so the review
