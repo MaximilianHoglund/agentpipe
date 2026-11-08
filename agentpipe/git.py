@@ -49,6 +49,10 @@ class Git:
     def head(self, wt: Path) -> str:
         return self.git("rev-parse", "HEAD", cwd=wt).out.strip()
 
+    def rev(self, wt: Path, ref: str) -> str:
+        """The commit ``ref`` names, e.g. what ``origin/dev`` points at after the last fetch."""
+        return self.git("rev-parse", ref, cwd=wt).out.strip()
+
     def commits_ahead(self, wt: Path, base_ref: str) -> int:
         return int(self.git("rev-list", "--count", f"{base_ref}..HEAD", cwd=wt).out.strip())
 

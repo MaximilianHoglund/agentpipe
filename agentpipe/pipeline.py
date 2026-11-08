@@ -948,7 +948,11 @@ class Pipeline:
             if pr and self.needs_review(pr):
                 self.start("review", key, free_rev.pop(0), issues[key], pr)
         if not merging:
-            for key in by_status(Status.APPROVED):
+            # Oldest approval first, not milestone order: merging is cheap and releases the files
+            # an approved PR holds (`touches`), and a PR left waiting conflicts with a moving base.
+            # Approvals from before this was recorded count as oldest.
+            approved = sorted(by_status(Status.APPROVED), key=lambda k: self.state.task(k).get("approved_at", 0))
+            for key in approved:
                 if key in prs:
                     self.start("merge", key, "merge", issues[key], prs[key])
                     break
@@ -1656,7 +1660,7 @@ class Pipeline:
         self.git.fetch()
         self.git.worktree_detached(rv, sha)
         try:
-            self.merge_base_for_review(rv)
+            gated_base = self.merge_base_for_review(rv)
             pdir = rv / self.t.project_dir
             history = review.review_history(self.gh.comments(pr["number"]))
             round_ = review.rounds_used(history) + 1
@@ -1692,6 +1696,12 @@ class Pipeline:
             self.reviewed[pr["number"]] = sha
             self.log(review_line(self.what(t.key), pr["number"], v, round_, self.cfg.max_rounds))
             if v["verdict"] == review.APPROVE:
+                # For the merge job: approvals merge oldest first, and the gate just passed on this
+                # head merged with this base, so an unchanged base needs no second gate.
+                st = self.state.task(t.key)
+                st["approved_at"] = time.time()
+                st["gated"] = {"head": sha, "base": gated_base} if gated_base else None
+                self.state.save()
                 self.gh.set_status(issue, Status.APPROVED, Status.PENDING_REVIEW)
             elif round_ >= self.cfg.max_rounds:
                 self.to_decision(issue, Status.PENDING_REVIEW,
@@ -1701,17 +1711,21 @@ class Pipeline:
         finally:
             self.git.worktree_remove(rv)
 
-    def merge_base_for_review(self, rv: Path) -> None:
+    def merge_base_for_review(self, rv: Path) -> str | None:
         """Merges the base into the review worktree, locally (nothing is pushed), so the review
         judges the PR as it would land, and the gate and tests are the base's latest rather than
         the ones the branch forked with: arpg's gate fixes otherwise reached a PR only once its
         branch merged them (Nov 2026). A conflicting merge is undone and the PR reviewed as it is;
-        the merge job deals with the conflict."""
+        the merge job deals with the conflict. Returns the base commit the review's gate then
+        covers, or None when it covers only the branch."""
+        base = self.git.rev(rv, self.base_ref())
         if self.git.contains(rv, self.base_ref()):
-            return
+            return base
         if not self.git.merge(rv, self.base_ref()):
             self.git.merge_abort(rv)
             self.log(f"review worktree {rv.name}: {self.base_ref()} doesn't merge cleanly; reviewing the branch as it is")
+            return None
+        return base
 
     def resolution_verdict(self, t: Task, pr: dict, rv: Path, pdir: Path, slot: str, history) -> dict | None:
         """A short review for a PR that was approved, hit a conflict, and since then only merged
@@ -1831,13 +1845,21 @@ class Pipeline:
                 self.git.fetch()
             if not self.git.contains(wt, self.base_ref()):
                 # The gate runs just below in any case, so merge_base needn't run it.
+                base = self.git.rev(wt, self.base_ref())
                 m = self.merge_base(wt, slot, gate=False)
                 if m == "conflict":
                     self.git.merge_abort(wt)
                     return self.merge_conflict(issue, pr, f"The approved branch no longer merges cleanly "
                                                           f"with `{self.base_ref()}`.")
-                self.log(f"phase {t.key}: test gate (after merging {self.base_ref()})")
-                gate = self.run_gate(wt / self.t.project_dir, slot, self.t.test, self.t.test_timeout)
+                gated = self.state.task(t.key).get("gated") or {}
+                if m == "clean" and gated.get("head") == pr["headRefOid"] and gated.get("base") == base:
+                    # The review's gate ran on exactly this merge (same head, same base): a second
+                    # gate would prove nothing new.
+                    self.log(f"phase {t.key}: no gate needed ({self.base_ref()} unchanged since the review's gate)")
+                    gate = proc.Result(0, "", "")
+                else:
+                    self.log(f"phase {t.key}: test gate (after merging {self.base_ref()})")
+                    gate = self.run_gate(wt / self.t.project_dir, slot, self.t.test, self.t.test_timeout)
                 if not gate.ok and m == "auto":
                     # The dispatcher's own resolution broke it: nobody's fault, no round used.
                     self.git.git("reset", "--hard", pr["headRefOid"], cwd=wt)

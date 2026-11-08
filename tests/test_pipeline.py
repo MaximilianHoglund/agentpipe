@@ -118,6 +118,67 @@ def test_reviews_only_unreviewed_heads_and_merges_one_at_a_time(pl):
     assert [s for s in p.started if s[0] == "merge"] == [("merge", "c/1.3", "merge")]
 
 
+def test_the_oldest_approval_merges_first_whatever_its_milestone(pl):
+    p, gh = pl
+    task_issue(gh, "c/1.3", S.APPROVED)
+    task_issue(gh, "c/1.4", S.APPROVED)
+    gh.prs = [{"number": 10 + i, "headRefOid": f"sha{i}", "body": TASK_MARKER.format(key=f"c/1.{i}")}
+              for i in (3, 4)]
+    p.state.task("c/1.3")["approved_at"] = 200.0
+    p.state.task("c/1.4")["approved_at"] = 100.0
+    p.tick()
+    assert [s for s in p.started if s[0] == "merge"] == [("merge", "c/1.4", "merge")]
+
+
+def merge_job(p, gh, monkeypatch, *, gated, base_now):
+    """Run job_merge on an approved c/1.1 with stubbed git; returns the gates it ran."""
+    n = task_issue(gh, "c/1.1", S.APPROVED)
+    pr = {"number": 7, "headRefOid": "head1"}
+    p.state.task("c/1.1")["gated"] = gated
+    calls = {"gates": 0, "merged": []}
+
+    class G:
+        def fetch(self): pass
+        def git(self, *a, **kw): pass
+        def head(self, wt): return "head1"
+        def contains(self, wt, ref): return False
+        def rev(self, wt, ref): return base_now
+        def push(self, wt, branch): pass
+
+    p.git = G()
+    p.ensure_worktree = lambda t: Path(".")
+    monkeypatch.setattr(p, "merge_base", lambda wt, slot, gate: "clean")
+    monkeypatch.setattr(p, "run_gate", lambda *a, **kw: (calls.__setitem__("gates", calls["gates"] + 1),
+                                                         proc_mod.Result(0, "", ""))[1])
+    gh.merge_pr = lambda number, sha: calls["merged"].append(number)
+    gh.close_issue = lambda number, reason="completed": None
+    # What follows a merge (ticking tasks.md, releasing waiters) isn't under test here.
+    monkeypatch.setattr(p, "after_merge", lambda *a, **kw: None, raising=False)
+    try:
+        p.job_merge(p.tasks["c/1.1"], n, pr, "merge")
+    except (AttributeError, TypeError):
+        pass  # post-merge bookkeeping needs a real repo; the merge itself already happened
+    return calls
+
+
+def test_merge_skips_the_gate_when_the_review_gated_the_same_head_and_base(pl, monkeypatch):
+    p, gh = pl
+    calls = merge_job(p, gh, monkeypatch, gated={"head": "head1", "base": "base1"}, base_now="base1")
+    assert calls == {"gates": 0, "merged": [7]}
+
+
+def test_merge_runs_the_gate_when_the_base_moved_since_the_review(pl, monkeypatch):
+    p, gh = pl
+    calls = merge_job(p, gh, monkeypatch, gated={"head": "head1", "base": "base1"}, base_now="base2")
+    assert calls == {"gates": 1, "merged": [7]}
+
+
+def test_merge_runs_the_gate_when_the_review_gated_only_the_branch(pl, monkeypatch):
+    p, gh = pl
+    calls = merge_job(p, gh, monkeypatch, gated=None, base_now="base1")
+    assert calls == {"gates": 1, "merged": [7]}
+
+
 def test_review_without_pr_goes_to_needs_decision_but_untouched_tickets_become_proposals(pl):
     p, gh = pl
     n = task_issue(gh, "c/1.1", S.PENDING_REVIEW)
@@ -940,7 +1001,7 @@ def test_review_worktree_gets_the_base_merged_in_locally(pl, tmp_path):
     commit_on(repo, "feature", "lib.rs", "mod a;\nmod b;\nmod z;\n")
     pipeline_on(p, repo)
     head = git(repo, "rev-parse", "HEAD").strip()
-    p.merge_base_for_review(repo)
+    assert p.merge_base_for_review(repo) == git(repo, "rev-parse", "base").strip()
     assert (repo / "run.rs").read_text() == "x = 1\n"
     assert p.git.contains(repo, "base") and p.git.contains(repo, head)
     assert "lib.rs" in p.git.diff(repo, "base") and "run.rs" not in p.git.diff(repo, "base")
@@ -953,6 +1014,6 @@ def test_review_worktree_keeps_the_branch_when_the_base_conflicts(pl, tmp_path):
     commit_on(repo, "feature", "run.rs", "x = 2\n")
     pipeline_on(p, repo)
     head = git(repo, "rev-parse", "HEAD").strip()
-    p.merge_base_for_review(repo)
+    assert p.merge_base_for_review(repo) is None  # the gate will cover only the branch
     assert git(repo, "rev-parse", "HEAD").strip() == head
     assert not p.git.merging(repo) and git(repo, "status", "--porcelain").strip() == ""
