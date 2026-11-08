@@ -24,7 +24,7 @@ Each `[targets.<name>]` in `pipeline.toml` is one project: repo, GitHub remote, 
 OpenSpec changes it covers, the project dir and its test gate. Run one at a time:
 
 ```powershell
-cd E:\Source\Claude\pipeline
+cd E:\Source\agentpipe
 uv run agentpipe targets
 uv run agentpipe plan dota          # infer blockers; prints the graph; no GitHub writes
 uv run agentpipe sync dota --dry-run
