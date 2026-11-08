@@ -68,10 +68,33 @@ either side); empty, missing and malformed input; every error path the code has;
 state interactions and ordering the spec names; anything the design calls out as a
 risk. Name tests for the behaviour they pin down.
 
+**Break your own code before the reviewer does.** The reviewer's main tool is the deliberate
+break: it flips a comparison, drops a branch, swaps two steps or changes a boundary in your
+code, runs the tests, and rejects the PR for every break no test catches. A third of first
+submissions were rejected, almost all for this. So before you finish, list every rule your
+change states anywhere (the spec scenarios, design decisions, doc comments, your summary):
+boundaries, which value wins, the order of steps, error paths, what happens away from the
+origin or with more than one unit. For each one, break it on purpose, run the tests, and
+add a test when none fails. Undo each break with `git restore <file>` only after committing
+your work (see Git below). Pick test inputs that tell the rules apart: a unit at the origin,
+weights that are all equal or a value that matches the default can't catch a swapped sign,
+an off-by-one or a skipped step.
+
+$self_check
+
 **Keep the gates green.** Run `$test_cmd` from the project dir and make it pass before
 you finish. Do not finish with failing or skipped tests.
 
 ## Tickets for things outside your scope
+
+**Finish the feature, don't ticket its missing half.** Your task's scope is the feature it
+names, not just its literal words. What a player or caller plainly needs to use what you add
+belongs in your PR: delete beside save and load, a way back out of a new screen, the error
+case of a new input. Every ticket costs a whole extra pass through the pipeline (approval,
+implementation, review, merge) for work you could do now with everything already loaded. Write
+no partial piece either (a function nothing calls, a button with no handler): finish it with
+tests, or leave it out and say why in `summary`. Tickets are for things in other parts of the
+codebase, or for a separate feature the spec leaves to the owner.
 
 You are encouraged to report defects and improvements you notice in the codebase that
 are outside this task (do not fix them yourself; stay in scope): bugs, duplicated code that should be unified, missing tests

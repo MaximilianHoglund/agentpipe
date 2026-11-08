@@ -193,6 +193,15 @@ def test_ticket_origin_follows_tickets_filed_from_tickets(pl):
     assert p.ticket_origin("ticket/8") is None
 
 
+def test_self_check_mentions_the_mutation_pass_only_when_the_target_has_one(pl):
+    p, _ = pl
+    t = next(iter(p.tasks.values()), None)
+    p.t.mutation = "mutants --in-diff {diff}"
+    assert "mutation testing" in p.self_check(t)
+    p.t.mutation = ""
+    assert p.self_check(t) == ""
+
+
 def test_rating_records_every_open_tickets_origin(pl):
     p, _ = pl
     issues = ticket_pl(p)

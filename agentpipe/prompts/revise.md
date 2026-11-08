@@ -5,6 +5,13 @@ $feedback
 
 $merge_note
 
+Treat each finding as a sample, not a full list. The reviewer probes a few spots; when it found
+a rule no test catches, the rest of your diff likely has more of the same kind. Fix the finding,
+then look for and fix the same kind of gap elsewhere in your change, so the next round doesn't
+find it. Most PRs that went back a second time were rejected for a new gap of the same kind.
+
+$self_check
+
 Address every **blocking** finding. Do not paper over a finding (renaming a duplicate
 instead of removing it, adding an assertion that restates the implementation, adding
 a test that would pass with the code deleted). Nits are optional but cheap ones are

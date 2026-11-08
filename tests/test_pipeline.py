@@ -571,6 +571,77 @@ def test_mutation_run_does_not_clean_what_the_gate_just_built(pl, tmp_path, monk
     assert cleaned == []
 
 
+def mutation_fakes(p, monkeypatch, outputs):
+    """proc.run returns ``outputs`` in turn for mutation commands; git is a stub at head h<n>."""
+    runs = []
+
+    def run(cmd, cwd, **kw):
+        runs.append(cmd)
+        return proc_mod.Result(0, outputs[min(len(runs), len(outputs)) - 1], "")
+
+    monkeypatch.setattr(proc_mod, "run", run)
+    p.git = type("G", (), {"diff": lambda self, *a, **kw: "d", "restore": lambda self, *a: None,
+                           "is_clean": lambda self, *a: True,
+                           "head": lambda self, *a: f"h{len(runs)}"})()
+    return runs
+
+
+def test_mutation_pass_sends_missed_mutants_back_before_review(pl, tmp_path, monkeypatch):
+    from agentpipe.claude import ClaudeResult
+    p, _ = pl
+    p.t.mutation = "mutants --in-diff {diff}"
+    p.wt = lambda t: tmp_path / "wt" / t.slug
+    (tmp_path / "wt").mkdir()
+    runs = mutation_fakes(p, monkeypatch, ["MISSED   a.rs:3:1: replace < with <=\n1 missed", "0 missed"])
+    asked = []
+    monkeypatch.setattr(p, "agent", lambda t, prompt, slot, tag, **kw: (asked.append((tag, prompt)), ClaudeResult(
+        True, "", "", {"status": "done", "summary": "", "tests": "now pins <"}, False, subtype="success"))[1])
+    out = p.mutation_pass(p.tasks["c/1.1"], "impl-0", {"status": "done", "summary": "s", "tests": "t"})
+    assert len(runs) == 2 and len(asked) == 1 and asked[0][0] == "mutants"
+    assert "replace < with <=" in asked[0][1]
+    assert out == {"status": "done", "summary": "s", "tests": "now pins <"}  # empty summary kept
+    assert p.state.task("c/1.1")["mutation"] == {"head": "h2", "output": "0 missed"}
+
+
+def test_mutation_pass_gives_up_after_the_fix_limit(pl, tmp_path, monkeypatch):
+    from agentpipe import pipeline as pipeline_mod
+    from agentpipe.claude import ClaudeResult
+    p, _ = pl
+    p.t.mutation = "mutants --in-diff {diff}"
+    p.wt = lambda t: tmp_path / "wt" / t.slug
+    (tmp_path / "wt").mkdir()
+    runs = mutation_fakes(p, monkeypatch, ["MISSED   a.rs:3:1: x"])
+    asked = []
+    monkeypatch.setattr(p, "agent", lambda *a, **kw: (asked.append(1), ClaudeResult(
+        True, "", "", {"status": "done", "summary": "s", "tests": "t"}, False, subtype="success"))[1])
+    p.mutation_pass(p.tasks["c/1.1"], "impl-0", {"status": "done", "summary": "s", "tests": "t"})
+    assert len(asked) == pipeline_mod.MUTATION_FIXES and len(runs) == pipeline_mod.MUTATION_FIXES + 1
+
+
+def test_reviewer_reuses_the_mutation_result_for_the_same_commit(pl, tmp_path, monkeypatch):
+    from agentpipe.claude import ClaudeResult
+    p, _ = pl
+    p.t.mutation = "mutants --in-diff {diff}"
+    rv = tmp_path / "rv"
+    rv.mkdir()
+    started = []
+    monkeypatch.setattr(proc_mod, "Background", lambda *a, **kw: started.append(a))
+    p.git = type("G", (), {"diff": lambda self, *a, **kw: "", "restore": lambda self, *a: None})()
+    prompts = []
+    verdict = {"verdict": "approve", "summary": "s", "findings": [], "probes": [], "tickets": []}
+    p.claude = type("C", (), {"run": lambda self, prompt, *a, **kw: (prompts.append(prompt), ClaudeResult(
+        True, "", "", verdict, False, subtype="success"))[1]})()
+    p.state.task("c/1.1")["mutation"] = {"head": "abc1234567", "output": "STORED 0 missed"}
+    pr = {"number": 7, "headRefOid": "abc1234567", "body": "## Summary\nx"}
+    p.reviewer_verdict(p.tasks["c/1.1"], pr, rv, rv, "review-0", [])
+    assert started == [] and "STORED 0 missed" in prompts[0]
+    p.state.task("c/1.1")["mutation"]["head"] = "older"  # a newer push: run it again
+    monkeypatch.setattr(proc_mod, "Background", lambda *a, **kw: (started.append(a), type(
+        "B", (), {"result": lambda self: proc_mod.Result(0, "fresh", "")})())[1])
+    p.reviewer_verdict(p.tasks["c/1.1"], pr, rv, rv, "review-0", [])
+    assert len(started) == 1 and "fresh" in prompts[1]
+
+
 def test_reviewer_sees_human_input_on_the_issue(pl, tmp_path):
     from agentpipe.claude import ClaudeResult
     p, gh = pl

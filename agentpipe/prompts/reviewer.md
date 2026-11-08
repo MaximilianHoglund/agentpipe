@@ -53,7 +53,10 @@ retry it in another form:
 ## Criteria (category in brackets)
 
 - [spec] Does the change do what the task and its spec scenarios require, completely?
-  Are scenarios in scope left untested or unimplemented?
+  Are scenarios in scope left untested or unimplemented? Is a piece missing that a player or
+  caller plainly needs to use the feature (delete beside save and load, a way back out)? Ask
+  for it to be finished in this PR rather than deferred to a ticket, and when the PR has a
+  partial, untested piece of it, ask for it finished and tested rather than removed.
 - [correctness] Bugs, unhandled cases, wrong error handling, races, panics on input.
 - [corner-cut] TODO/stub/`unimplemented!`, swallowed errors, `#[ignore]`d or deleted
   tests, weakened or removed assertions, lint suppressions, hard-coded values that

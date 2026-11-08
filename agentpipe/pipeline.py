@@ -35,6 +35,7 @@ IMPL_KINDS = {"implement", "revise"}
 # committing a dirty tree are narrow, and the gate checks the result.
 LIGHT_RUNS = {"conflict", "cleanup"}
 RELEASE_KEY = "milestone"  # job key and slot of the milestone release job
+MUTATION_FIXES = 2  # implementer runs on missed mutants before the PR goes to review anyway
 MERGE_ATTEMPTS = 3  # tries to bring a behind branch up to date and merge it
 MERGE_RETRY_SECONDS = 15  # lets GitHub finish computing mergeability after a push
 
@@ -1230,6 +1231,8 @@ class Pipeline:
         a = self.cfg.agents["implementer"]
         if not a.light_model or self.state.task(t.key).get("escalated"):
             return a.model
+        if run == "mutants":  # continues the session that wrote the code, on its model
+            return self.state.task(t.key).get("session_model") or self.model_for(t, "impl")
         if run in LIGHT_RUNS or (run == "impl" and self.light_task(t)):
             return a.light_model
         return a.model
@@ -1280,7 +1283,17 @@ class Pipeline:
             blockers=", ".join(blockers) or "none", worktree=self.wt(t), project_dir=self.t.project_dir,
             spec_ref=self.spec_ref(t), context_list=self.context_list(),
             human_input=self.human_input(issue, pr), test_cmd=self.t.test, open_tickets=self.open_tickets(),
-            batch_section=self.batch_section(t), prior_work=self.prior_work(t, pr, run))
+            batch_section=self.batch_section(t), prior_work=self.prior_work(t, pr, run),
+            self_check=self.self_check(t))
+
+    def self_check(self, t: Task) -> str:
+        """What the implementer is told about the pipeline's mutation pass, or nothing for a
+        target without one. The pipeline runs it (``mutation_pass``), so agents don't."""
+        if not self.t.mutation:
+            return ""
+        return ("When you finish, the pipeline runs mutation testing on the lines you changed and "
+                "hands you every mutant no test caught before the PR goes to review. You don't need "
+                "to run it yourself, but each miss costs you another round, so probe first.")
 
     def ensure_worktree(self, t: Task) -> Path:
         wt = self.wt(t)
@@ -1450,7 +1463,7 @@ class Pipeline:
         prompt = review.prompt(
             "revise", key=t.key, round=review.rounds_used(history), max_rounds=self.cfg.max_rounds,
             feedback=last["body"] if last else "(no review found)", merge_note=merge_note,
-            test_cmd=self.t.test)
+            test_cmd=self.t.test, self_check=self.self_check(t))
         if not merge_note and self.light_task(t) and self.cfg.agents["implementer"].light_model:
             self.escalate(t, "the reviewer rejected its PR")
         if not self.resumable(t, "revise"):
@@ -1459,6 +1472,60 @@ class Pipeline:
             prompt += "\n\n" + self.human_input(issue, pr)
         res = self.agent(t, prompt, slot, "revise")
         self.deliver(t, issue, pr, res, slot, Status.CHANGES_REQUESTED)
+
+    def run_mutation(self, t: Task, wt: Path, slot: str) -> str:
+        """The target's mutation command on HEAD's diff against the base, run by the pipeline
+        (not an agent) in ``wt``. Its output tail is stored by commit for the reviewer."""
+        pdir = wt / self.t.project_dir
+        diff_path = wt.parent / f"{t.slug}.mutation.diff"
+        diff_path.write_text(self.git.diff(pdir, self.base_ref(), relative=True), encoding="utf-8")
+        r = proc.run(self.t.mutation.replace("{diff}", str(diff_path)), pdir, env=self.env(slot),
+                     timeout=self.t.mutation_timeout, check=False, shell=True)
+        self.git.restore(wt)  # an in-place run cut off mid-mutant must not leave a mutated file
+        text = r.tail(5000)
+        self.state.task(t.key)["mutation"] = {"head": self.git.head(wt), "output": text}
+        self.state.save()
+        return text
+
+    def mutation_pass(self, t: Task, slot: str, out: dict) -> dict:
+        """Before a push: run mutation on the implementer's work, and send what it missed straight
+        back to the implementer (up to MUTATION_FIXES times) instead of spending a review on it.
+        The last run's result, stored by commit, is the reviewer's evidence. Returns the
+        implementer's structured output, updated by any fix run."""
+        if not self.t.mutation:
+            return out
+        wt = self.wt(t)
+        for attempt in range(MUTATION_FIXES + 1):
+            self.log(f"phase {t.key}: mutation testing (before review)")
+            text = self.run_mutation(t, wt, slot)
+            missed = [l for l in text.splitlines() if l.startswith("MISSED")]
+            if not missed or attempt == MUTATION_FIXES:
+                if missed:
+                    self.log(f"{self.what(t.key)}: {len(missed)} mutant(s) still missed; the reviewer judges them")
+                return out
+            self.log(f"{self.what(t.key)}: {len(missed)} mutant(s) missed; back to the implementer")
+            res = self.agent(t, (
+                "The pipeline ran mutation testing on your committed work before review. Each `MISSED` "
+                "line below is a change to your code that no test caught; the reviewer gets this same "
+                "list and rejects every real gap. For each one, add a test that catches it, or, if the "
+                "mutant can't change observable behaviour, say why in `tests`. Look for the same kind of "
+                "gap in the rest of your change too. Run the tests, commit, and return the structured "
+                "output again, with `summary` and `tests` describing the whole change.\n\n```\n"
+                + "\n".join(missed)[:6000] + "\n```"), slot, "mutants")
+            if not res.ok or res.subtype in CAPPED or res.structured.get("status") != "done":
+                self.log(f"{self.what(t.key)}: the mutation fix run didn't finish; reviewing what is committed")
+                self.git.restore(wt)
+                return out
+            if not self.git.is_clean(wt):
+                self.git.restore(wt)  # uncommitted leftovers; what was committed stands
+            self.file_tickets(f"the implementer of {t.key}", res.structured.get("tickets"))
+            out = {**out, **{k: v for k, v in res.structured.items() if k in ("summary", "tests", "docs") and v}}
+        return out
+
+    def stored_mutation(self, t: Task, pr: dict) -> str | None:
+        """The pipeline's mutation output for the PR's head commit, if it ran on exactly that."""
+        m = self.state.task(t.key).get("mutation") or {}
+        return m.get("output") if m.get("head") and m["head"] == pr.get("headRefOid") else None
 
     def capped(self, t: Task, issue: int, cur: Status, res: ClaudeResult, role: str) -> None:
         """A run that hit its turn cap or timeout: stop instead of paying for it again."""
@@ -1530,6 +1597,7 @@ class Pipeline:
                 self.git.merge_abort(wt)
                 self.to_decision(issue, cur, "Could not resolve merge conflicts with the base branch.")
                 return
+        out = self.mutation_pass(t, slot, out)
         self.git.push(wt, t.branch)
         tasks = self.batch(t)
         nums = self.state.task(t.key).get("batch_issues", {})
@@ -1596,7 +1664,7 @@ class Pipeline:
             # starts alongside the gate rather than after it (arpg: 3-17 min each, Nov 2026). Not
             # when a conflict-resolution review may do instead, which needs no mutation run.
             mutation = None
-            if (self.t.mutation and self.t.mutation_alongside_gate
+            if (self.t.mutation and self.t.mutation_alongside_gate and self.stored_mutation(t, pr) is None
                     and not review.resolution_review_possible(history)):
                 self.log(f"phase {t.key}: test gate and mutation testing")
                 mutation = self.start_mutation(t, rv, pdir, slot)
@@ -1696,17 +1764,24 @@ class Pipeline:
                          issue: int | None = None, mutation: proc.Background | None = None) -> dict:
         mutation_section = ""
         if self.t.mutation:
-            if mutation is None:
-                self.log(f"phase {t.key}: mutation testing")
-                mutation = self.start_mutation(t, rv, pdir, slot)
+            if (text := self.stored_mutation(t, pr)) is not None:
+                # The pipeline ran it on this exact commit before the push; the implementer has
+                # already had the chance to fix what it missed.
+                self.log(f"phase {t.key}: mutation result from before the push (same commit)")
             else:
-                self.log(f"phase {t.key}: waiting for mutation testing")
-            m = mutation.result()
-            self.git.restore(rv)  # an in-place run killed mid-mutant must not leave a mutated file
+                if mutation is None:
+                    self.log(f"phase {t.key}: mutation testing")
+                    mutation = self.start_mutation(t, rv, pdir, slot)
+                else:
+                    self.log(f"phase {t.key}: waiting for mutation testing")
+                text = mutation.result().tail(5000)
+                self.git.restore(rv)  # an in-place run killed mid-mutant must not leave a mutated file
             mutation_section = (
-                "Mutation testing on the changed lines (`" + self.t.mutation + "`). Lines starting "
-                "`MISSED` are mutants no test caught: each is a candidate coverage gap to judge, "
-                "and a real one is a blocking test-coverage finding.\n\n```\n" + m.tail(5000) + "\n```")
+                "Mutation testing on the changed lines (`" + self.t.mutation + "`), run by the pipeline. "
+                "Lines starting `MISSED` are mutants no test caught: each is a candidate coverage gap to "
+                "judge, and a real one is a blocking test-coverage finding. The implementer saw this "
+                "list before the PR came to you; its `Tests` section says why any it kept are harmless."
+                "\n\n```\n" + text + "\n```")
         counted = [h for h in history if h["verdict"] in review.COUNTED]
         prior = ""
         if counted:
