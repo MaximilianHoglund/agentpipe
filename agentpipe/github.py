@@ -82,6 +82,13 @@ class GitHub:
                        ".[] | {body, user: .user.login, created_at}")
         return [json.loads(line) for line in out.splitlines() if line.strip()]
 
+    def label_added_at(self, number: int, label: str) -> str:
+        """When ``label`` was last added to issue ``number`` (ISO 8601 UTC), or "" if never."""
+        out = self._gh("api", f"repos/{self.repo}/issues/{number}/events?per_page=100", "--paginate",
+                       "--jq", f'.[] | select(.event == "labeled" and .label.name == {json.dumps(label)}) | .created_at')
+        times = [line.strip() for line in out.splitlines() if line.strip()]
+        return max(times) if times else ""
+
     def issue_db_id(self, number: int) -> int:
         return int(self._api(f"issues/{number}")["id"])
 
@@ -102,8 +109,8 @@ class GitHub:
         return [i["number"] for i in items]
 
     def issue(self, number: int) -> dict:
-        """One issue's number, state and label names."""
-        i = self._json("issue", "view", str(number), "-R", self.repo, "--json", "number,state,labels")
+        """One issue's number, state, body and label names."""
+        i = self._json("issue", "view", str(number), "-R", self.repo, "--json", "number,state,body,labels")
         i["labels"] = [l["name"] for l in i["labels"]]
         return i
 

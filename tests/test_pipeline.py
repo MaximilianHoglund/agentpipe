@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from agentpipe import proc as proc_mod
+from agentpipe import review
 from agentpipe.config import Agent, Config, Target
 from agentpipe.deps import Plan, TaskDeps
 from agentpipe.pipeline import Pipeline
@@ -49,6 +50,9 @@ class FakeGitHub:
 
     def comments(self, number):
         return self.comments_by.get(number, [])
+
+    def label_added_at(self, number, label):
+        return self.label_times.get((number, label), "") if hasattr(self, "label_times") else ""
 
     def ensure_labels(self):
         pass
@@ -116,6 +120,30 @@ def test_reviews_only_unreviewed_heads_and_merges_one_at_a_time(pl):
     assert ("review", "c/1.2", "review-0") in p.started
     assert ("review", "c/1.1", "review-0") not in p.started
     assert [s for s in p.started if s[0] == "merge"] == [("merge", "c/1.3", "merge")]
+
+
+def test_a_reviewed_head_set_back_to_pending_review_is_reviewed_again(pl):
+    p, gh = pl
+    n = task_issue(gh, "c/1.1", S.PENDING_REVIEW)
+    gh.prs = [{"number": 11, "headRefOid": "sha1", "body": TASK_MARKER.format(key="c/1.1")}]
+    gh.comments_by[11] = [{"body": "<!-- pipeline-review sha=sha1 verdict=tests_failed round=3 -->",
+                           "created_at": "2026-11-08T00:27:10Z"}]
+    gh.label_times = {(n, S.PENDING_REVIEW.label): "2026-11-08T00:20:00Z"}  # set before the review
+    p.tick()
+    assert p.started == []
+    gh.label_times = {(n, S.PENDING_REVIEW.label): "2026-11-08T09:00:00Z"}  # set again afterwards
+    p.tick()
+    assert p.started == [("review", "c/1.1", "review-0")]
+
+
+def test_a_rounds_reset_gives_a_pr_fresh_rounds_but_keeps_its_feedback():
+    rejected = "<!-- pipeline-review sha={} verdict=tests_failed round={} -->"
+    comments = [{"body": rejected.format("a", 1)}, {"body": rejected.format("b", 2)},
+                {"body": "Out of rounds. " + review.ROUNDS_RESET_MARKER}]
+    history = review.review_history(comments)
+    assert review.rounds_used(history) == 0 and history[-1]["sha"] == "b"  # revise still reads it
+    history = review.review_history(comments + [{"body": rejected.format("c", 1)}])
+    assert review.rounds_used(history) == 1
 
 
 def test_the_oldest_approval_merges_first_whatever_its_milestone(pl):

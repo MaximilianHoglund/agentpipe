@@ -169,18 +169,27 @@ def render_review(v: dict, sha: str, round_: int, max_rounds: int) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+# A PR comment holding this gives the PR a fresh set of review rounds (`agentpipe rounds-reset`).
+ROUNDS_RESET_MARKER = "<!-- pipeline-rounds-reset -->"
+
+
 def review_history(comments: list[dict]) -> list[dict]:
-    """Pipeline review markers on a PR, oldest first, each with its comment body."""
+    """Pipeline review markers on a PR, oldest first, each with its comment body and time.
+    Reviews before the latest rounds reset stay (revise still reads their feedback) but are
+    marked ``counts: False``, so they use up no round."""
     out = []
     for c in comments:
+        if ROUNDS_RESET_MARKER in (c.get("body") or ""):
+            for h in out:
+                h["counts"] = False
         m = parse_review_marker(c["body"])
         if m:
-            out.append({**m, "body": c["body"]})
+            out.append({**m, "body": c["body"], "at": c.get("created_at", ""), "counts": True})
     return out
 
 
 def rounds_used(history: list[dict]) -> int:
-    return sum(1 for h in history if h["verdict"] in COUNTED)
+    return sum(1 for h in history if h["verdict"] in COUNTED and h.get("counts", True))
 
 
 def last_approval(history: list[dict]) -> int | None:

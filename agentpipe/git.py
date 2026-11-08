@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import shutil
+import threading
+import time
 from pathlib import Path
 
 from agentpipe import proc
@@ -12,12 +14,25 @@ class Git:
     def __init__(self, repo: Path, run=proc.run):
         self.repo = repo
         self._run = run
+        self._fetch_lock = threading.Lock()
 
     def git(self, *args: str, cwd: Path | None = None, check: bool = True) -> proc.Result:
         return self._run(["git", *args], cwd or self.repo, check=check)
 
     def fetch(self) -> None:
-        self.git("fetch", "origin", "--prune")
+        """Fetch origin. Jobs fetch from several threads, and two fetches at once collide on a
+        ref lock ("cannot lock ref 'refs/remotes/origin/dev'"), which crashed a merge after its
+        PR had landed. One fetch at a time; a collision with a fetch outside the dispatcher (an
+        agent's own, in a worktree of the same repo) is retried."""
+        with self._fetch_lock:
+            for attempt in range(3):
+                try:
+                    self.git("fetch", "origin", "--prune")
+                    return
+                except proc.CommandError as e:
+                    if attempt == 2 or "cannot lock ref" not in str(e):
+                        raise
+                time.sleep(2)
 
     def worktree_add(self, path: Path, branch: str, start: str) -> None:
         """Create (or reset) ``branch`` at ``start`` and check it out at ``path``."""

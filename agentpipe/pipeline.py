@@ -162,6 +162,7 @@ class Pipeline:
         self.last_sync = 0.0
         self.jobs: dict[str, Job] = {}
         self.reviewed: dict[int, str] = {}  # PR number -> head sha already reviewed
+        self.review_at: dict[int, str] = {}  # PR number -> when that review was posted (ISO UTC)
         self.touches_tried: set[str] = set()  # task keys sent to backfill_touches this run
         self.tiers_tried: set[str] = set()  # ticket keys sent to rate_tickets this run
         self.held: dict[str, str] = {}  # task key -> why it waits for another's files (logged once)
@@ -954,7 +955,7 @@ class Pipeline:
             if not free_rev:
                 break
             pr = prs.get(key)
-            if pr and self.needs_review(pr):
+            if pr and self.needs_review(pr, issues[key]["number"]):
                 self.start("review", key, free_rev.pop(0), issues[key], pr)
         if not merging:
             # Oldest approval first, not milestone order: merging is cheap and releases the files
@@ -1091,15 +1092,28 @@ class Pipeline:
                              "running jobs finish")
         self.state.save()
 
-    def needs_review(self, pr: dict) -> bool:
-        sha = pr["headRefOid"]
-        if self.reviewed.get(pr["number"]) == sha:
-            return False
-        history = review.review_history(self.gh.comments(pr["number"]))
-        if history and history[-1]["sha"] == sha:
-            self.reviewed[pr["number"]] = sha
-            return False
-        return True
+    def needs_review(self, pr: dict, issue: int) -> bool:
+        """True unless this head was reviewed already. A review moves the issue off pending
+        review, so a reviewed head still labelled pending review was set back after its review:
+        by hand, or by a revise that changed no code. Review it again then, rather than leaving
+        it to wait for a new commit that never comes."""
+        n, sha = pr["number"], pr["headRefOid"]
+        if self.reviewed.get(n) != sha:
+            history = review.review_history(self.gh.comments(n))
+            if not history or history[-1]["sha"] != sha:
+                return True
+            self.reviewed[n] = sha
+            self.review_at[n] = history[-1]["at"]
+        at = self.gh.label_added_at(issue, Status.PENDING_REVIEW.label)
+        if at and at > self.review_at.get(n, ""):
+            self.log(f"PR #{pr['number']} was set to pending review after its last review of this "
+                     "commit; reviewing it again")
+            return True
+        if self.held.get(f"review#{n}") != sha:
+            self.held[f"review#{n}"] = sha
+            self.log(f"PR #{n} is pending review, but commit {sha[:10]} was already reviewed and "
+                     "the label predates that review; set the label again to have it re-reviewed")
+        return False
 
     def to_decision(self, number: int, old: Status | None, why: str) -> None:
         self.gh.set_status(number, Status.NEEDS_DECISION, old)
@@ -1712,6 +1726,7 @@ class Pipeline:
                     return self.capped(t, issue, Status.PENDING_REVIEW, e.result, "reviewer")
             self.gh.comment(pr["number"], review.render_review(v, sha, round_, self.cfg.max_rounds))
             self.reviewed[pr["number"]] = sha
+            self.review_at[pr["number"]] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             self.log(review_line(self.what(t.key), pr["number"], v, round_, self.cfg.max_rounds))
             if v["verdict"] == review.APPROVE:
                 # For the merge job: approvals merge oldest first, and the gate just passed on this

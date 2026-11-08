@@ -31,7 +31,8 @@ def main(argv: list[str] | None = None) -> int:
                         ("resume", "clear a usage-limit pause, e.g. after a plan upgrade"),
                         ("watch", "live view of the dispatcher and what each running agent is doing"),
                         ("denials", "review tool calls agents were refused, grouped, with the reason"),
-                        ("wait", "park a decided issue until other issues or tasks are done, then release it")):
+                        ("wait", "park a decided issue until other issues or tasks are done, then release it"),
+                        ("rounds-reset", "give a PR out of review rounds a fresh set and send it back for revision")):
         p = sub.add_parser(name, help=help_)
         p.add_argument("target")
         if name == "plan":
@@ -58,6 +59,9 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("issue", type=int, help="the issue that waits")
             p.add_argument("blockers", nargs="+",
                            help="what it waits for: issue numbers (#316 or 316) or task keys (crafting/3.5)")
+        if name == "rounds-reset":
+            p.add_argument("issue", type=int, help="the task's issue (its PR is found from it)")
+            p.add_argument("--why", default="", help="note for the PR, e.g. what the revision should fix")
         if name == "denials":
             p.add_argument("--hours", type=float, help="only runs from the last N hours")
             p.add_argument("--examples", type=int, default=2, help="example commands per group")
@@ -162,6 +166,25 @@ def main(argv: list[str] | None = None) -> int:
         else:
             clear_pause(State(target.work_dir / "state.json"))
             print(f"{target.name}: usage pause cleared")
+        return 0
+
+    if args.cmd == "rounds-reset":
+        # GitHub writes only, so it is safe while the dispatcher runs.
+        from agentpipe import review
+        from agentpipe.github import GitHub
+        from agentpipe.status import task_key_from_body
+        gh = GitHub(target.github_repo, cfg.gh_bin, cwd=target.repo_root)
+        issue = gh.issue(args.issue)
+        key = task_key_from_body(issue.get("body"))
+        pr = next((p for p in gh.list_prs() if key and task_key_from_body(p["body"]) == key), None)
+        if pr is None:
+            print(f"#{args.issue}: no open pipeline PR found for it", file=sys.stderr)
+            return 1
+        gh.comment(pr["number"], review.bot(
+            f"**Fresh review rounds.** The owner reset the round count; earlier reviews stay as "
+            f"feedback. {args.why}".strip() + f"\n\n{review.ROUNDS_RESET_MARKER}"))
+        gh.set_status(args.issue, Status.CHANGES_REQUESTED, status_from_labels(issue["labels"]))
+        print(f"#{args.issue} ({key}): PR #{pr['number']} has fresh rounds; sent back for revision")
         return 0
 
     if args.cmd == "wait":
