@@ -1885,6 +1885,10 @@ class Pipeline:
                 else:
                     self.git.merge_abort(train)
                     self.log(f"merge batch: {self.what(t.key)} left out, it conflicts with the batch")
+                if not members:
+                    # The job's own PR (first in line) doesn't fit: merge it alone, which resolves
+                    # its conflict. Batching around it would leave it first in line, skipped forever.
+                    return "too few"
             if len(members) < 2:
                 return "too few"
             good = self.bisect_batch(train, members, heads, slot)

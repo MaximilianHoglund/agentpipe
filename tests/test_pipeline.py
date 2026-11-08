@@ -1055,6 +1055,19 @@ def test_a_pr_that_conflicts_with_the_batch_is_left_for_later(pl, tmp_path, monk
     assert seen["merged"] == [20, 22]  # c/1.2 changed the same line as c/1.1
 
 
+def test_a_first_pr_that_conflicts_with_the_base_merges_alone_before_any_batch(pl, tmp_path, monkeypatch):
+    p, gh = pl
+    order, seen = train_setup(p, gh, tmp_path, monkeypatch,
+                              {"c/1.1": ("a.rs", "a\n"), "c/1.2": ("b.rs", "b\n"), "c/1.3": ("c.rs", "c\n")})
+    real_merge = p.git.merge
+    monkeypatch.setattr(p.git, "merge", lambda wt, ref: False if ref.endswith(order[0][0].branch) else real_merge(wt, ref))
+    p.merge_order = order
+    singles = []
+    monkeypatch.setattr(p, "merge_one", lambda t, issue, pr, slot: singles.append(t.key))
+    p.job_merge(*order[0], "merge")
+    assert singles == ["c/1.1"] and seen["gates"] == [] and seen["merged"] == []
+
+
 FOUR = {"c/1.1": ("a.rs", "a\n"), "c/1.2": ("b.rs", "b\n"), "c/1.3": ("c.rs", "c\n"), "c/1.4": ("d.rs", "d\n")}
 
 
