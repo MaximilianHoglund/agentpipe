@@ -962,7 +962,8 @@ class Pipeline:
         """Fill free implementer, reviewer and merge slots from GitHub's current state."""
         if not self.env_ok:
             return
-        issues = {k: i for k, i in self.issues_by_key(self.gh.list_issues()).items()
+        raw = self.gh.list_issues()
+        issues = {k: i for k, i in self.issues_by_key(raw).items()
                   if i["state"].upper() == "OPEN" and k in self.tasks}
         self.issue_map = issues
         prs = {}
@@ -993,7 +994,7 @@ class Pipeline:
                     self.log(f"{self.what(key)}: no PR and never worked on, so it is a proposal")
                     continue
                 self.to_decision(issues[key]["number"], s, f"Status is `{s.value}` but no open PR was found.")
-        self.record_awaiting(issues)
+        self.record_awaiting(raw)
         for key in by_status(Status.IN_PROGRESS) + by_status(Status.CHANGES_REQUESTED) + \
                 by_status(Status.PENDING_IMPLEMENTATION):
             if not free_impl:
@@ -1108,17 +1109,22 @@ class Pipeline:
                 return f"waits for {k} ({via}) to merge first: both touch {shown}"
         return ""
 
-    def record_awaiting(self, issues: dict[str, dict]) -> None:
+    def record_awaiting(self, issues: list[dict]) -> None:
         """Save the issues waiting on Max, for the watcher's header.
 
-        These are issues in needs decision or proposed. Parked items (target `parked`,
-        milestone `deferred`) aren't counted.
+        These are open pipeline issues in needs decision or proposed, straight from GitHub's
+        list: a ticket filed since the last sync counts at once, not once a sync loads it.
+        Parked items (target `parked`, milestone `deferred`) aren't counted.
         """
         awaiting = []
-        for key, i in issues.items():
-            if self.t.is_parked(key, i["number"]):
+        for i in issues:
+            if i["state"].upper() != "OPEN":
                 continue
-            if status_from_labels(i["labels"]) in (Status.NEEDS_DECISION, Status.PROPOSED):
+            if status_from_labels(i["labels"]) not in (Status.NEEDS_DECISION, Status.PROPOSED):
+                continue
+            body = i["body"] or ""
+            key = f"{TICKET_CHANGE}/{i['number']}" if TICKET_MARKER in body else task_key_from_body(body) or ""
+            if not self.t.is_parked(key, i["number"]):
                 awaiting.append(i["number"])
         awaiting.sort()
         with self.state.lock:
@@ -1126,6 +1132,22 @@ class Pipeline:
                 return
             self.state.data["awaiting_input"] = awaiting
         self.state.save()
+
+    def refresh_awaiting_forever(self, done: threading.Event) -> None:
+        """Keep the watcher's count current while the main loop is busy or idle.
+
+        The main loop only counts when it schedules, and a preflight gate (a full test run),
+        a usage pause or a stop skip that for as long as they last, which froze the count.
+        """
+        failed = False
+        while not done.wait(self.cfg.poll_seconds):
+            try:
+                self.record_awaiting(self.gh.list_issues())
+                failed = False
+            except Exception as e:  # a GitHub hiccup must not end the thread
+                if not failed:
+                    self.log(f"could not refresh the waiting-on-you count: {str(e)[-200:]}")
+                failed = True
 
     def start(self, kind: str, key: str, slot: str, issue: dict, pr: dict | None) -> None:
         fn = getattr(self, f"job_{kind}")
@@ -1253,6 +1275,10 @@ class Pipeline:
             self.log(f"could not enable git rerere: {str(e)[-200:]}")
         self.log(f"running (pid {os.getpid()}); implementers={self.implementers()} "
                  f"reviewers={self.reviewers()}")
+        counted = threading.Event()
+        if not once:
+            threading.Thread(target=self.refresh_awaiting_forever, args=(counted,),
+                             name="awaiting", daemon=True).start()
         try:
             while True:
                 reason = self.stop_reason()
@@ -1280,6 +1306,7 @@ class Pipeline:
             self.log(f"dispatcher crashed: {e!r}\n" + traceback.format_exc())
             raise
         finally:
+            counted.set()
             self.stop_file.unlink(missing_ok=True)
             self.pid_file.unlink(missing_ok=True)
 

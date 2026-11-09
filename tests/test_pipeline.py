@@ -282,6 +282,33 @@ def test_records_issues_waiting_on_max_for_the_watcher(pl):
     assert not any(k == f"ticket/{t}" for _, k, _ in p.started)
 
 
+def test_waiting_count_skips_closed_issues_and_counts_tickets_before_a_sync(pl):
+    p, gh = pl
+    closed = task_issue(gh, "c/1.1", S.NEEDS_DECISION)
+    gh.issues[closed]["state"] = "CLOSED"  # closed by hand with its old label left on
+    fresh = gh.add(TICKET_MARKER + "\nround shares", S.PROPOSED, title="Rounding")  # not loaded yet
+    p.tick()
+    assert p.state.data["awaiting_input"] == [fresh]
+
+
+def test_waiting_count_refreshes_while_the_main_loop_is_held_up(pl):
+    import threading
+    p, gh = pl
+    p.env_ok = False  # preflight gate still running: schedule() returns early
+    d = task_issue(gh, "c/1.1", S.NEEDS_DECISION)
+    p.cfg.poll_seconds = 0.01
+    done = threading.Event()
+    t = threading.Thread(target=p.refresh_awaiting_forever, args=(done,))
+    t.start()
+    deadline = time.time() + 5
+    while p.state.data.get("awaiting_input") != [d] and time.time() < deadline:
+        time.sleep(0.01)
+    done.set()
+    t.join(5)
+    assert p.state.data["awaiting_input"] == [d]
+    assert not t.is_alive()
+
+
 def test_approved_ticket_is_implemented_with_its_body_as_spec(pl):
     p, gh = pl
     t = gh.add(TICKET_MARKER + "\nThe parser in a.rs duplicates b.rs", S.PENDING_IMPLEMENTATION,
