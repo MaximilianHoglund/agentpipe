@@ -492,6 +492,71 @@ def test_closing_the_linked_watcher_stops_the_dispatcher(pl, monkeypatch):
     assert not (wdir / "4242").exists()
 
 
+def _code_pipeline(p, monkeypatch, revs, imports=""):
+    """Point p's self-restart at a fake checkout whose HEAD steps through ``revs``."""
+    from agentpipe import service
+    p.cfg.poll_seconds = 0
+    p.CODE_CHECK_SECONDS = 0
+    p.config_path = p.t.work_dir / "pipeline.toml"
+    p.code_rev = revs[0]
+    it = iter(revs)
+    p.read_code_rev = lambda: next(it, revs[-1])
+    p.code_imports = lambda: imports
+    started = []
+    monkeypatch.setattr(service, "start", lambda name, wd, cfg: (started.append(name), 777)[1])
+    return started
+
+
+def test_new_agentpipe_commit_drains_and_relaunches(pl, monkeypatch):
+    p, gh = pl
+    started = _code_pipeline(p, monkeypatch, ["a" * 40, "a" * 40, "b" * 40])
+    lines, ticks = [], []
+    p._log = lines.append
+    job = type("J", (), {"kind": "implement", "slot": "impl-0"})()
+
+    def tick():
+        ticks.append(1)
+        if len(ticks) == 1:
+            p.jobs["c/1.1"] = job
+        elif len(ticks) == 4:
+            assert p.stopping  # nothing new starts while the job finishes
+            p.jobs.clear()
+        assert len(ticks) < 10
+
+    p.tick = tick
+    p.run_forever()
+    assert any("agentpipe updated to bbbbbbb, restarting: starting nothing new" in l for l in lines)
+    assert started == ["t"]
+    assert p.pid_file.read_text(encoding="utf-8") == "777"  # handed to the new dispatcher
+
+
+def test_commit_that_fails_to_import_is_not_restarted_onto(pl, monkeypatch):
+    p, gh = pl
+    started = _code_pipeline(p, monkeypatch, ["a" * 40, "b" * 40], imports="SyntaxError: bad")
+    lines = []
+    p._log = lines.append
+    p.had_watcher = False
+    p.check_code()
+    p.check_code()
+    assert p.restart_for is None and p.stop_reason() is None and not started
+    assert sum("doesn't import" in l for l in lines) == 1  # logged once per commit
+
+
+def test_stop_request_beats_a_pending_relaunch(pl, monkeypatch):
+    p, gh = pl
+    started = _code_pipeline(p, monkeypatch, ["a" * 40, "b" * 40])
+    ticks = []
+
+    def tick():
+        ticks.append(1)
+        p.stop_file.write_text("", encoding="utf-8")
+        assert len(ticks) < 5
+
+    p.tick = tick
+    p.run_forever()
+    assert not started and not p.pid_file.exists()
+
+
 def test_no_linked_watcher_means_no_watcher_stop(pl):
     p, gh = pl
     p.had_watcher = False

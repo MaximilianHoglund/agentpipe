@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -208,6 +210,11 @@ class Pipeline:
         self.config_path: Path | None = None
         self.overrides: dict[str, object] = {}  # command-line settings that beat the file
         self.config_mtime = 0.0
+        # Self-restart on new agentpipe code (see check_code); on only under `agentpipe run`.
+        self.code_rev: str | None = None
+        self.bad_rev: str | None = None  # a commit whose code failed the import check
+        self.restart_for: str | None = None  # the commit to restart on once jobs drain
+        self.last_code_check = 0.0
 
     # Settings read once at startup; changing them in the file still needs a restart.
     RESTART_ONLY = ("claude_bin", "gh_bin", "agent_timeout", "mcp_servers")
@@ -218,6 +225,49 @@ class Pipeline:
         self.config_mtime = path.stat().st_mtime
         for k, v in overrides.items():
             setattr(self.cfg, k, v)
+        self.code_rev = self.read_code_rev()
+
+    CODE_DIR = Path(__file__).resolve().parent.parent
+    CODE_CHECK_SECONDS = 60
+
+    def read_code_rev(self) -> str | None:
+        """The agentpipe checkout's HEAD commit, or None when it isn't a git checkout."""
+        try:
+            r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.CODE_DIR, capture_output=True,
+                               text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return r.stdout.strip() if r.returncode == 0 else None
+
+    def code_imports(self) -> str:
+        """Import the checkout's code in a fresh interpreter: "" if it loads, else the error."""
+        try:
+            r = subprocess.run([sys.executable, "-c", "import agentpipe.cli, agentpipe.pipeline"],
+                               cwd=self.CODE_DIR, capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return repr(e)
+        return "" if r.returncode == 0 else (r.stderr.strip().splitlines() or ["exit code"])[-1]
+
+    def check_code(self) -> None:
+        """Restart on new agentpipe commits, so code changes need no hand restart.
+
+        Once a minute, compare the checkout's HEAD with the one this dispatcher started on. On a
+        new commit whose code imports cleanly, drain like `agentpipe stop` and then relaunch (see
+        run_forever). pipeline.toml edits don't need this: reload_config applies them each tick.
+        Uncommitted edits don't trigger it, so a half-made change never restarts the dispatcher."""
+        if self.code_rev is None or self.config_path is None or self.restart_for:
+            return
+        if time.time() - self.last_code_check < self.CODE_CHECK_SECONDS:
+            return
+        self.last_code_check = time.time()
+        rev = self.read_code_rev()
+        if not rev or rev == self.code_rev or rev == self.bad_rev:
+            return
+        if err := self.code_imports():
+            self.bad_rev = rev
+            self.log(f"agentpipe {rev[:7]} doesn't import ({err}); not restarting onto it")
+            return
+        self.restart_for = rev
 
     def reload_config(self) -> None:
         """Apply pipeline.toml edits on the fly; a broken file keeps the current settings."""
@@ -1266,6 +1316,8 @@ class Pipeline:
             self.had_watcher = True
         elif self.had_watcher:
             return "watcher window closed"
+        if self.restart_for:
+            return f"agentpipe updated to {self.restart_for[:7]}, restarting"
         return None
 
     def run_forever(self, once: bool = False) -> None:
@@ -1283,8 +1335,11 @@ class Pipeline:
         if not once:
             threading.Thread(target=self.refresh_awaiting_forever, args=(counted,),
                              name="awaiting", daemon=True).start()
+        relaunch = handed_off = False
         try:
             while True:
+                if not once:
+                    self.check_code()
                 reason = self.stop_reason()
                 if reason and not self.stopping:
                     self.stopping = True
@@ -1295,12 +1350,21 @@ class Pipeline:
                     self.log("stop cancelled: running again")
                 self.tick()
                 if (once or self.stopping) and not self.jobs:
+                    # Only a drain for new code relaunches; a stop or closed watcher wins over it.
+                    relaunch = bool(self.restart_for) and (self.stop_reason() or "").startswith("agentpipe updated")
                     break
                 # Sleep in short steps so a stop request (or its cancelling) is noticed within seconds.
                 deadline = time.time() + (self.cfg.poll_seconds if not once else 5)
                 while time.time() < deadline and self.stopping == bool(self.stop_reason()):
                     time.sleep(min(2.0, max(deadline - time.time(), 0)))
             self.log("stopped")
+            if relaunch:
+                pid = self.relaunch()
+                if pid is not None:
+                    # Hand the pid file straight to the new dispatcher, so the linked watcher
+                    # window sees one running throughout and stays open.
+                    self.pid_file.write_text(str(pid), encoding="utf-8")
+                    handed_off = True
         except KeyboardInterrupt:
             self.stopping = True
             self.log("stopping: waiting for running agents (Ctrl-C again to abandon; work resumes on restart)")
@@ -1312,7 +1376,21 @@ class Pipeline:
         finally:
             counted.set()
             self.stop_file.unlink(missing_ok=True)
-            self.pid_file.unlink(missing_ok=True)
+            if not handed_off:
+                self.pid_file.unlink(missing_ok=True)
+
+    def relaunch(self) -> int | None:
+        """Start a new hidden dispatcher on the current code; returns its pid, None on failure.
+
+        Command-line overrides (`run --max-implementers` etc.) aren't carried over."""
+        try:
+            pid = service.start(self.t.name, self.t.work_dir, self.config_path)
+        except Exception as e:
+            self.log(f"relaunch failed, start it by hand: {e!r}")
+            return None
+        self.log(f"relaunched on agentpipe {self.restart_for[:7]} (pid {pid})"
+                 + (f"; command-line overrides dropped: {sorted(self.overrides)}" if self.overrides else ""))
+        return pid
 
     # ------------------------------------------------------------------ jobs
     def human_input(self, issue: int, pr: dict | None) -> str:
