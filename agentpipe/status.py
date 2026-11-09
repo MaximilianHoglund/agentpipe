@@ -10,6 +10,7 @@ class Status(str, Enum):
     BLOCKED_BY_TASK = "blocked by task"
     NEEDS_DECISION = "needs decision"
     PROPOSED = "proposed"
+    WATCHING = "watching"
     AWAITING_TASK = "awaiting task"
     PENDING_IMPLEMENTATION = "pending implementation"
     IN_PROGRESS = "in progress"
@@ -27,6 +28,7 @@ LABEL_INFO = {
     Status.BLOCKED_BY_TASK: ("bfd4f2", "Waits on another task; see the issue's blocked-by links"),
     Status.NEEDS_DECISION: ("d93f0b", "Needs information or a decision from a human; see the latest comment"),
     Status.PROPOSED: ("f9d0c4", "Agent-filed ticket; waits for a human (or triage) to approve it"),
+    Status.WATCHING: ("ededed", "A one-off problem tracked aside; becomes work once it recurs"),
     Status.AWAITING_TASK: ("c2e0c6", "Decided; waits for another task to land, named in the latest comment"),
     Status.PENDING_IMPLEMENTATION: ("0e8a16", "Unblocked; waiting for an implementer agent"),
     Status.IN_PROGRESS: ("fbca04", "An implementer agent is working on it"),
@@ -53,7 +55,7 @@ def status_from_labels(labels: list[str]) -> Status | None:
     if not found:
         return None
     # Two status labels means a human edited by hand; the most "human" one wins.
-    order = [Status.NEEDS_DECISION, Status.PROPOSED, Status.AWAITING_TASK, Status.FINISHED, Status.APPROVED,
+    order = [Status.NEEDS_DECISION, Status.PROPOSED, Status.WATCHING, Status.AWAITING_TASK, Status.FINISHED, Status.APPROVED,
              Status.CHANGES_REQUESTED, Status.PENDING_REVIEW, Status.IN_PROGRESS, Status.PENDING_IMPLEMENTATION,
              Status.BLOCKED_BY_TASK]
     return min(found, key=order.index)

@@ -22,8 +22,11 @@ numerics or a public format, or when you are unsure. A light ticket that struggl
 on the full model, so a wrong `light` costs one wasted run.
 
 For every ticket, `unblocks`: `true` only when something is broken now and other work suffers
-until it is fixed: the gate, a test harness, the build, the export or a release fails or is
-flaky, or agents can't do their tasks. Also `true` for speeding up delivery itself (a faster
+until it is fixed, with evidence that it keeps happening: the gate, a test harness, the build,
+the export or a release fails every time, or agents can't do their tasks; or the ticket was
+promoted from watching after being seen several times (it says so). One sighting is not
+enough, however serious it sounds: a test that failed once under load, a stray process, a
+single crash. Also `true` for speeding up delivery itself (a faster
 gate, test run or build that every PR waits on), but only when the time it saves over the
 remaining work clearly outweighs the time it takes; the big gate speedups are already done, so
 expect few of these. Those go ahead of all planned work. `false` for everything else, even when

@@ -103,7 +103,9 @@ are outside this task (do not fix them yourself; stay in scope): bugs, duplicate
 in existing code, architecture that should change. Put each in `tickets` with a clear
 title and a body stating what, where (file:line), why it matters and a suggested fix.
 A human approves tickets before anyone works on them. Skip anything already in the
-open tickets below, and anything trivial.
+open tickets below, and anything trivial. When you saw something only once (a test that
+failed under load, a transient error, a stray process), file it anyway but say so and say what
+you saw: one-off problems are tracked aside and become work only once they recur.
 
 Open tickets: $open_tickets
 

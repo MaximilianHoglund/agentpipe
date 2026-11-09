@@ -103,6 +103,12 @@ class Target:
     # Agent-filed tickets get one triage run: purely technical ones are approved without Max,
     # the rest wait for him in proposed with the triage's reason as a comment.
     auto_approve: bool = False
+    # Triage tracks one-off problems (a flaky test seen once) as `watching` rather than
+    # approving them; a watched problem becomes work once it has been seen this many times.
+    watch_promote_at: int = 3
+    # Implementer slots unblocking tickets may hold at once, so a burst of them can't push
+    # milestone work out (Max, 2026-11-09).
+    unblocking_slots: int = 1
     # Per-target agent counts, overriding [run] (e.g. a smaller machine): None keeps [run]'s.
     max_implementers: int | None = None
     max_reviewers: int | None = None
@@ -255,6 +261,8 @@ def load(path: Path) -> Config:
             priority=list(t.get("priority", [])),
             archive=t.get("archive", "openspec archive {change} --yes"),
             auto_approve=bool(t.get("auto_approve", False)),
+            watch_promote_at=int(t.get("watch_promote_at", 3)),
+            unblocking_slots=int(t.get("unblocking_slots", 1)),
             max_implementers=t.get("max_implementers"),
             max_reviewers=t.get("max_reviewers"),
         )

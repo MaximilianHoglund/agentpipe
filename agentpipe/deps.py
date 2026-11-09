@@ -96,7 +96,9 @@ TRIAGE_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {"key": {"type": "string"},
-                               "verdict": {"type": "string", "enum": ["approve", "ask"]},
+                               "verdict": {"type": "string", "enum": ["approve", "ask", "watch", "recurs"]},
+                               "same_as": {"type": "string",
+                                           "description": "With recurs: the watched ticket's key"},
                                "reason": {"type": "string"}},
                 "required": ["key", "verdict", "reason"],
             },

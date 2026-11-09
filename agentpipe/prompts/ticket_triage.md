@@ -10,6 +10,12 @@ docs or the code a ticket names when its text isn't enough to judge.
 
 $tickets
 
+## Watched problems
+
+One-off problems seen before and tracked aside, with how often each has been seen:
+
+$watched
+
 ## Answer
 
 For every ticket, `verdict`:
@@ -23,6 +29,18 @@ For every ticket, `verdict`:
   rules, balance or numbers, UI and UX, content, new features or scope. Also `ask` when it
   reverses or reinterprets a design decision, when it needs a choice between options that
   differ in what the user experiences, or when you are unsure.
+
+Two more verdicts come before those:
+
+- `recurs` when the ticket reports the same problem as one of the watched problems above (the
+  same failure or symptom, even if the cause or wording differs). Set `same_as` to that
+  watched ticket's key. The ticket is closed as a sighting of it, and a watched problem seen
+  often enough becomes work.
+- `watch` when the ticket reports something seen once that may not happen again, and fixing it
+  isn't clearly worth the cost on one sighting: a flaky or load-sensitive test, a transient
+  failure, a stray process, a timing or environment hiccup, a rare error with no known
+  trigger. It is tracked aside and becomes work only once it recurs. Don't watch something
+  that fails every time, or a plain bug in the code: judge those as below.
 
 `reason`: one sentence the owner reads on the issue, saying why it is technical (approve) or
 what decision it needs from him (ask).

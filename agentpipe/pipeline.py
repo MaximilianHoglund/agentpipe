@@ -43,7 +43,10 @@ MUTATION_FIXES = 2  # implementer runs on missed mutants before the PR goes to r
 # mutants, and resolving a conflict or a gate failure from merging the base at handoff.
 SESSION_RUNS = {"mutants", "sync"}
 SYNC_FIXES = 2  # implementer runs on a gate the base merge broke before the PR goes to review anyway
-UNFINISHED_REQUEUES = 2  # "incomplete" runs in a row requeued automatically before asking Max
+UNFINISHED_REQUEUES = 2
+# Version of the ticket rater's `unblocks` rule. Tickets rated unblocking under an older one, and
+# not started, are rated again (2: one sighting is no longer enough, Max 2026-11-09).
+UNBLOCKS_RULE = 2  # "incomplete" runs in a row requeued automatically before asking Max
 MERGE_ATTEMPTS = 3  # tries to bring a behind branch up to date and merge it
 MERGE_RETRY_SECONDS = 15  # lets GitHub finish computing mergeability after a push
 
@@ -562,8 +565,14 @@ class Pipeline:
             return
         self.log(f"triaging {len(need)} ticket(s)")
         rows = "\n\n".join(f"### {k}: {self.tasks[k].text}\n\n{self.ticket_bodies.get(k, '')[:4000]}" for k in need)
+        watched = {k: i for k, i in issues.items()
+                   if k in self.tasks and k.startswith(TICKET_CHANGE + "/") and i["state"].upper() == "OPEN"
+                   and status_from_labels(i["labels"]) is Status.WATCHING}
+        watched_rows = "\n\n".join(
+            f"### {k}: {self.tasks[k].text} (seen {self.state.task(k).get('sightings', 1)} time(s))\n\n"
+            f"{self.ticket_bodies.get(k, '')[:1500]}" for k in watched) or "none"
         prompt = review.prompt("ticket_triage", repo_root=self.base_wt, target=self.t.name,
-                               project_dir=self.t.project_dir, tickets=rows)
+                               project_dir=self.t.project_dir, tickets=rows, watched=watched_rows)
         res = self.claude.run(prompt, self.base_wt, self.cfg.agents["planner"], TRIAGE_SCHEMA,
                               log_name=f"ticket-triage-{len(need)}")
         if res.limited:
@@ -578,7 +587,20 @@ class Pipeline:
                 continue
             reason = str(e.get("reason", "")).strip() or "no reason given"
             n = issues[key]["number"]
-            if e.get("verdict") == "approve":
+            verdict = e.get("verdict")
+            if verdict == "recurs" and str(e.get("same_as", "")).strip() not in watched:
+                verdict = "watch"  # names no watched problem: track this one instead
+            if verdict == "recurs":
+                self.sighting(gh, issues, str(e["same_as"]).strip(), key, reason)
+            elif verdict == "watch":
+                gh.set_status(n, Status.WATCHING, Status.PROPOSED)
+                issues[key]["labels"] = [Status.WATCHING.label]
+                self.state.task(key)["sightings"] = 1
+                gh.comment(n, review.bot(
+                    f"**Watching** (seen once): {reason} It becomes work once it has been seen "
+                    f"{self.t.watch_promote_at} times; agents that hit it again count as sightings. "
+                    f"Set `{Status.PENDING_IMPLEMENTATION.label}` to fix it now, or close it."))
+            elif verdict == "approve":
                 gh.set_status(n, Status.PENDING_IMPLEMENTATION, Status.PROPOSED)
                 issues[key]["labels"] = [Status.PENDING_IMPLEMENTATION.label] + [
                     l for l in issues[key]["labels"] if l != Status.PROPOSED.label]
@@ -589,11 +611,32 @@ class Pipeline:
                 gh.comment(n, review.bot(f"**Needs your decision:** {reason} Approve by setting "
                                          f"`{Status.PENDING_IMPLEMENTATION.label}`; close it to reject."))
             done.add(key)
-            self.log(f"#{n} triage: {e.get('verdict')}: {reason}")
+            self.log(f"#{n} triage: {verdict}: {reason}")
         with self.state.lock:
             self.state.data["triaged"] = sorted(done, key=key_sort)
         self.state.save()
         self.log(f"triaged {len(need)} ticket(s); {approved} approved")
+
+    def sighting(self, gh: GitHub, issues: dict[str, dict], watched: str, key: str, reason: str) -> None:
+        """Ticket ``key`` reports the watched problem ``watched`` again: close it as a sighting,
+        and promote the watched one to pending implementation once it was seen often enough."""
+        n, w = issues[key]["number"], issues[watched]["number"]
+        st = self.state.task(watched)
+        seen = st.get("sightings", 1) + 1
+        st["sightings"] = seen
+        body = self.ticket_bodies.get(key, "").replace(TICKET_MARKER, "").strip()
+        gh.comment(w, review.bot(f"**Seen again** (sighting {seen}), reported in #{n}: {reason}\n\n{body[:3000]}"))
+        gh.comment(n, review.bot(f"**Same problem as #{w}**, which is tracked there; closed as a sighting of it."))
+        gh.close_issue(n)
+        issues[key]["state"] = "CLOSED"
+        if seen >= self.t.watch_promote_at:
+            gh.set_status(w, Status.PENDING_IMPLEMENTATION, Status.WATCHING)
+            issues[watched]["labels"] = [Status.PENDING_IMPLEMENTATION.label]
+            st.pop("unblocks", None)  # rated again, now with its sightings as evidence
+            gh.comment(w, review.bot(f"**Promoted:** seen {seen} times, so it recurs; it is now work."))
+            self.log(f"#{w} {self.tasks[watched].text[:60]!r} seen {seen} times: promoted from watching")
+        else:
+            self.log(f"#{n} is a sighting of watched #{w} ({seen}/{self.t.watch_promote_at})")
 
     def ticket_origin(self, key: str, seen: frozenset[str] = frozenset()) -> str | None:
         """The OpenSpec change whose work led to this ticket, following tickets filed while
@@ -627,15 +670,22 @@ class Pipeline:
         if not self.cfg.agents["implementer"].light_model:
             return
         live = (Status.PENDING_IMPLEMENTATION, Status.IN_PROGRESS, Status.CHANGES_REQUESTED)
+        def stale(k: str) -> bool:  # rated unblocking under an older rule, and not started
+            st = self.state.task(k)
+            return bool(st.get("unblocks")) and st.get("unblocks_rule") != UNBLOCKS_RULE and not st.get("runs")
         need = [k for k in open_tickets
                 if status_from_labels(issues[k]["labels"]) in live and k not in self.tiers_tried
-                and ("unblocks" not in self.state.task(k)
+                and ("unblocks" not in self.state.task(k) or stale(k)
                      or ("tier" not in self.state.task(k) and not self.state.task(k).get("runs")))]
         if not need:
             return
         self.tiers_tried |= set(need)
         self.log(f"rating {len(need)} approved ticket(s)")
-        rows = "\n\n".join(f"### {k}: {self.tasks[k].text}\n\n{self.ticket_bodies.get(k, '')[:4000]}" for k in need)
+        def seen(k: str) -> str:
+            n = self.state.task(k).get("sightings", 0)
+            return f"\n\nPromoted from watching after being seen {n} times." if n > 1 else ""
+        rows = "\n\n".join(f"### {k}: {self.tasks[k].text}\n\n{self.ticket_bodies.get(k, '')[:4000]}{seen(k)}"
+                             for k in need)
         prompt = review.prompt("ticket_tiers", repo_root=self.base_wt, target=self.t.name,
                                project_dir=self.t.project_dir, tickets=rows)
         planner = self.cfg.agents["planner"]
@@ -656,7 +706,7 @@ class Pipeline:
                 st["tier"] = tier
                 light += tier == "light"
             if isinstance(e.get("unblocks"), bool):
-                st["unblocks"] = e["unblocks"]
+                st["unblocks"], st["unblocks_rule"] = e["unblocks"], UNBLOCKS_RULE
                 unblocking += e["unblocks"]
         self.state.save()
         self.log(f"rated {len(need)} ticket(s); {light} light, {unblocking} unblocking")
@@ -1174,6 +1224,8 @@ class Pipeline:
                     self.held[key] = why
                     self.log(f"{self.what(key)} {why}")
                 continue
+            if self.unblocking(key) and self.unblocking_running() >= self.t.unblocking_slots:
+                continue  # capped: milestone work keeps the other slots
             self.held.pop(key, None)
             self.start(kind, key, free_impl.pop(0), issues[key], prs.get(key))
         for key in by_status(Status.PENDING_REVIEW):
@@ -1237,6 +1289,14 @@ class Pipeline:
             st = self.state.task(key)
             return milestones.ticket_rank(self.t.milestones, st.get("origin"), st.get("unblocks", False))
         return milestones.rank(self.t.milestones, self.tasks[key].change)
+
+    def unblocking(self, key: str) -> bool:
+        return key.startswith(TICKET_CHANGE + "/") and bool(self.state.task(key).get("unblocks"))
+
+    def unblocking_running(self) -> int:
+        """Unblocking tickets holding an implementer slot, ours or an old dispatcher's."""
+        ours = {k for k, j in self.jobs.items() if j.kind in IMPL_KINDS}
+        return sum(1 for k in ours | set(self.foreign_keys) if self.unblocking(k))
 
     def overlap_hold(self, key: str, issues: dict[str, dict], prs: dict[str, dict]) -> str:
         """Why ``key`` should wait before starting: another task in flight touches its files.

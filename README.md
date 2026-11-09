@@ -78,6 +78,7 @@ release branch.
 | `status: blocked by task` | A blocker is unfinished (see the issue's blocked-by links) | sync |
 | `status: needs decision` | Needs information or a decision; the question is in the latest comment | **you** |
 | `status: proposed` | Agent-filed ticket waiting for approval (triage approves technical ones when `auto_approve` is on) | **you** / triage |
+| `status: watching` | A one-off problem tracked aside; becomes `pending implementation` once seen `watch_promote_at` times | triage |
 | `status: awaiting task` | Decided, but waits for other issues (its blocked-by links) to be done | dispatcher |
 | `status: pending implementation` | Unblocked, waiting for a free agent | dispatcher |
 | `status: in progress` | Implementer working | implementer |
@@ -105,6 +106,15 @@ ticket whose text names unfinished tasks is registered the same way.
 they notice outside their scope. They arrive as issues labelled `kind: defect` or
 `kind: improvement` in `status: proposed`. Approve by setting `status: pending
 implementation` (the ticket body is the spec); reject by closing it.
+
+With `auto_approve`, triage also sorts out one-off problems (a test that failed once under
+load, a stray process). It moves them to `status: watching` instead of approving them.
+A later ticket reporting the same problem is closed as a sighting of the watched one, and
+once a problem has been seen `watch_promote_at` times (default 3), it moves to `pending
+implementation`. Approved tickets are rated `unblocks` (ahead of all planned work) only with
+evidence that the breakage keeps happening: it fails every time, or it was promoted from
+watching. Unblocking tickets hold at most `unblocking_slots` implementer slots at once
+(default 1).
 
 ## The review gate
 
