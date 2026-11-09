@@ -9,6 +9,28 @@ def test_columns_grow_with_jobs():
     assert [panes.columns_for(n) for n in (0, 1, 2, 4, 5, 9, 10)] == [1, 1, 2, 2, 3, 3, 4]
 
 
+def test_maximized_dispatcher_log_fills_the_screen(tmp_path):
+    from textual.widgets import RichLog
+    work = tmp_path / "work"
+    (work / "logs").mkdir(parents=True)
+    (work / "logs" / "pipeline.log").write_text(
+        "".join(f"2026-11-09 10:00:{i % 60:02d} [arpg] line {i}\n" for i in range(1500)), encoding="utf-8")
+
+    async def go():
+        app = panes.PanesApp("arpg", work, ".", interval=60)
+        async with app.run_test(size=(100, 40)) as pilot:
+            log = app.query_one("#log", RichLog)
+            await pilot.pause()
+            small = log.size.height
+            app.set_focus(log)
+            await pilot.press("m")
+            await pilot.pause()
+            assert app.screen.maximized is log and log.size.height > small * 3
+            assert len(log.lines) >= panes.LOG_HISTORY  # history to scroll back through
+
+    asyncio.run(go())
+
+
 def test_step_lines_use_the_theme_accent_not_ansi_magenta():
     from textual.app import App
     themes = App().available_themes

@@ -80,6 +80,7 @@ class PaneState:
 
 
 MAX_ENTRIES = 3000
+LOG_HISTORY = 1000  # dispatcher log lines loaded when the watcher opens
 QUIET = ("tool", "error", "denied")  # folded into one summary line unless tool detail is on
 
 
@@ -209,6 +210,7 @@ class PanesApp(App):
     .job .about { height: auto; max-height: 2; text-style: bold; text-overflow: ellipsis; }
     .stream { height: 1fr; scrollbar-size-vertical: 1; overflow-x: hidden; }
     #log { height: 9; border: round $secondary; scrollbar-size-vertical: 1; overflow-x: hidden; }
+    #log.-maximized { height: 1fr; }  /* maximizing must give it the screen, not keep 9 rows */
     """
     BINDINGS = [
         Binding("m", "toggle_max", "maximize pane"),
@@ -238,8 +240,8 @@ class PanesApp(App):
     def compose(self) -> ComposeResult:
         yield Static(id="head")
         yield Grid(Static("no running jobs", id="idle"), id="jobs")
-        yield RichLog(id="log", wrap=True, markup=False, highlight=False, max_lines=2000, auto_scroll=True,
-                      min_width=1)
+        yield RichLog(id="log", wrap=True, markup=False, highlight=False, max_lines=LOG_HISTORY * 2,
+                      auto_scroll=True, min_width=1)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -253,7 +255,7 @@ class PanesApp(App):
         self.theme_changed_signal.subscribe(self, self.save_theme)
         log = self.query_one("#log", RichLog)
         log.border_title = "dispatcher log"
-        for line in self.log_tail.read()[-200:]:
+        for line in self.log_tail.read()[-LOG_HISTORY:]:  # enough to scroll back through, maximized
             log.write(line)
         self.tick()
         self.set_interval(self.interval, self.tick)
