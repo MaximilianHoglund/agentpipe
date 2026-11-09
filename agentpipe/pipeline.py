@@ -2928,6 +2928,7 @@ class Pipeline:
                         "this catches it. The engine's change is merged work: adapt the front (its tests, "
                         "scenes, scripts) to it rather than undoing it, unless the engine change is plainly "
                         "wrong, then say so in `summary`."
+                        + (" " + self.t.dev_gate_note.strip() if self.t.dev_gate_note.strip() else "")
                         + (f"\n\nCommits since it last passed ({since[:8]}):" + fence(log) if log else "")
                         + "\n\nThe gate's output:" + fence(g.tail(5000)))
                 if ds.get("ticket") and self.gh_issue_open(ds["ticket"]):

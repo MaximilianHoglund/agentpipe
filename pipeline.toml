@@ -233,6 +233,8 @@ front_paths = ["crates/bridge/*", "game/*", "scripts/build-bridge.*", "scripts/e
 front_implementers = 2
 dev_gate = "pwsh -NoProfile -File scripts/check.ps1 -Full"
 dev_gate_minutes = 60
+# Max, 2026-11-09: Godot tests check drawing; fight outcomes are the engine's (arpg CLAUDE.md).
+dev_gate_note = "A Godot test that failed because a fight ended differently than it expected is the test's fault: Godot tests check that fights are drawn properly, not how they end (see CLAUDE.md). Don't re-tune its scenario or search for another seed; draw a fixed recorded run or fixed result data instead, and if the outcome itself matters, check it in sim's tests."
 # Files most tasks edit in passing; their conflicts are additive and resolved mechanically,
 # so they don't hold tasks apart (top conflict files in Nov 2026: design.md, lib.rs).
 overlap_ignore = ["**/lib.rs", "**/mod.rs", "**/Cargo.toml", "Cargo.lock", "README.md", "docs/*.md",

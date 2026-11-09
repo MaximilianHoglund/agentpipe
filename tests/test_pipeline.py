@@ -1690,7 +1690,7 @@ def test_the_dev_gate_runs_when_the_base_moved_and_its_interval_passed(pl):
 
 def test_a_failing_dev_gate_files_one_approved_front_ticket_then_comments_on_it(pl):
     p, gh = pl
-    p.t.dev_gate = "check -Full"
+    p.t.dev_gate, p.t.dev_gate_note = "check -Full", "Draw fixed runs."
     p.git = _DevGit()
     p.dev_gate_path.parent.mkdir(parents=True, exist_ok=True)
     p.dev_gate_path.write_text('{"last_ok": "base0"}')
@@ -1701,6 +1701,7 @@ def test_a_failing_dev_gate_files_one_approved_front_ticket_then_comments_on_it(
     key = f"ticket/{n}"
     assert p.state.task(key)["track"] == "front" and key in p.state.data["triaged"]
     assert "godot_project failed" in gh.issues[n]["body"] and "monsters wait" in gh.issues[n]["body"]
+    assert "Draw fixed runs." in gh.issues[n]["body"]
     p.job_dev_gate("base2")
     assert len([i for i in gh.issues.values() if "full gate fails" in i["title"]]) == 1
     assert "base2"[:8] in gh.comments_by[n][-1]["body"]

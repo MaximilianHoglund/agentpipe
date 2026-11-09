@@ -104,6 +104,8 @@ class Target:
     # what they broke, without holding the engine's merges (Max, 2026-11-09). Empty: off.
     dev_gate: str = ""
     dev_gate_minutes: int = 60
+    # Appended to the dev gate's ticket: the project's own rule for fixing such a failure.
+    dev_gate_note: str = ""
     # Paths (fnmatch globs, repo-relative) that don't count when the scheduler keeps tasks
     # touching the same files apart: files nearly every task edits and whose conflicts are
     # additive, such as module lists and decision logs.
@@ -279,6 +281,7 @@ def load(path: Path) -> Config:
             front_implementers=int(t.get("front_implementers", 0)),
             dev_gate=t.get("dev_gate", ""),
             dev_gate_minutes=int(t.get("dev_gate_minutes", 60)),
+            dev_gate_note=t.get("dev_gate_note", ""),
             overlap_ignore=list(t.get("overlap_ignore", [])),
             parked=list(t.get("parked", [])),
             priority=list(t.get("priority", [])),
