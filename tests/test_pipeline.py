@@ -779,6 +779,26 @@ def test_clean_workspace_crates_prunes_checkout_scratch(pl, tmp_path, monkeypatc
     p.clean_workspace_crates(ws, "impl-1")  # slot without a target dir: no error
 
 
+def test_cap_cache_deletes_largest_idle_slots_down_to_three_quarters(pl):
+    p, _ = pl
+    mb = 2**20
+    for root, slot, size in (("target", "impl-0", 40), ("target", "impl-1", 30), ("target", "review-0", 20),
+                             ("tmp", "impl-1", 5), ("target", "merge", 10)):
+        d = p.t.work_dir / root / slot
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "blob").write_bytes(b"\0" * size * mb)
+    p.cap_cache()
+    assert (p.t.work_dir / "target" / "impl-1").exists()  # no cap by default
+    p.jobs["k"] = _Job("implement", "impl-0")  # busy: never touched, though largest
+    p.t.cache_max_gb = 100 / 1024  # 105 MB in all, cap 100 MB, so down to 75 MB
+    p.cap_cache()
+    left = {f"{d.parent.name}/{d.name}" for r in ("target", "tmp") for d in (p.t.work_dir / r).iterdir()}
+    assert left == {"target/impl-0", "target/review-0", "tmp/impl-1", "target/merge"}
+    p.t.cache_max_gb = 1  # under the cap: nothing more goes
+    p.cap_cache()
+    assert len(list((p.t.work_dir / "target").iterdir())) == 3
+
+
 def test_approved_ticket_waits_for_the_tasks_it_names(pl):
     p, gh = pl
     n = gh.add(TICKET_MARKER + "\nNeeds c/1.2 first.", S.PENDING_IMPLEMENTATION, extra=("kind: defect",))

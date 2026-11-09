@@ -203,6 +203,9 @@ context = ["docs/design.md", "docs/decisions.md", "docs/roadmap.md", "docs/agent
 # PATH: agents' Git Bash otherwise can't find pwsh (a Store app alias in WindowsApps).
 # Ticket #217: slots reuse a target dir across branches; clean the game's crates first.
 clean_workspace_crates = true
+# Slot build dirs grow to ~25 GB each (245 GB on the desktop, 2026-11-09; the laptop's filled C:
+# and broke WSL). A slot rebuilds in a few minutes after it is deleted.
+cache_max_gb = 80
 # Max, 2026-11-07: technical tickets shouldn't wait for him; triage approves them.
 auto_approve = true
 # The gate checks rustfmt, so dev stays formatted: after keeping both sides of an additive
@@ -291,6 +294,8 @@ repo_root = "~/arpg-manager"
 # (Max, 2026-11-08: fewer agents there).
 max_implementers = 3
 max_reviewers = 2
+# The laptop's C: holds the WSL disk; 40 GB leaves room for riftbound-data and the rest.
+cache_max_gb = 40
 # DISPLAY: the windowed Godot tests draw on Xvfb :99 (software Vulkan), which preflight starts
 # with ~/bin/ensure-xvfb.sh; WSLg's display restarted under the tests' load and hung them
 # (2026-11-09). WAYLAND_DISPLAY is blanked so Godot doesn't pick WSLg's Wayland.

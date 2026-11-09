@@ -62,6 +62,10 @@ class Target:
     # artifact for a same-path workspace crate as fresh. True cleans the workspace's own
     # crates (not dependencies) from the slot's target before each gate and agent run.
     clean_workspace_crates: bool = False
+    # Cap in GB on the per-slot build and temp dirs (work_dir/target/* and work_dir/tmp/*)
+    # together. Over it, the dispatcher deletes idle slots' dirs, largest first, down to 3/4
+    # of the cap; a deleted slot rebuilds from scratch. 0 means no cap.
+    cache_max_gb: float = 0.0
     # Milestone releases: when every change of the next milestone is done on `base`,
     # merge it into `release_branch`, tag it and publish a GitHub release.
     release_branch: str = ""
@@ -227,6 +231,7 @@ def load(path: Path) -> Config:
             extra_tools=list(t.get("extra_tools", [])),
             env={k: str(v) for k, v in t.get("env", {}).items()},
             clean_workspace_crates=bool(t.get("clean_workspace_crates", False)),
+            cache_max_gb=float(t.get("cache_max_gb", 0)),
             release_branch=t.get("release_branch", ""),
             milestones=[Milestone(m["tag"], m.get("title", m["tag"]), list(m["changes"]),
                                   list(m.get("play", [])), list(m.get("deferred", [])))

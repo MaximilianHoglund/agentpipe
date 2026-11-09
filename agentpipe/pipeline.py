@@ -45,6 +45,26 @@ VERDICT_WORDS = {review.APPROVE: "APPROVED", review.REQUEST_CHANGES: "REJECTED, 
                  review.CONFLICT: "REJECTED, conflicts with the base branch"}
 
 
+def dir_bytes(path: Path) -> int:
+    """Bytes in the files under `path`; links aren't followed and unreadable entries count 0."""
+    total = 0
+    stack = [path]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as it:
+                for e in it:
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            stack.append(e.path)
+                        elif e.is_file(follow_symlinks=False):
+                            total += e.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+    return total
+
+
 def review_line(what: str, pr: int, v: dict, round_: int, max_rounds: int) -> str:
     """The dispatcher's one line per review: the outcome in words, what blocks, and why."""
     blocking = sum(1 for f in v["findings"] if f.get("severity") == "blocking")
@@ -816,7 +836,35 @@ class Pipeline:
                 return self.pause(str(e))
             if self.t.milestones and RELEASE_KEY not in self.jobs:
                 self.check_milestones()
+            self.cap_cache()
         self.schedule()
+
+    def cap_cache(self) -> None:
+        """Keep the slots' build and temp dirs under `cache_max_gb` (runs once per sync).
+
+        Without a cap they grow without bound: each slot keeps its own cargo target dir, about
+        8 GB apiece for arpg and up to 26 GB after a few days; on 2026-11-09 they filled the
+        laptop's disk and broke WSL. Runs on the tick thread, which is the only thing that
+        starts jobs, so a slot that is idle here stays idle until the deletion is done."""
+        if self.t.cache_max_gb <= 0:
+            return
+        busy = {j.slot for j in self.jobs.values()}
+        dirs = [d for root in ("target", "tmp") if (self.t.work_dir / root).is_dir()
+                for d in (self.t.work_dir / root).iterdir() if d.is_dir()]
+        sizes = {d: dir_bytes(d) for d in dirs}
+        total, cap = sum(sizes.values()), self.t.cache_max_gb * 2**30
+        if total <= cap:
+            return
+        idle = sorted((d for d in dirs if d.name not in busy), key=sizes.get, reverse=True)
+        freed = []
+        for d in idle:
+            if total <= cap * 0.75:
+                break
+            shutil.rmtree(d, ignore_errors=True)
+            total -= sizes[d]
+            freed.append(f"{d.parent.name}/{d.name} ({sizes[d] / 2**30:.1f} GB)")
+        self.log(f"build cache over {self.t.cache_max_gb:g} GB; deleted " + (", ".join(freed) or "nothing (all busy)")
+                 + f"; now about {total / 2**30:.1f} GB")
 
     def check_environment(self) -> None:
         """Run preflight at start, then once per sync interval while it fails."""
