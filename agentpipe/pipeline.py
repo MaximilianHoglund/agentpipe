@@ -1105,8 +1105,14 @@ class Pipeline:
                     continue
                 self.to_decision(issues[key]["number"], s, f"Status is `{s.value}` but no open PR was found.")
         self.record_awaiting(raw)
-        for key in by_status(Status.IN_PROGRESS) + by_status(Status.CHANGES_REQUESTED) + \
-                by_status(Status.PENDING_IMPLEMENTATION):
+        # Earliest milestone (or `priority`) first; within one rank, work under way resumes before
+        # fresh starts. Resuming first across ranks let Step 3 revisions take slots from Step 1
+        # tasks (Max, 2026-11-09: everything toward the next test build goes first).
+        impl_order = (Status.IN_PROGRESS, Status.CHANGES_REQUESTED, Status.PENDING_IMPLEMENTATION)
+        queue = sorted((k for s in impl_order for k in by_status(s)),
+                       key=lambda k: (self.rank_of(k), impl_order.index(status_from_labels(issues[k]["labels"])),
+                                      key_sort(k)))
+        for key in queue:
             if not free_impl:
                 break
             status = status_from_labels(issues[key]["labels"])

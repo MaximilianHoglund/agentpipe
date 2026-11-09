@@ -106,6 +106,23 @@ def test_fills_implementer_slots_resuming_interrupted_work_first(pl):
     assert len(p.started) == 2
 
 
+def test_earlier_milestone_starts_before_later_milestones_resumed_work(pl):
+    from agentpipe.config import Milestone
+    p, gh = pl
+    p.t.milestones = [Milestone("m1", "", ["d"]), Milestone("m2", "", ["c"])]
+    d = p.base_wt / "openspec" / "changes" / "d"
+    d.mkdir(parents=True)
+    (d / "tasks.md").write_text("- [ ] 1.1 x\n- [ ] 1.2 y\n")
+    p.t.changes_spec = ["c", "d"]
+    p.tasks.update({t.key: t for t in parse_tasks("d", "- [ ] 1.1 x\n- [ ] 1.2 y\n")})
+    p.plan = Plan("fp", {k: TaskDeps() for k in p.tasks})
+    task_issue(gh, "c/1.1", S.IN_PROGRESS)  # later milestone, under way
+    task_issue(gh, "d/1.2", S.PENDING_IMPLEMENTATION)  # earlier milestone, fresh
+    task_issue(gh, "d/1.1", S.IN_PROGRESS)  # earlier milestone, under way: resumes first
+    p.tick()
+    assert p.started == [("implement", "d/1.1", "impl-0"), ("implement", "d/1.2", "impl-1")]
+
+
 def test_reviews_only_unreviewed_heads_and_merges_one_at_a_time(pl):
     p, gh = pl
     task_issue(gh, "c/1.1", S.PENDING_REVIEW)
