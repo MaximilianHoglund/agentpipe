@@ -916,23 +916,61 @@ class Pipeline:
         return ("\n" + "\n".join(f"- {x}" for x in titles)) if titles else "none"
 
     def file_tickets(self, source: str, tickets: list[dict] | None) -> None:
-        known = {t.text.strip().lower() for k, t in self.tasks.items() if k.startswith(TICKET_CHANGE + "/")}
         for tk in tickets or []:
-            title = tk.get("title", "").strip()[:120]
-            if not title or title.lower() in known:
-                continue
-            kind = tk["kind"] if tk.get("kind") in ("defect", "improvement") else "improvement"
-            body = (f"{TICKET_MARKER}\n{tk.get('body', '').strip()}\n\n---\n_Filed by the pipeline from "
-                    f"{source}. Approve by setting `{Status.PENDING_IMPLEMENTATION.label}`; close it to reject._\n")
-            n = self.gh.create_issue(title, body, Status.PROPOSED, (f"kind: {kind}",))
-            with self.state.lock:
-                self.state.data.setdefault("tickets", []).append(n)
-            self.state.save()
-            key = f"{TICKET_CHANGE}/{n}"
-            self.tasks[key] = Task(TICKET_CHANGE, str(n), title, False, kind, 0)
-            self.ticket_bodies[key] = body
-            known.add(title.lower())
-            self.log(f"#{n} ticket filed ({kind}) from {source}: {title}")
+            self.file_ticket(tk, f"_Filed by the pipeline from {source}. Approve by setting "
+                                 f"`{Status.PENDING_IMPLEMENTATION.label}`; close it to reject._",
+                             Status.PROPOSED, source)
+
+    def file_ticket(self, tk: dict, footer: str, status: Status, source: str) -> int | None:
+        """Create one ticket issue owned by this target; None if its title is already open."""
+        known = {t.text.strip().lower() for k, t in self.tasks.items() if k.startswith(TICKET_CHANGE + "/")}
+        title = tk.get("title", "").strip()[:120]
+        if not title or title.lower() in known:
+            return None
+        kind = tk["kind"] if tk.get("kind") in ("defect", "improvement") else "improvement"
+        body = f"{TICKET_MARKER}\n{tk.get('body', '').strip()}\n\n---\n{footer}\n"
+        n = self.gh.create_issue(title, body, status, (f"kind: {kind}",))
+        with self.state.lock:
+            self.state.data.setdefault("tickets", []).append(n)
+        self.state.save()
+        key = f"{TICKET_CHANGE}/{n}"
+        self.tasks[key] = Task(TICKET_CHANGE, str(n), title, False, kind, 0)
+        self.ticket_bodies[key] = body
+        self.log(f"#{n} ticket filed ({kind}) from {source}: {title}")
+        return n
+
+    @property
+    def inbox_dir(self) -> Path:
+        """`agentpipe ticket` drops tickets here; the running dispatcher files them."""
+        return self.t.work_dir / "inbox"
+
+    def take_inbox(self) -> None:
+        """File the tickets Max wrote with `agentpipe ticket`. The running dispatcher holds
+        state.json in memory, so another process can't register a ticket there itself. Max's
+        tickets are approved unless he said otherwise, skip triage, and take the origin he gave
+        (their place in the queue). A file is removed once its issue exists."""
+        d = self.inbox_dir
+        for f in sorted(d.glob("*.json")) if d.is_dir() else ():
+            try:
+                tk = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue  # mid-write; next tick
+            approve = tk.get("approve", True)
+            status = Status.PENDING_IMPLEMENTATION if approve else Status.PROPOSED
+            footer = ("_Filed by the owner._" if approve else
+                      f"_Filed by the owner for later. Approve by setting `{Status.PENDING_IMPLEMENTATION.label}`._")
+            n = self.file_ticket(tk, footer, status, "the owner")
+            if n is not None:
+                key = f"{TICKET_CHANGE}/{n}"
+                if tk.get("origin"):
+                    self.state.task(key)["origin"] = tk["origin"]
+                with self.state.lock:
+                    self.state.data["triaged"] = sorted(set(self.state.data.get("triaged", [])) | {key},
+                                                        key=key_sort)
+                self.state.save()
+            else:
+                self.log(f"inbox ticket {f.name}: a ticket titled {tk.get('title', '')!r} is already open")
+            f.unlink(missing_ok=True)
 
     def spec_ref(self, t: Task) -> str:
         if t.change == TICKET_CHANGE:
@@ -1020,6 +1058,10 @@ class Pipeline:
             return
         self.refresh_foreign()
         self.reload_config()
+        try:
+            self.take_inbox()
+        except proc.CommandError as e:
+            self.log(f"could not file an inbox ticket; retrying next tick: {str(e)[-200:]}")
         if self.resume_file.exists():
             self.resume_file.unlink(missing_ok=True)
             clear_pause(self.state)

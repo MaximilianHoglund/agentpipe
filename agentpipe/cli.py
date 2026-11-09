@@ -32,7 +32,8 @@ def main(argv: list[str] | None = None) -> int:
                         ("watch", "live view of the dispatcher and what each running agent is doing"),
                         ("denials", "review tool calls agents were refused, grouped, with the reason"),
                         ("wait", "park a decided issue until other issues or tasks are done, then release it"),
-                        ("rounds-reset", "give a PR out of review rounds a fresh set and send it back for revision")):
+                        ("rounds-reset", "give a PR out of review rounds a fresh set and send it back for revision"),
+                        ("ticket", "file a ticket as the owner: approved, skips triage")):
         p = sub.add_parser(name, help=help_)
         p.add_argument("target")
         if name == "plan":
@@ -53,6 +54,12 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--plain", action="store_true", help="redrawn text view instead of panes")
             p.add_argument("--linked", action="store_true",
                            help="closing this watcher stops the dispatcher (start opens one like this)")
+        if name == "ticket":
+            p.add_argument("--title", required=True)
+            p.add_argument("--body-file", type=Path, required=True, help="Markdown file with the ticket body")
+            p.add_argument("--kind", choices=("defect", "improvement"), default="improvement")
+            p.add_argument("--origin", help="the OpenSpec change it belongs to, which sets its place in the queue")
+            p.add_argument("--proposed", action="store_true", help="file it unapproved, in proposed")
         if name == "start":
             p.add_argument("--no-watch", action="store_true", help="don't open a watcher window")
         if name == "stop":
@@ -160,6 +167,20 @@ def main(argv: list[str] | None = None) -> int:
             service.request_stop(target.work_dir)
             print(f"{target.name}: stop requested; dispatcher {pid} exits once running agents finish "
                   f"(watch shows progress; --now kills it)")
+        return 0
+
+    if args.cmd == "ticket":
+        import json
+        import time
+        inbox = target.work_dir / "inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        tk = {"title": args.title, "body": args.body_file.read_text(encoding="utf-8"), "kind": args.kind,
+              "origin": args.origin, "approve": not args.proposed}
+        name = f"{time.time_ns()}"
+        (inbox / f"{name}.tmp").write_text(json.dumps(tk), encoding="utf-8")
+        (inbox / f"{name}.tmp").replace(inbox / f"{name}.json")
+        print(f"{target.name}: ticket queued; the dispatcher files it on its next tick "
+              f"(a stopped one, when it starts)")
         return 0
 
     if args.cmd == "resume":

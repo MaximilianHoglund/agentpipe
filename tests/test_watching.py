@@ -130,3 +130,37 @@ def test_unblocking_tickets_hold_at_most_their_capped_slots(pl):
     p.jobs.pop("c/1.1")
     p.tick()
     assert a in [s[1] for s in p.started] and b in [s[1] for s in p.started]
+
+
+# ------------------------------------------------------------------ owner tickets
+def test_owner_tickets_from_the_inbox_are_filed_approved_and_skip_triage(pl):
+    import json
+    p, gh = pl
+    p.ticket_bodies = {}
+    p.inbox_dir.mkdir(parents=True)
+    (p.inbox_dir / "1.json").write_text(json.dumps(
+        {"title": "Force outcomes", "body": "Convert seeded tests.", "kind": "improvement",
+         "origin": "combat-simulation", "approve": True}), encoding="utf-8")
+    (p.inbox_dir / "2.json").write_text(json.dumps(
+        {"title": "Later idea", "body": "x", "approve": False}), encoding="utf-8")
+    p.take_inbox()
+    assert not list(p.inbox_dir.glob("*.json"))
+    by_title = {i["title"]: i for i in gh.issues.values()}
+    owner, later = by_title["Force outcomes"], by_title["Later idea"]
+    assert S.PENDING_IMPLEMENTATION.label in owner["labels"] and "Filed by the owner" in owner["body"]
+    assert S.PROPOSED.label in later["labels"]
+    k = f"ticket/{owner['number']}"
+    assert owner["number"] in p.state.data["tickets"] and k in p.issues_by_key(gh.list_issues())
+    assert p.state.task(k)["origin"] == "combat-simulation" and k in p.state.data["triaged"]
+
+
+def test_a_duplicate_owner_ticket_is_dropped_from_the_inbox(pl):
+    import json
+    p, gh = pl
+    p.ticket_bodies = {}
+    ticket(p, gh, S.PENDING_IMPLEMENTATION, "Force outcomes")
+    p.inbox_dir.mkdir(parents=True)
+    (p.inbox_dir / "1.json").write_text(json.dumps({"title": "Force outcomes", "body": "x"}), encoding="utf-8")
+    before = len(gh.issues)
+    p.take_inbox()
+    assert len(gh.issues) == before and not list(p.inbox_dir.glob("*.json"))

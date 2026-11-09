@@ -107,6 +107,10 @@ they notice outside their scope. They arrive as issues labelled `kind: defect` o
 `kind: improvement` in `status: proposed`. Approve by setting `status: pending
 implementation` (the ticket body is the spec); reject by closing it.
 
+To file one yourself: `agentpipe ticket <target> --title "..." --body-file body.md [--origin <change>]`.
+It is filed approved and skips triage (`--proposed` files it unapproved); `--origin` sets its place in
+the queue. The running dispatcher files it on its next tick.
+
 With `auto_approve`, triage also sorts out one-off problems (a test that failed once under
 load, a stray process). It moves them to `status: watching` instead of approving them.
 A later ticket reporting the same problem is closed as a sighting of the watched one, and
