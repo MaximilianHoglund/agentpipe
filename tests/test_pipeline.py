@@ -673,6 +673,36 @@ def test_stop_request_beats_a_pending_handoff(pl, monkeypatch):
     assert not started and not p.pid_file.exists()
 
 
+def test_github_outage_in_a_tick_does_not_crash_the_dispatcher(pl):
+    p, gh = pl
+    p.cfg.poll_seconds = 0
+    lines, ticks = [], []
+    p._log = lines.append
+
+    def tick():
+        ticks.append(1)
+        if len(ticks) == 1:
+            raise proc_mod.CommandError(["gh", "pr", "list"], proc_mod.Result(1, "", "net/http: TLS handshake timeout"))
+        if len(ticks) == 2:
+            p.stop_file.write_text("", encoding="utf-8")
+
+    p.tick = tick
+    p.run_forever()
+    assert any("GitHub unreachable, trying again next tick" in l for l in lines)
+    assert len(ticks) >= 2 and lines[-1].endswith("stopped")
+
+
+def test_other_command_errors_still_crash_the_dispatcher(pl):
+    p, gh = pl
+
+    def tick():
+        raise proc_mod.CommandError(["gh", "pr", "merge"], proc_mod.Result(1, "", "HTTP 422: not mergeable"))
+
+    p.tick = tick
+    with pytest.raises(proc_mod.CommandError):
+        p.run_forever()
+
+
 def test_no_linked_watcher_means_no_watcher_stop(pl):
     p, gh = pl
     p.had_watcher = False

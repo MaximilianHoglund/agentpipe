@@ -3,10 +3,37 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 from pathlib import Path
 
 from agentpipe import proc
 from agentpipe.status import KIND_LABELS, LABEL_INFO, LEGACY_PENDING_APPROVAL, PIPELINE_LABEL, Status
+
+# Failures before the request reached GitHub: retrying can't repeat a write.
+_UNSENT = re.compile(r"TLS handshake timeout|dial tcp|connection refused|no such host|"
+                     r"could not resolve|network is unreachable|proxyconnect", re.I)
+# Any network failure, including ones after the request was sent (only safe to retry for reads).
+_NETWORK = re.compile(_UNSENT.pattern + r"|i/o timeout|timeout awaiting|connection reset|"
+                      r"unexpected EOF|EOF$|HTTP 50[234]|Bad Gateway|Service Unavailable|"
+                      r"Gateway Timeout|context deadline exceeded", re.I | re.M)
+
+
+def is_unsent(err: str) -> bool:
+    return bool(_UNSENT.search(err))
+
+
+def is_network(err: str) -> bool:
+    return bool(_NETWORK.search(err))
+
+
+def is_read(args: tuple[str, ...]) -> bool:
+    """A gh call that only reads: `list`/`view`/`status`/`diff`, or `api` without a write method."""
+    if args and args[0] == "api":
+        method = next((args[i + 1] for i, a in enumerate(args[:-1]) if a in ("-X", "--method")), "GET")
+        return method.upper() == "GET" and not any(a in ("-f", "-F", "--field", "--raw-field", "--input")
+                                                    for a in args)
+    return len(args) > 1 and args[1] in ("list", "view", "status", "diff", "checks")
 
 
 class GitHub:
@@ -17,8 +44,20 @@ class GitHub:
         self._run = run
 
     # -- plumbing ---------------------------------------------------------
+    RETRY_WAITS = (2, 5, 15)  # seconds before each retry of a call that hit a network error
+
     def _gh(self, *args: str, input: str | None = None) -> str:
-        return self._run([self.gh_bin, *args], self.cwd, input=input).out
+        """Run gh, retrying network errors: any call whose request never left (it can't have
+        taken effect), and read-only calls on any network error. A TLS handshake timeout on
+        `pr list` crashed the arpg dispatcher on 2026-11-09."""
+        for wait in (*self.RETRY_WAITS, None):
+            try:
+                return self._run([self.gh_bin, *args], self.cwd, input=input).out
+            except proc.CommandError as e:
+                if wait is None or not (is_unsent(str(e)) or (is_read(args) and is_network(str(e)))):
+                    raise
+                time.sleep(wait)
+        raise AssertionError("unreachable")
 
     def _json(self, *args: str):
         out = self._gh(*args).strip()

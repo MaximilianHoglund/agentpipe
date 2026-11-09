@@ -26,6 +26,7 @@ from agentpipe import conflicts
 from agentpipe.deps import (PLAN_SCHEMA, TIER_SCHEMA, TOUCHES_SCHEMA, TRIAGE_SCHEMA, Plan, PlanError, clean_tier, clean_touches, key_sort,
                             merge_plans, stale_keys, text_hash, validate_plan)
 from agentpipe.git import Git
+from agentpipe import github as github_mod
 from agentpipe.github import GitHub
 from agentpipe.status import (GRAPH_OWNED, TASK_MARKER, TICKET_CHANGE, TICKET_MARKER, Status,
                               status_from_labels, task_key_from_body)
@@ -1421,7 +1422,14 @@ class Pipeline:
                     # `start` while draining removes the stop file and opens a watcher: keep going.
                     self.stopping = False
                     self.log("stop cancelled: running again")
-                self.tick()
+                try:
+                    self.tick()
+                except proc.CommandError as e:
+                    # GitHub out of reach even after gh's retries: a blip mustn't kill the
+                    # dispatcher (2026-11-09, TLS handshake timeout); the next tick tries again.
+                    if not github_mod.is_network(str(e)):
+                        raise
+                    self.log(f"GitHub unreachable, trying again next tick: {str(e)[-200:]}")
                 if self.handing_off:
                     self.update_handoff()
                 if (once or self.stopping) and not self.jobs:
