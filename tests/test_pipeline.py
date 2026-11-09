@@ -507,27 +507,124 @@ def _code_pipeline(p, monkeypatch, revs, imports=""):
     return started
 
 
-def test_new_agentpipe_commit_drains_and_relaunches(pl, monkeypatch):
+def test_new_agentpipe_commit_hands_over_at_once_and_finishes_running_jobs(pl, monkeypatch):
+    import json
+    from agentpipe import handoff
     p, gh = pl
-    started = _code_pipeline(p, monkeypatch, ["a" * 40, "a" * 40, "b" * 40])
-    lines, ticks = [], []
+    started = _code_pipeline(p, monkeypatch, ["a" * 40, "b" * 40])
+    lines, ticks, files = [], [], []
     p._log = lines.append
-    job = type("J", (), {"kind": "implement", "slot": "impl-0"})()
+    job = type("J", (), {"kind": "implement", "slot": "impl-0", "issue": 5})()
+    mine = handoff.handoff_dir(p.t.work_dir) / f"{os.getpid()}.json"
 
     def tick():
         ticks.append(1)
         if len(ticks) == 1:
             p.jobs["c/1.1"] = job
-        elif len(ticks) == 4:
-            assert p.stopping  # nothing new starts while the job finishes
+            p.jobs["c/1.2"] = job
+        elif len(ticks) == 2:
+            assert started == ["t"] and p.stopping  # handed over before this tick: nothing new
+            files.append(json.loads(mine.read_text(encoding="utf-8"))["jobs"])
+            p.jobs.pop("c/1.2")
+            p.state.task("c/1.1")["runs"] = 1
+        elif len(ticks) == 3:
+            files.append(json.loads(mine.read_text(encoding="utf-8"))["jobs"])
             p.jobs.clear()
         assert len(ticks) < 10
 
     p.tick = tick
     p.run_forever()
-    assert any("agentpipe updated to bbbbbbb, restarting: starting nothing new" in l for l in lines)
+    assert set(files[0]) == {"c/1.1", "c/1.2"} and files[0]["c/1.1"]["issue"] == 5
+    assert set(files[1]) == {"c/1.1"}  # rewritten as jobs end
+    assert any("handed over to dispatcher 777; finishing 2 running job(s)" in l for l in lines)
+    assert p.pid_file.read_text(encoding="utf-8") == "777"  # the new dispatcher's
+    assert not mine.exists()  # removed once its last job ended
+    assert p.state.own_only == {"c/1.1", "c/1.2"}
+
+
+def test_handoff_waits_for_a_running_merge(pl, monkeypatch):
+    p, gh = pl
+    started = _code_pipeline(p, monkeypatch, ["a" * 40, "b" * 40])
+    ticks = []
+    merge = type("J", (), {"kind": "merge", "slot": "merge"})()
+    p.jobs["c/1.1"] = merge
+
+    def tick():
+        ticks.append(1)
+        if len(ticks) == 2:
+            assert p.restart_for and not started  # pending: no handoff while it merges
+            p.jobs.clear()
+        elif len(ticks) == 3:
+            assert started == ["t"]
+        assert len(ticks) < 10
+
+    p.tick = tick
+    p.run_forever()
     assert started == ["t"]
-    assert p.pid_file.read_text(encoding="utf-8") == "777"  # handed to the new dispatcher
+
+
+def test_new_dispatcher_leaves_handed_over_work_and_slots_alone(pl, monkeypatch):
+    from agentpipe import handoff, service
+    p, gh = pl
+    monkeypatch.setattr(service, "is_alive", lambda pid: pid == 4242)
+    handoff.write(p.t.work_dir, 4242, {"c/1.3": {"kind": "implement", "slot": "impl-0", "issue": 9,
+                                                 "batch": ["c/1.3", "c/1.4"]}})
+    task_issue(gh, "c/1.1", S.PENDING_IMPLEMENTATION)
+    task_issue(gh, "c/1.2", S.PENDING_IMPLEMENTATION)
+    task_issue(gh, "c/1.3", S.IN_PROGRESS)  # would be resumed if it weren't handed over
+    task_issue(gh, "c/1.4", S.IN_PROGRESS)  # its batch follower
+    lines = []
+    p._log = lines.append
+    p.tick()
+    assert p.started == [("implement", "c/1.1", "impl-1")]  # impl-0 is the old dispatcher's
+    assert any(l.endswith("start implement c/1.3 (#9) on impl-0: finishing on dispatcher 4242") for l in lines)
+    # The old dispatcher finishes: its record of the task is taken over from state.json.
+    disk = p.state.read()
+    disk["tasks"]["c/1.3"] = {"runs": 3}
+    p.state.path.write_text(__import__("json").dumps(disk), encoding="utf-8")
+    handoff.remove(p.t.work_dir, 4242)
+    p.jobs.clear()
+    synced = []
+    p.sync = lambda on_ready: synced.append(1)  # finished work may unblock others: sync now
+    p.tick()
+    assert synced
+    assert p.state.task("c/1.3") == {"runs": 3}
+    assert any(l.endswith("done implement c/1.3") for l in lines)
+
+
+def test_dead_old_dispatchers_handoff_is_ignored(pl, monkeypatch):
+    from agentpipe import handoff, service
+    p, gh = pl
+    monkeypatch.setattr(service, "is_alive", lambda pid: False)
+    handoff.write(p.t.work_dir, 4242, {"c/1.1": {"kind": "implement", "slot": "impl-0", "batch": ["c/1.1"]}})
+    assert handoff.live(p.t.work_dir) == {}
+    assert not list(handoff.handoff_dir(p.t.work_dir).glob("*.json"))
+
+
+def test_state_merges_two_dispatchers_writes(tmp_path):
+    from agentpipe.pipeline import State
+    path = tmp_path / "state.json"
+    s = State(path)
+    s.task("old")["runs"] = 1
+    s.task("new")["runs"] = 1
+    s.save()
+    old, new = State(path), State(path)
+    old.own_only, new.foreign = {"old"}, {"old"}
+    old.task("old")["runs"] = 2
+    old.task("new")["runs"] = 99  # not its task: never written
+    old.data["paused_until"] = 50.0
+    old.save()
+    new.task("new")["runs"] = 2
+    new.task("old")["runs"] = 77  # not its task while handed over: the file's value wins
+    new.save()
+    disk = State(path).data
+    assert disk["tasks"] == {"old": {"runs": 2}, "new": {"runs": 2}}
+    assert disk["paused_until"] == 50.0  # the old one's usage pause is kept
+    old.task("old")["runs"] = 3
+    old.save()
+    new.foreign = set()
+    new.refresh({"old"})
+    assert new.task("old") == {"runs": 3}
 
 
 def test_commit_that_fails_to_import_is_not_restarted_onto(pl, monkeypatch):
@@ -542,7 +639,7 @@ def test_commit_that_fails_to_import_is_not_restarted_onto(pl, monkeypatch):
     assert sum("doesn't import" in l for l in lines) == 1  # logged once per commit
 
 
-def test_stop_request_beats_a_pending_relaunch(pl, monkeypatch):
+def test_stop_request_beats_a_pending_handoff(pl, monkeypatch):
     p, gh = pl
     started = _code_pipeline(p, monkeypatch, ["a" * 40, "b" * 40])
     ticks = []

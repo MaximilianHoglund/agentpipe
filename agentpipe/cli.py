@@ -148,8 +148,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{target.name}: no dispatcher running")
             return 1
         if args.now:
-            service.kill(pid)
-            print(f"{target.name}: killed dispatcher {pid} and its agents")
+            from agentpipe import handoff
+            old = list(handoff.live(target.work_dir, pid))  # handed over, still finishing jobs
+            for p in [pid, *old]:
+                service.kill(p)
+                handoff.remove(target.work_dir, p)
+            print(f"{target.name}: killed dispatcher {', '.join(map(str, [pid, *old]))} and its agents")
         else:
             service.request_stop(target.work_dir)
             print(f"{target.name}: stop requested; dispatcher {pid} exits once running agents finish "

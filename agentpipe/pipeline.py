@@ -19,7 +19,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from agentpipe import milestones, proc, review, service, syncplan
+from agentpipe import handoff, milestones, proc, review, service, syncplan
 from agentpipe.claude import CAPPED, MAX_TURNS, Claude, ClaudeResult
 from agentpipe.config import Agent, Config, Milestone, Target
 from agentpipe import conflicts
@@ -108,6 +108,7 @@ class Job:
     key: str
     slot: str
     future: Future
+    issue: int = 0
 
 
 class CappedRun(RuntimeError):
@@ -119,26 +120,76 @@ class CappedRun(RuntimeError):
 
 
 class State:
-    """Small JSON store, guarded by a lock and written atomically."""
+    """Small JSON store, guarded by a lock and written atomically.
+
+    During a handoff (see handoff.py) two dispatchers share the file. The old one sets
+    ``own_only`` to the tasks it still works on and writes only those; the new one lists them
+    in ``foreign`` and takes them from the file rather than its memory. Both merge the usage
+    pause and windows. Writes then go under a lock file shared by the two processes."""
 
     def __init__(self, path: Path):
         self.path = path
         self.lock = threading.RLock()
-        self.data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        self.data = self.read()
         for k, default in (("tasks", {}), ("db_ids", {}), ("links", {}), ("flagged", []),
                            ("cleared", []), ("paused_until", 0.0)):
             self.data.setdefault(k, default)
+        self.own_only: set[str] | None = None
+        self.foreign: set[str] = set()
+
+    def read(self) -> dict:
+        return json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {}
 
     def task(self, key: str) -> dict:
         with self.lock:
             return self.data["tasks"].setdefault(key, {})
 
+    def _write(self, data: dict) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        replace_retrying(tmp, self.path)
+
+    def _take_shared(self, disk: dict) -> None:
+        """Merge the usage pause and windows another dispatcher may have written."""
+        self.data["paused_until"] = max(self.data.get("paused_until", 0.0), disk.get("paused_until", 0.0))
+        if (disk.get("rate") or {}).get("_at", 0) > (self.data.get("rate") or {}).get("_at", 0):
+            self.data["rate"] = disk["rate"]
+
+    def _take_tasks(self, disk: dict, keys) -> None:
+        for k in keys:
+            if k in disk.get("tasks", {}):
+                self.data["tasks"][k] = disk["tasks"][k]
+            else:
+                self.data["tasks"].pop(k, None)
+
     def save(self) -> None:
         with self.lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
-            replace_retrying(tmp, self.path)
+            if self.own_only is None and not self.foreign:
+                return self._write(self.data)
+            with handoff.file_lock(self.path.with_suffix(".lock")):
+                disk = self.read()
+                self._take_shared(disk)
+                if self.own_only is None:
+                    self._take_tasks(disk, self.foreign)
+                    return self._write(self.data)
+                out = {**disk, "paused_until": self.data["paused_until"]}
+                if "rate" in self.data:
+                    out["rate"] = self.data["rate"]
+                tasks = out.setdefault("tasks", {})
+                for k in self.own_only:
+                    if k in self.data["tasks"]:
+                        tasks[k] = self.data["tasks"][k]
+                    else:
+                        tasks.pop(k, None)
+                self._write(out)
+
+    def refresh(self, keys) -> None:
+        """Reload ``keys`` (tasks an old dispatcher just finished) and the shared usage fields."""
+        with self.lock, handoff.file_lock(self.path.with_suffix(".lock")):
+            disk = self.read()
+            self._take_shared(disk)
+            self._take_tasks(disk, keys)
 
 
 def clear_pause(state: State) -> None:
@@ -213,8 +264,14 @@ class Pipeline:
         # Self-restart on new agentpipe code (see check_code); on only under `agentpipe run`.
         self.code_rev: str | None = None
         self.bad_rev: str | None = None  # a commit whose code failed the import check
-        self.restart_for: str | None = None  # the commit to restart on once jobs drain
+        self.restart_for: str | None = None  # new code to hand over to, once no merge runs
         self.last_code_check = 0.0
+        self.handing_off = False  # handed over: only finishing the jobs already running
+        self.handed_jobs: dict[str, dict] = {}  # what our handoff file lists, to rewrite on change
+        # Jobs an old dispatcher still finishes after handing over: key -> {kind, slot, issue,
+        # batch, pid}. Their tasks (with batch followers) and slots count as taken.
+        self.foreign: dict[str, dict] = {}
+        self.foreign_keys: set[str] = set()
 
     # Settings read once at startup; changing them in the file still needs a restart.
     RESTART_ONLY = ("claude_bin", "gh_bin", "agent_timeout", "mcp_servers")
@@ -252,9 +309,10 @@ class Pipeline:
         """Restart on new agentpipe commits, so code changes need no hand restart.
 
         Once a minute, compare the checkout's HEAD with the one this dispatcher started on. On a
-        new commit whose code imports cleanly, drain like `agentpipe stop` and then relaunch (see
-        run_forever). pipeline.toml edits don't need this: reload_config applies them each tick.
-        Uncommitted edits don't trigger it, so a half-made change never restarts the dispatcher."""
+        new commit whose code imports cleanly, hand over to a new dispatcher (``hand_off``) as
+        soon as no merge or release runs; until then everything else goes on as usual.
+        pipeline.toml edits don't need this: reload_config applies them each tick. Uncommitted
+        edits don't trigger it, so a half-made change never restarts the dispatcher."""
         if self.code_rev is None or self.config_path is None or self.restart_for:
             return
         if time.time() - self.last_code_check < self.CODE_CHECK_SECONDS:
@@ -882,6 +940,7 @@ class Pipeline:
         self.reap()
         if self.stopping:
             return
+        self.refresh_foreign()
         self.reload_config()
         if self.resume_file.exists():
             self.resume_file.unlink(missing_ok=True)
@@ -898,7 +957,8 @@ class Pipeline:
                 self.sync(on_ready=self.schedule)
             except LimitHit as e:
                 return self.pause(str(e))
-            if self.t.milestones and RELEASE_KEY not in self.jobs:
+            # No release while new code waits to take over: the handoff waits for it to end.
+            if self.t.milestones and RELEASE_KEY not in self.jobs and not self.restart_for:
                 self.check_milestones()
             self.cap_cache()
         self.schedule()
@@ -912,7 +972,7 @@ class Pipeline:
         starts jobs, so a slot that is idle here stays idle until the deletion is done."""
         if self.t.cache_max_gb <= 0:
             return
-        busy = {j.slot for j in self.jobs.values()}
+        busy = self.busy_slots()
         # Nested-build test scratch is dead once its job ends, and was most of a slot: 14 of an
         # arpg slot's 18 GB, against 3.5 GB for its own build (2026-11-09). Drop it from idle
         # slots first, so the cap keeps their builds warm instead of deleting them.
@@ -1020,15 +1080,15 @@ class Pipeline:
         for pr in self.gh.list_prs():
             if key := task_key_from_body(pr["body"]):
                 prs[key] = pr
-        free_impl = [f"impl-{i}" for i in range(self.implementers())
-                     if f"impl-{i}" not in {j.slot for j in self.jobs.values()}]
-        free_rev = [f"review-{i}" for i in range(self.reviewers())
-                    if f"review-{i}" not in {j.slot for j in self.jobs.values()}]
-        merging = any(j.kind == "merge" for j in self.jobs.values())
+        busy = self.busy_slots()  # an old dispatcher's slots too, until its jobs end
+        free_impl = [f"impl-{i}" for i in range(self.implementers()) if f"impl-{i}" not in busy]
+        free_rev = [f"review-{i}" for i in range(self.reviewers()) if f"review-{i}" not in busy]
+        # While new code waits to take over, start no merge: the handoff waits for it to end.
+        merging = any(j.kind == "merge" for j in self.jobs.values()) or bool(self.restart_for)
 
         def by_status(s: Status) -> list[str]:
             return sorted((k for k, i in issues.items()
-                           if status_from_labels(i["labels"]) is s and k not in self.jobs
+                           if status_from_labels(i["labels"]) is s and not self.taken(k)
                            and k not in self.merging), key=lambda k: (self.rank_of(k), key_sort(k)))
 
         for s in (Status.PENDING_REVIEW, Status.CHANGES_REQUESTED, Status.APPROVED):
@@ -1208,7 +1268,7 @@ class Pipeline:
         about = self.about(key, 160)  # the watcher gives it two lines
         self.log(f"start {kind} {key} (#{issue['number']}) on {slot}" + (f": {about}" if about else ""))
         fut = self.pool.submit(fn, self.tasks[key], issue["number"], pr, slot)
-        self.jobs[key] = Job(kind, key, slot, fut)
+        self.jobs[key] = Job(kind, key, slot, fut, issue["number"])
 
     def reap(self) -> None:
         for key, job in list(self.jobs.items()):
@@ -1308,7 +1368,11 @@ class Pipeline:
         return self.t.work_dir / "dispatcher.pid"
 
     def stop_reason(self) -> str | None:
-        """Why the dispatcher should drain and exit now: a stop request, or its watcher closed."""
+        """Why the dispatcher should drain and exit now: a stop request, or its watcher closed.
+
+        After a handoff the new dispatcher owns the stop file and the watcher, so neither applies."""
+        if self.handing_off:
+            return f"handed over to agentpipe {self.restart_for[:7]}"
         if self.stop_file.exists():
             return "stop requested"
         live = service.live_watchers(self.t.work_dir)
@@ -1316,8 +1380,6 @@ class Pipeline:
             self.had_watcher = True
         elif self.had_watcher:
             return "watcher window closed"
-        if self.restart_for:
-            return f"agentpipe updated to {self.restart_for[:7]}, restarting"
         return None
 
     def run_forever(self, once: bool = False) -> None:
@@ -1335,11 +1397,13 @@ class Pipeline:
         if not once:
             threading.Thread(target=self.refresh_awaiting_forever, args=(counted,),
                              name="awaiting", daemon=True).start()
-        relaunch = handed_off = False
         try:
             while True:
-                if not once:
+                if not once and not self.handing_off:
                     self.check_code()
+                    if self.restart_for and not self.stopping and not self.stop_reason() and not any(
+                            j.kind in ("merge", "release") for j in self.jobs.values()):
+                        self.hand_off()
                 reason = self.stop_reason()
                 if reason and not self.stopping:
                     self.stopping = True
@@ -1349,22 +1413,16 @@ class Pipeline:
                     self.stopping = False
                     self.log("stop cancelled: running again")
                 self.tick()
+                if self.handing_off:
+                    self.update_handoff()
                 if (once or self.stopping) and not self.jobs:
-                    # Only a drain for new code relaunches; a stop or closed watcher wins over it.
-                    relaunch = bool(self.restart_for) and (self.stop_reason() or "").startswith("agentpipe updated")
                     break
                 # Sleep in short steps so a stop request (or its cancelling) is noticed within seconds.
                 deadline = time.time() + (self.cfg.poll_seconds if not once else 5)
                 while time.time() < deadline and self.stopping == bool(self.stop_reason()):
                     time.sleep(min(2.0, max(deadline - time.time(), 0)))
-            self.log("stopped")
-            if relaunch:
-                pid = self.relaunch()
-                if pid is not None:
-                    # Hand the pid file straight to the new dispatcher, so the linked watcher
-                    # window sees one running throughout and stays open.
-                    self.pid_file.write_text(str(pid), encoding="utf-8")
-                    handed_off = True
+            self.log("stopped" if not self.handing_off else
+                     f"finished the jobs it handed over to agentpipe {self.restart_for[:7]}")
         except KeyboardInterrupt:
             self.stopping = True
             self.log("stopping: waiting for running agents (Ctrl-C again to abandon; work resumes on restart)")
@@ -1375,22 +1433,79 @@ class Pipeline:
             raise
         finally:
             counted.set()
-            self.stop_file.unlink(missing_ok=True)
-            if not handed_off:
+            if self.handing_off:
+                # The stop file and pid file belong to the new dispatcher now.
+                handoff.remove(self.t.work_dir, os.getpid())
+            else:
+                self.stop_file.unlink(missing_ok=True)
                 self.pid_file.unlink(missing_ok=True)
 
-    def relaunch(self) -> int | None:
-        """Start a new hidden dispatcher on the current code; returns its pid, None on failure.
+    def handoff_jobs(self) -> dict[str, dict]:
+        return {k: {"kind": j.kind, "slot": j.slot, "issue": getattr(j, "issue", 0),
+                    "batch": list(self.state.task(k).get("batch") or [k])}
+                for k, j in self.jobs.items()}
 
-        Command-line overrides (`run --max-implementers` etc.) aren't carried over."""
+    def hand_off(self) -> None:
+        """Start a dispatcher on the new code now and keep only the jobs already running.
+
+        The handoff file goes first, so the new dispatcher never sees these tasks as free. From
+        here this one starts nothing, writes only its own tasks to state.json, and exits when
+        its last job ends. The pid file goes straight to the new dispatcher, so the linked
+        watcher window sees one running throughout and stays open. Command-line overrides
+        (`run --max-implementers` etc.) aren't carried over."""
+        jobs = self.handoff_jobs()
+        handoff.write(self.t.work_dir, os.getpid(), jobs)
         try:
             pid = service.start(self.t.name, self.t.work_dir, self.config_path)
         except Exception as e:
-            self.log(f"relaunch failed, start it by hand: {e!r}")
-            return None
-        self.log(f"relaunched on agentpipe {self.restart_for[:7]} (pid {pid})"
-                 + (f"; command-line overrides dropped: {sorted(self.overrides)}" if self.overrides else ""))
-        return pid
+            handoff.remove(self.t.work_dir, os.getpid())
+            self.bad_rev, self.restart_for = self.restart_for, None
+            self.log(f"could not start a dispatcher on the new code, carrying on: {e!r}")
+            return
+        self.state.own_only = {k for j in jobs.values() for k in j["batch"]} | set(jobs)
+        self.handed_jobs = jobs
+        self.handing_off = True
+        self.stopping = True
+        self.pid_file.write_text(str(pid), encoding="utf-8")
+        self.log(f"agentpipe {self.restart_for[:7]} landed: handed over to dispatcher {pid}; "
+                 f"finishing {len(jobs)} running job(s) here" + (
+                     f"; command-line overrides dropped: {sorted(self.overrides)}" if self.overrides else ""))
+
+    def update_handoff(self) -> None:
+        """Keep the handoff file in step as the jobs finish."""
+        jobs = self.handoff_jobs()
+        if jobs != self.handed_jobs:
+            self.handed_jobs = jobs
+            handoff.write(self.t.work_dir, os.getpid(), jobs)
+
+    def refresh_foreign(self) -> None:
+        """Track the jobs old dispatchers still finish, and take over each task as it ends."""
+        now: dict[str, dict] = {}
+        for pid, jobs in handoff.live(self.t.work_dir, os.getpid()).items():
+            for k, j in jobs.items():
+                now[k] = {**j, "pid": pid}
+        for k, j in now.items():
+            if k not in self.foreign:
+                # In pipeline.log's start format, so the watcher lists it again after our start.
+                self.log(f"start {j['kind']} {k} (#{j.get('issue', 0)}) on {j['slot']}: "
+                         f"finishing on dispatcher {j['pid']}")
+        gone = {k: j for k, j in self.foreign.items() if k not in now}
+        keys = {b for j in now.values() for b in j.get("batch") or []} | set(now)
+        gone_keys = {b for j in gone.values() for b in j.get("batch") or []} | set(gone)
+        self.foreign, self.foreign_keys = now, keys
+        self.state.foreign = keys
+        if gone:
+            self.state.refresh(gone_keys - keys)
+            self.last_sync = 0.0  # what they finished may unblock work
+            for k, j in gone.items():
+                self.log(f"done {j['kind']} {k}")  # the watcher's end format, exactly
+
+    def busy_slots(self) -> set[str]:
+        return {j.slot for j in self.jobs.values()} | {j["slot"] for j in self.foreign.values()}
+
+    def taken(self, key: str) -> bool:
+        """A job of ours or of an old dispatcher works on ``key`` (or its batch)."""
+        return key in self.jobs or key in self.foreign_keys
 
     # ------------------------------------------------------------------ jobs
     def human_input(self, issue: int, pr: dict | None) -> str:
@@ -1420,7 +1535,7 @@ class Pipeline:
         for k in self.plan.batch_of(t.key, done)[1:]:
             i = self.issue_map.get(k)
             # Only followers nobody else is working on: one already claimed keeps its own job.
-            if i and status_from_labels(i["labels"]) in GRAPH_OWNED and k not in self.jobs:
+            if i and status_from_labels(i["labels"]) in GRAPH_OWNED and not self.taken(k):
                 members.append(k)
         st["batch"] = members
         st["batch_issues"] = {k: self.issue_map[k]["number"] for k in members[1:]}
