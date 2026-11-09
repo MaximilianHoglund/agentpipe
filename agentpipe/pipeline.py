@@ -45,8 +45,13 @@ VERDICT_WORDS = {review.APPROVE: "APPROVED", review.REQUEST_CHANGES: "REJECTED, 
                  review.CONFLICT: "REJECTED, conflicts with the base branch"}
 
 
-def dir_bytes(path: Path) -> int:
-    """Bytes in the files under `path`; links aren't followed and unreadable entries count 0."""
+def dir_bytes(path: Path, seen: set[int] | None = None) -> int:
+    """Bytes in the files under `path`; links aren't followed and unreadable entries count 0.
+
+    A hard-linked file counts once, as on disk: arpg's Godot test copies link the engine, and
+    counting each link made a slot's scratch look twice its size (14 GB against du's 7 GB,
+    2026-11-09). Pass the same `seen` to count files linked from several dirs once in all."""
+    seen = set() if seen is None else seen
     total = 0
     stack = [path]
     while stack:
@@ -57,7 +62,15 @@ def dir_bytes(path: Path) -> int:
                         if e.is_dir(follow_symlinks=False):
                             stack.append(e.path)
                         elif e.is_file(follow_symlinks=False):
-                            total += e.stat(follow_symlinks=False).st_size
+                            size = e.stat(follow_symlinks=False).st_size
+                            # inode() costs a call per file on Windows (45 s for one slot's
+                            # 24k files); the links that matter are the large engine binaries.
+                            if size >= 2**20:
+                                inode = e.inode()
+                                if inode and inode in seen:
+                                    continue
+                                seen.add(inode)
+                            total += size
                     except OSError:
                         pass
         except OSError:
@@ -859,7 +872,8 @@ class Pipeline:
                 self.prune_checkout_scratch(d.name)
         dirs = [d for root in ("target", "tmp") if (self.t.work_dir / root).is_dir()
                 for d in (self.t.work_dir / root).iterdir() if d.is_dir()]
-        sizes = {d: dir_bytes(d) for d in dirs}
+        seen: set[int] = set()
+        sizes = {d: dir_bytes(d, seen) for d in dirs}
         total, cap = sum(sizes.values()), self.t.cache_max_gb * 2**30
         if total <= cap:
             self.cache_over_logged = False

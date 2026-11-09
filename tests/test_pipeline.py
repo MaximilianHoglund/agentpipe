@@ -799,6 +799,19 @@ def test_cap_cache_deletes_largest_idle_slots_down_to_three_quarters(pl):
     assert len(list((p.t.work_dir / "target").iterdir())) == 3
 
 
+def test_dir_bytes_counts_a_hard_linked_file_once(tmp_path):
+    from agentpipe.pipeline import dir_bytes
+    big = tmp_path / "a" / "engine.exe"
+    big.parent.mkdir()
+    big.write_bytes(b"\0" * 2**21)
+    (tmp_path / "b").mkdir()
+    os.link(big, tmp_path / "b" / "engine.exe")
+    (tmp_path / "a" / "small").write_bytes(b"\0" * 10)
+    assert dir_bytes(tmp_path) == 2**21 + 10
+    seen: set[int] = set()  # shared across dirs: the second dir's link is already counted
+    assert dir_bytes(tmp_path / "a", seen) + dir_bytes(tmp_path / "b", seen) == 2**21 + 10
+
+
 def test_cap_cache_drops_idle_slots_checkout_scratch_and_keeps_their_builds(pl):
     p, _ = pl
     p.t.cache_max_gb = 1
