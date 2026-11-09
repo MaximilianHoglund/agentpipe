@@ -404,6 +404,53 @@ def follow(work_dir: Path, project_dir: str, key: str, *, color: bool = True, po
         time.sleep(poll)
 
 
+CODE_DIR = Path(__file__).resolve().parent.parent
+
+
+def code_rev() -> str | None:
+    """The agentpipe checkout's HEAD, or None when it can't be read."""
+    import subprocess
+    try:
+        r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=CODE_DIR, capture_output=True,
+                           text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def code_imports() -> str:
+    """Import the checkout's watcher in a fresh interpreter: "" if it loads, else the error."""
+    import subprocess
+    import sys
+    try:
+        r = subprocess.run([sys.executable, "-c", "import agentpipe.cli, agentpipe.panes"],
+                           cwd=CODE_DIR, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return repr(e)
+    return "" if r.returncode == 0 else (r.stderr.strip().splitlines() or ["exit code"])[-1]
+
+
+def start_successor(work_dir: Path, linked: bool, timeout: float = 60.0) -> bool:
+    """Run this watcher again on the new code, in the same console window.
+
+    True once the new one is up; for a linked watcher, once it has registered, so the
+    dispatcher never sees zero linked watchers (that would drain it). False if it died first."""
+    import subprocess
+    import sys
+    from agentpipe import service
+    before = service.live_watchers(work_dir)
+    child = subprocess.Popen([sys.executable, "-m", "agentpipe", *sys.argv[1:]], cwd=CODE_DIR)
+    started = time.time()
+    while time.time() < started + timeout:
+        if child.poll() is not None:
+            return False
+        if service.live_watchers(work_dir) > before if linked else time.time() > started + 5:
+            return True
+        time.sleep(0.5)
+    service.kill(child.pid)  # two apps can't share the console
+    return False
+
+
 def linked_watcher_done(work_dir: Path, holder) -> bool:
     """True once the dispatcher this watcher saw running has exited.
 

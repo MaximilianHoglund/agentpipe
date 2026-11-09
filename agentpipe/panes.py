@@ -270,6 +270,10 @@ class PanesApp(App):
         super().__init__()
         self.linked = linked
         self.seen_dispatcher = False
+        # Restart on new agentpipe commits, like the dispatcher: a watcher left on old code
+        # misread the new dispatcher's log and showed 6 of 8 jobs (2026-11-09).
+        self.code_rev, self.bad_rev, self.last_code_check = w.code_rev(), None, time.time()
+        self.restart = False
         # The ANSI themes take colours from the console's palette and come out blank in the
         # classic Windows console (Max, 2026-11-07), so they aren't offered.
         for name in ("ansi-dark", "ansi-light"):
@@ -310,6 +314,16 @@ class PanesApp(App):
         if self.linked and w.linked_watcher_done(self.work_dir, self):
             self.exit()  # its dispatcher exited; a restart opens a fresh window
             return
+        if time.time() - self.last_code_check >= 60:
+            self.last_code_check = time.time()
+            rev = w.code_rev()
+            if rev and self.code_rev and rev != self.code_rev and rev != self.bad_rev:
+                if w.code_imports():
+                    self.bad_rev = rev
+                else:
+                    self.restart = True
+                    self.exit()  # run() starts the new code in this same window
+                    return
         now = time.time()
         log = self.query_one("#log", RichLog)
         for line in self.log_tail.read():
@@ -424,4 +438,10 @@ class PanesApp(App):
 
 
 def run(target: str, work_dir: Path, project_dir: str, interval: float = 2.0, linked: bool = False) -> None:
-    PanesApp(target, work_dir, project_dir, interval, linked).run()
+    while True:
+        app = PanesApp(target, work_dir, project_dir, interval, linked)
+        app.run()
+        if not app.restart or w.start_successor(work_dir, linked):
+            return
+        # The new code didn't come up: carry on here rather than leave the window (and, for a
+        # linked watcher, the dispatcher) without a watcher.

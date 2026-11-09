@@ -229,3 +229,43 @@ def test_mutation_testing_streams_missed_mutants_and_progress(tmp_path, monkeypa
             assert "12/30 mutants, 1 missed" in text and text.count("MISSED") == 1
 
     asyncio.run(go())
+
+
+def test_watcher_restarts_itself_on_a_new_agentpipe_commit(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    (work / "logs").mkdir(parents=True)
+    revs = iter(["a" * 40, "b" * 40])
+    monkeypatch.setattr(watch, "code_rev", lambda: next(revs, "b" * 40))
+    monkeypatch.setattr(watch, "code_imports", lambda: "")
+
+    async def go():
+        app = panes.PanesApp("arpg", work, ".", interval=60)
+        async with app.run_test(size=(80, 20)) as pilot:
+            app.last_code_check = 0
+            app.tick()
+            await pilot.pause()
+            assert app.restart
+    asyncio.run(go())
+
+
+def test_a_successor_watcher_must_register_before_the_old_one_leaves(tmp_path, monkeypatch):
+    import subprocess
+    from agentpipe import service
+    counts = iter([1, 1, 1, 2])
+    monkeypatch.setattr(service, "live_watchers", lambda wd: next(counts))
+    monkeypatch.setattr(watch.time, "sleep", lambda s: None)
+
+    class Child:
+        pid = 1
+        def __init__(self, *a, **k): pass
+        def poll(self): return None
+
+    monkeypatch.setattr(subprocess, "Popen", Child)
+    assert watch.start_successor(tmp_path, linked=True)
+
+    class Dead(Child):
+        def poll(self): return 1
+
+    monkeypatch.setattr(subprocess, "Popen", Dead)
+    monkeypatch.setattr(service, "live_watchers", lambda wd: 1)
+    assert not watch.start_successor(tmp_path, linked=True)  # the old one carries on
