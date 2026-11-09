@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import threading
@@ -34,13 +35,22 @@ class CommandError(RuntimeError):
         self.result = result
 
 
+def resolve(cmd, env, shell: bool):
+    """Find an argument list's program on `env`'s PATH. Windows' CreateProcess searches the
+    dispatcher's own PATH instead, so a tool only the target's env adds (cargo) wasn't found."""
+    if shell or not env or isinstance(cmd, (str, bytes)) or not cmd:
+        return cmd
+    found = shutil.which(str(cmd[0]), path=env.get("PATH", env.get("Path")))
+    return [found, *cmd[1:]] if found else cmd
+
+
 def run(cmd, cwd: Path | None = None, *, input: str | None = None, env=None,
         timeout: int | None = None, check: bool = True, shell: bool = False) -> Result:
     # Not subprocess.run: on timeout it kills only the direct child (the shell, with shell=True)
     # and then waits for the output pipes, which grandchildren such as cargo-mutants hold open,
     # so the timeout never took effect (a 30 min mutation cap ran past 49 min). Kill the tree.
     p = subprocess.Popen(
-        cmd, cwd=cwd, env=env, shell=shell,
+        resolve(cmd, env, shell), cwd=cwd, env=env, shell=shell,
         stdin=subprocess.PIPE if input is not None else None,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
         start_new_session=os.name != "nt",
@@ -63,7 +73,7 @@ class Background:
     def __init__(self, cmd, cwd: Path | None = None, *, env=None, timeout: int | None = None,
                  shell: bool = False):
         self.p = subprocess.Popen(
-            cmd, cwd=cwd, env=env, shell=shell, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            resolve(cmd, env, shell), cwd=cwd, env=env, shell=shell, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", start_new_session=os.name != "nt")
         self._result: Result | None = None
         self._thread = threading.Thread(target=self._collect, args=(timeout,), daemon=True)

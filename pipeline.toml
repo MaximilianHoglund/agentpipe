@@ -215,7 +215,9 @@ format = "cargo fmt --all"
 # so they don't hold tasks apart (top conflict files in Nov 2026: design.md, lib.rs).
 overlap_ignore = ["**/lib.rs", "**/mod.rs", "**/Cargo.toml", "Cargo.lock", "README.md", "docs/*.md",
                   "openspec/**"]
-env = { GODOT ="E:/Programs/Godot/4.7.2/Godot_v4.7.2-stable_win64_console.exe", PATH = "C:/Users/Max/AppData/Local/Microsoft/WindowsApps;{PATH}" }
+# Rust lives at E:\Rust, off the registry PATH: set it here so a dispatcher started from any
+# shell has cargo (a bare `uv run agentpipe start arpg` failed preflight on 2026-11-09).
+env = { GODOT ="E:/Programs/Godot/4.7.2/Godot_v4.7.2-stable_win64_console.exe", CARGO_HOME = "E:/Rust/.cargo", RUSTUP_HOME = "E:/Rust/.rustup", PATH ="E:/Rust/shims;E:/Rust/.cargo/bin;C:/Users/Max/AppData/Local/Microsoft/WindowsApps;{PATH}" }
 preflight = ["cargo --version", 'pwsh -NoProfile -Command "exit 0"',
              "E:/Programs/Godot/4.7.2/Godot_v4.7.2-stable_win64_console.exe --version"]
 preflight_gate = true

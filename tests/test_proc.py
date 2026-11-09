@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 import time
@@ -19,3 +20,18 @@ def test_timeout_kills_grandchildren_that_hold_the_output_open(tmp_path):
 def test_run_returns_output_and_passes_input():
     r = proc.run([sys.executable, "-c", "import sys; print(sys.stdin.read().upper())"], input="hi")
     assert r.ok and r.out.strip() == "HI"
+
+
+def test_a_program_only_the_env_path_has_is_found(tmp_path):
+    # Windows' CreateProcess searched the dispatcher's PATH, not env's: cargo, which only the
+    # target's env adds, failed with WinError 2.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    if sys.platform == "win32":
+        (bin_dir / "envonly.bat").write_text("@echo found\n")
+    else:
+        prog = bin_dir / "envonly"
+        prog.write_text("#!/bin/sh\necho found\n")
+        prog.chmod(0o755)
+    env = {**os.environ, "PATH": str(bin_dir)}
+    assert proc.run(["envonly"], env=env).out.strip() == "found"
