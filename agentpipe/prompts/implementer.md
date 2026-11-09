@@ -84,8 +84,8 @@ an off-by-one or a skipped step.
 
 $self_check
 
-**Keep the gates green.** Run `$test_cmd` from the project dir and make it pass before
-you finish. Do not finish with failing or skipped tests.
+**Keep the gates green.** From the project dir, before you finish, run $test_cmd. Make it
+pass; do not finish with failing or skipped tests.
 
 ## Tickets for things outside your scope
 

@@ -86,10 +86,11 @@ class Target:
     # added lines (it keeps both): e.g. `cargo fmt --all` re-sorts the `mod`/`use` lines it
     # appended. Leave empty when the base branch isn't kept formatted.
     format: str = ""
-    # A quick check an agent runs after resolving merge conflicts, in place of `test`: every merge
-    # it resolves goes on to a review, which runs the full gate anyway. E.g. a compile and lint of
-    # every target. Empty: the agent builds and runs only the tests near the files it resolved.
-    conflict_check: str = ""
+    # A quick check agents run in place of the full `test` (e.g. a compile and lint of every
+    # target), plus the tests for what they changed. With it set, the pipeline runs `test` itself
+    # on every branch merged with the base before review, and sends failures back to the
+    # implementer's session. Empty: agents run the full `test` themselves.
+    quick_check: str = ""
     # Paths (fnmatch globs, repo-relative) that don't count when the scheduler keeps tasks
     # touching the same files apart: files nearly every task edits and whose conflicts are
     # additive, such as module lists and decision logs.
@@ -260,7 +261,7 @@ def load(path: Path) -> Config:
             preflight=list(t.get("preflight", [])),
             preflight_gate=bool(t.get("preflight_gate", False)),
             format=t.get("format", ""),
-            conflict_check=t.get("conflict_check", ""),
+            quick_check=t.get("quick_check", t.get("conflict_check", "")),
             overlap_ignore=list(t.get("overlap_ignore", [])),
             parked=list(t.get("parked", [])),
             priority=list(t.get("priority", [])),

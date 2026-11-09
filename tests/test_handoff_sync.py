@@ -21,6 +21,7 @@ class SyncGit:
         self.in_merge, self.restored, self.pushed, self.commits = merging, 0, [], []
 
     def fetch(self): pass
+    def head(self, wt): return "h0"
     def is_clean(self, wt): return True
     def merging(self, wt): return self.in_merge
     def commits_ahead(self, wt, ref): return 1
@@ -193,9 +194,48 @@ def test_an_unresolved_conflict_at_handoff_goes_to_a_decision(pl):
 def test_a_conflict_run_runs_the_quick_check_and_leaves_the_full_gate_to_review(pl):
     p, gh = pl
     n, t = with_issue(p, gh)
-    p.t.conflict_check = "cargo clippy --all-targets"
+    p.t.quick_check = "cargo clippy --all-targets"
     prompt = p.conflict_prompt(t)
     assert "run `cargo clippy --all-targets`" in prompt
     assert f"Don't run the full `{p.t.test}`" in prompt
-    p.t.conflict_check = ""
+    p.t.quick_check = ""
     assert "only the tests that cover the code you resolved" in p.conflict_prompt(t)
+
+
+def test_with_a_quick_check_an_up_to_date_branch_is_gated_and_its_head_recorded(pl):
+    p, gh = pl
+    n, t = with_issue(p, gh)
+    p.t.quick_check = "cargo clippy"
+    p.git.head = lambda wt: "h1"
+    syncing(p, "current", [True])
+    assert p.sync_with_base(t, n, S.IN_PROGRESS, "impl-0", {"summary": "x"}) is not None
+    assert p.gates == 1 and p.state.task("c/1.1")["handoff_gated"] == "h1"
+
+
+def test_with_a_quick_check_a_resolved_conflict_is_gated_before_review(pl):
+    p, gh = pl
+    n, t = with_issue(p, gh)
+    p.t.quick_check = "cargo clippy"
+    p.git.head = lambda wt: "h1"
+    syncing(p, "conflict", [True])
+    assert p.sync_with_base(t, n, S.IN_PROGRESS, "impl-0", {"summary": "x"}) is not None
+    assert [c[0] for c in p.agent_calls] == ["sync"] and p.gates == 1
+
+
+def test_agents_are_told_the_quick_check_not_the_gate_when_there_is_one(pl):
+    p, gh = pl
+    assert p.agent_check() == f"`{p.t.test}`"
+    p.t.quick_check = "cargo clippy"
+    assert p.agent_check().startswith("`cargo clippy` and the tests")
+    assert f"Don't run the full `{p.t.test}`" in p.agent_check()
+
+
+def test_the_review_skips_its_gate_only_on_the_head_gated_at_handoff(pl):
+    p, gh = pl
+    n, t = with_issue(p, gh)
+    p.state.task("c/1.1")["handoff_gated"] = "h1"
+    p.git.head = lambda wt: "h1"
+    assert p.handoff_gated(t, p.wt(t), "h1")
+    assert not p.handoff_gated(t, p.wt(t), "h2")  # pushed since
+    p.git.head = lambda wt: "merged"  # the review had to merge a newer base into it
+    assert not p.handoff_gated(t, p.wt(t), "h1")

@@ -1896,9 +1896,22 @@ class Pipeline:
             "implementer", key=t.key, text=t.text, section=t.section, issue=issue,
             blockers=", ".join(blockers) or "none", worktree=self.wt(t), project_dir=self.t.project_dir,
             spec_ref=self.spec_ref(t), context_list=self.context_list(),
-            human_input=self.human_input(issue, pr), test_cmd=self.t.test, open_tickets=self.open_tickets(),
+            human_input=self.human_input(issue, pr), test_cmd=self.agent_check(), open_tickets=self.open_tickets(),
             batch_section=self.batch_section(t), prior_work=self.prior_work(t, pr, run),
             self_check=self.self_check(t))
+
+    def agent_check(self) -> str:
+        """What implementer and revise prompts tell the agent to run before finishing (`$test_cmd`).
+        With a `quick_check`, that check and the tests for the change, not the full gate: the
+        pipeline gates the branch merged with the base before review (``sync_with_base``) and
+        sends failures back. Max, 2026-11-09: agents' own full gates (140 that day, beside the
+        pipeline's 91, for 25 merges) had the CPU pinned and every gate at 12-25 min."""
+        if not self.t.quick_check:
+            return f"`{self.t.test}`"
+        return (f"`{self.t.quick_check}` and the tests that cover what you changed, picked by package "
+                f"or test target. Don't run the full `{self.t.test}`: "
+                f"as soon as you finish, the pipeline runs it on your branch merged with "
+                f"`{self.base_ref()}` and sends any failure back to you")
 
     def self_check(self, t: Task) -> str:
         """What the implementer is told about the pipeline's mutation pass, or nothing for a
@@ -2030,15 +2043,15 @@ class Pipeline:
         # Every caller hands the resolved merge to a review, whose gate runs the full `test`. Before
         # 2026-11-09 this prompt asked for `test` too, so each resolution paid the gate twice (arpg
         # combat-simulation/5.1: 2 min resolving, then ~20 min of Godot tests).
-        check = (f"run `{self.t.conflict_check}` from the project dir until it passes, plus any test "
-                 "you name that covers code you resolved by hand" if self.t.conflict_check else
+        check = (f"run `{self.t.quick_check}` from the project dir until it passes, plus any test "
+                 "you name that covers code you resolved by hand" if self.t.quick_check else
                  "build, and run only the tests that cover the code you resolved by hand, by name")
         return (f"You are an implementer agent in an unattended pipeline, working on **{t.key}** — {t.text} "
                 f"({self.spec_ref(t)}). `{self.base_ref()}` has moved on and is being merged into your "
                 "branch; the merge is in progress in this worktree and conflicts. Resolve every conflict "
                 "keeping both sides' intent (the base's changes are merged work: keep them), change "
                 f"nothing the merge doesn't need, {check}, and commit the merge. Don't run the full "
-                f"`{self.t.test}`: the review runs it on this merge next. `git checkout` is denied: take "
+                f"`{self.t.test}`: the pipeline runs it on this merge next. `git checkout` is denied: take "
                 "one side of a file with `git restore --theirs <file>` (or `--ours`). Then return the "
                 "structured output with status `done`; in `summary`, say how you resolved each "
                 "conflicted file.")
@@ -2093,7 +2106,7 @@ class Pipeline:
         prompt = review.prompt(
             "revise", key=t.key, round=review.rounds_used(history), max_rounds=self.cfg.max_rounds,
             feedback=last["body"] if last else "(no review found)", merge_note=merge_note,
-            test_cmd=self.t.test, self_check=self.self_check(t))
+            test_cmd=self.agent_check(), self_check=self.self_check(t))
         if not merge_note and self.light_task(t) and self.cfg.agents["implementer"].light_model:
             self.escalate(t, "the reviewer rejected its PR")
         if not self.resumable(t, "revise"):
@@ -2278,7 +2291,7 @@ class Pipeline:
         wt = self.wt(t)
         self.git.fetch()
         m = self.merge_base(wt, slot, gate=False)
-        if m == "current":
+        if m == "current" and not self.t.quick_check:
             return out  # the implementer's own gate run covered this tree
         if m == "conflict":
             self.log(f"phase {t.key}: resolving conflicts with {self.base_ref()} (before review)")
@@ -2289,9 +2302,13 @@ class Pipeline:
                 self.git.merge_abort(wt)
                 self.to_decision(issue, cur, "Could not resolve merge conflicts with the base branch.")
                 return None
-            return out  # the conflict run only compiled and spot-tested; the review gates the merge
+            if not self.t.quick_check:
+                return out  # the conflict run only compiled and spot-tested; the review gates the merge
+        # With a quick_check, agents never ran the full gate: run it here, where a failure goes back
+        # to the warm session, and record the head so the review needn't run it again.
+        what = "before review" if m == "current" else f"after merging {self.base_ref()}, before review"
         for attempt in range(SYNC_FIXES + 1):
-            self.log(f"phase {t.key}: test gate (after merging {self.base_ref()}, before review)")
+            self.log(f"phase {t.key}: test gate ({what})")
             g = self.run_gate(wt / self.t.project_dir, slot, self.t.test, self.t.test_timeout)
             if not g.ok and attempt == 0:
                 # arpg's gate has load-sensitive tests (#618): a failure an agent can't fix costs a run.
@@ -2300,6 +2317,8 @@ class Pipeline:
                     self.log(f"{self.what(t.key)}: the gate failed once after merging {self.base_ref()}, "
                              "then passed (flaky)")
             if g.ok:
+                self.state.task(t.key)["handoff_gated"] = self.git.head(wt)
+                self.state.save()
                 return out
             if attempt == SYNC_FIXES:
                 self.log(f"{self.what(t.key)}: the gate still fails after merging {self.base_ref()}; "
@@ -2309,7 +2328,9 @@ class Pipeline:
             res = self.agent(t, (
                 f"Before handing your work to review, the pipeline merged `{self.base_ref()}` into your "
                 f"branch, and `{self.t.test}` now fails. The base's changes are merged work: adapt your "
-                "change to them rather than undoing them. Fix the failure, run the tests until they pass, "
+                "change to them rather than undoing them. Fix the failure, " + (
+                    f"run `{self.t.quick_check}` and the failing tests until they pass (not the whole gate: "
+                    "the pipeline reruns it), " if self.t.quick_check else "run the tests until they pass, ") +
                 "commit, and return the structured output again, with `summary`, `tests` and `docs` "
                 "describing the whole change.\n\n```\n" + g.tail(6000) + "\n```"), slot, "sync")
             if not self.git.is_clean(wt):
@@ -2372,7 +2393,12 @@ class Pipeline:
             else:
                 self.log(f"phase {t.key}: test gate")
             try:
-                gate = self.run_gate(pdir, slot, self.t.test, self.t.test_timeout)
+                if self.handoff_gated(t, rv, sha):
+                    self.log(f"phase {t.key}: no gate needed (gated at handoff on this head, which has "
+                             f"{self.base_ref()})")
+                    gate = proc.Result(0, "", "")
+                else:
+                    gate = self.run_gate(pdir, slot, self.t.test, self.t.test_timeout)
             except BaseException:
                 if mutation:
                     mutation.kill()
@@ -2416,6 +2442,13 @@ class Pipeline:
             return self.git.rev(self.base_wt, self.base_ref())
         except Exception:  # no base worktree yet, or a test's stub git
             return ""
+
+    def handoff_gated(self, t: Task, rv: Path, sha: str) -> bool:
+        """Whether the handoff gate (``sync_with_base``) passed on exactly the tree this review
+        would gate: the same head, which already contains the current base, so the review merged
+        nothing into it."""
+        return (bool(sha) and self.state.task(t.key).get("handoff_gated") == sha
+                and self.git.head(rv) == sha)
 
     def merge_base_for_review(self, rv: Path) -> str | None:
         """Merges the base into the review worktree, locally (nothing is pushed), so the review
