@@ -8,6 +8,7 @@ holds what GitHub can't: agent session ids, retry counters, and caches.
 from __future__ import annotations
 
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -227,6 +228,24 @@ def clear_pause(state: State) -> None:
         state.data["paused_until"] = 0.0
         state.data.pop("rate", None)
     state.save()
+
+
+_RESET_AT = re.compile(r"resets? (?:at )?(\d{1,2})(?::(\d{2}))?\s*([ap]m)?", re.IGNORECASE)
+
+
+def message_reset(text: str, now: float) -> float | None:
+    """The reset time a limit message gives ("resets 7:10pm"), as the next such local time."""
+    m = _RESET_AT.search(text)
+    if not m:
+        return None
+    hour, minute, half = int(m.group(1)), int(m.group(2) or 0), (m.group(3) or "").lower()
+    if half:
+        hour = hour % 12 + (12 if half == "pm" else 0)
+    if hour > 23 or minute > 59:
+        return None
+    t = time.localtime(now)
+    at = time.mktime((t.tm_year, t.tm_mon, t.tm_mday, hour, minute, 0, 0, 0, -1))
+    return at + 86400 if at <= now - 60 else at
 
 
 def replace_retrying(src: Path, dst: Path, attempts: int = 50, delay: float = 0.1) -> None:
@@ -1448,10 +1467,16 @@ class Pipeline:
 
     def pause(self, why: str) -> None:
         now = time.time()
-        # A known window reset beats a guess; the backoff covers capacity errors with none.
+        # A known window reset beats a guess, even when it is sooner than the backoff (19:09
+        # 2026-11-09: "resets 7:10pm" paused until 19:39). The backoff covers capacity errors
+        # with no reset. Readings arrive only when a run ends, so a window that hit its limit
+        # may last read 99%: anything at 90% or more counts.
         resets = [w.get("resetsAt", 0) for w in (self.state.data.get("rate") or {}).values()
-                  if isinstance(w, dict) and (w.get("status") == "rejected" or w.get("utilization", 0) >= 1)]
-        until = max([now + self.cfg.limit_backoff_seconds] + [r + 60 for r in resets if r > now])
+                  if isinstance(w, dict) and (w.get("status") == "rejected" or w.get("utilization", 0) >= 0.9)]
+        known = [r + 60 for r in resets if r > now]
+        if not known and (r := message_reset(why, now)):
+            known = [r + 60]
+        until = max(known) if known else now + self.cfg.limit_backoff_seconds
         with self.state.lock:
             self.state.data["paused_until"] = max(until, self.state.data["paused_until"])
         self.state.save()
