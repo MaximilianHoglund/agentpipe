@@ -91,6 +91,19 @@ class Target:
     # on every branch merged with the base before review, and sends failures back to the
     # implementer's session. Empty: agents run the full `test` themselves.
     quick_check: str = ""
+    # Two tracks (Max, 2026-11-09): engine work and the front end (arpg: Godot), each with its own
+    # implementer slots, so neither holds the other up. A task is `front` when a path it touches
+    # (the planner's `touches`, a ticket's named files) matches one of `front_paths` (fnmatch
+    # globs, repo-relative); every other task is `engine`. The last `front_implementers` implementer
+    # slots take only front tasks, the others only engine tasks. 0 keeps one shared pool.
+    front_paths: list[str] = field(default_factory=list)
+    front_implementers: int = 0
+    # A full gate on the base branch, run when it has moved and at most every `dev_gate_minutes`.
+    # When it fails, the pipeline files an approved front ticket with the output (or comments on
+    # the open one), so a gate that leaves out the front's tests for engine changes still catches
+    # what they broke, without holding the engine's merges (Max, 2026-11-09). Empty: off.
+    dev_gate: str = ""
+    dev_gate_minutes: int = 60
     # Paths (fnmatch globs, repo-relative) that don't count when the scheduler keeps tasks
     # touching the same files apart: files nearly every task edits and whose conflicts are
     # additive, such as module lists and decision logs.
@@ -262,6 +275,10 @@ def load(path: Path) -> Config:
             preflight_gate=bool(t.get("preflight_gate", False)),
             format=t.get("format", ""),
             quick_check=t.get("quick_check", t.get("conflict_check", "")),
+            front_paths=list(t.get("front_paths", [])),
+            front_implementers=int(t.get("front_implementers", 0)),
+            dev_gate=t.get("dev_gate", ""),
+            dev_gate_minutes=int(t.get("dev_gate_minutes", 60)),
             overlap_ignore=list(t.get("overlap_ignore", [])),
             parked=list(t.get("parked", [])),
             priority=list(t.get("priority", [])),

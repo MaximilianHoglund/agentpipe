@@ -225,6 +225,14 @@ format = "cargo fmt --all"
 # every target, tests included. Max, 2026-11-09: 140 agent-run gates plus 91 pipeline gates for 25
 # merged PRs had the CPU pinned and gates at 12-25 min.
 quick_check = "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings"
+# Engine and front tracks (Max, 2026-11-09): Godot-side tasks take the last 2 implementer slots,
+# engine tasks the rest. scripts/check.ps1 leaves the Godot tests out of a change that touches none
+# of the front's files; the full gate on dev catches what an engine change broke there and files an
+# approved front ticket, without holding engine merges. Releases still run everything (-Full).
+front_paths = ["crates/bridge/*", "game/*", "scripts/build-bridge.*", "scripts/export.*"]
+front_implementers = 2
+dev_gate = "pwsh -NoProfile -File scripts/check.ps1 -Full"
+dev_gate_minutes = 60
 # Files most tasks edit in passing; their conflicts are additive and resolved mechanically,
 # so they don't hold tasks apart (top conflict files in Nov 2026: design.md, lib.rs).
 overlap_ignore = ["**/lib.rs", "**/mod.rs", "**/Cargo.toml", "Cargo.lock", "README.md", "docs/*.md",

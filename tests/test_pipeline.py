@@ -1,6 +1,7 @@
 """Scheduler and ticket handling against an in-memory GitHub; jobs are recorded, not run."""
 
 import dataclasses
+import json
 import os
 import time
 from pathlib import Path
@@ -1628,3 +1629,82 @@ def test_an_approved_pr_that_conflicts_is_updated_before_its_merge_turn_and_jump
     assert p.started[0] == ("revise", "c/1.2", "impl-0")
     assert [s for s in p.started if s[0] == "merge"] == [("merge", "c/1.1", "merge")]
     assert "conflict_update" in p.state.task("c/1.2")
+
+
+# ------------------------------------------------------------------ engine and front tracks
+def test_front_tasks_take_only_front_slots_and_engine_tasks_only_the_others(pl):
+    p, gh = pl
+    p.t.front_paths, p.t.front_implementers = ["game/*", "crates/bridge/*"], 1
+    p.cfg.max_implementers = 3
+    touching(p, **{"1_1": ["game/ui.gd"], "1_2": ["game/menu.gd"], "1_3": ["crates/sim/src/a.rs"],
+                   "1_4": ["crates/sim/src/b.rs"]})
+    for k in ("c/1.1", "c/1.2", "c/1.3", "c/1.4"):
+        task_issue(gh, k, S.IN_PROGRESS)
+    p.tick()
+    assert sorted(p.started) == [("implement", "c/1.1", "impl-2"), ("implement", "c/1.3", "impl-0"),
+                                 ("implement", "c/1.4", "impl-1")]  # c/1.2 waits for the front slot
+
+
+def test_without_a_split_every_task_shares_the_slots(pl):
+    p, gh = pl
+    touching(p, **{"1_1": ["game/ui.gd"], "1_2": ["game/menu.gd"]})
+    task_issue(gh, "c/1.1", S.IN_PROGRESS)
+    task_issue(gh, "c/1.2", S.IN_PROGRESS)
+    p.tick()
+    assert [s[1] for s in p.started] == ["c/1.1", "c/1.2"]
+
+
+def test_a_task_can_carry_its_own_track(pl):
+    p, gh = pl
+    p.t.front_paths, p.t.front_implementers = ["game/*"], 1
+    p.state.task("c/1.1")["track"] = "front"
+    assert p.track_of("c/1.1") == "front" and p.track_of("c/1.2") == "engine"
+
+
+# ------------------------------------------------------------------ full gate on the base
+class _DevGit:
+    def __init__(self):
+        self.removed = 0
+
+    def worktree_detached(self, path, ref): pass
+    def worktree_remove(self, path): self.removed += 1
+    def git(self, *args, cwd=None, check=True): return proc_mod.Result(0, "abc123 sim: monsters wait", "")
+
+
+def test_the_dev_gate_runs_when_the_base_moved_and_its_interval_passed(pl):
+    p, gh = pl
+    p.t.dev_gate = "check -Full"
+    p.current_base = lambda: "base2"
+    p.pool.submit = lambda fn, *a: _NotDone()
+    p.dev_gate_path.parent.mkdir(parents=True, exist_ok=True)
+    p.dev_gate_path.write_text('{"base": "base2", "at": 0}')
+    p.check_dev_gate()
+    assert "devgate" not in p.jobs  # this base already ran
+    p.dev_gate_path.write_text(f'{{"base": "base1", "at": {time.time()}}}')
+    p.check_dev_gate()
+    assert "devgate" not in p.jobs  # too soon
+    p.dev_gate_path.write_text('{"base": "base1", "at": 0}')
+    p.check_dev_gate()
+    assert p.jobs["devgate"].kind == "dev gate"
+
+
+def test_a_failing_dev_gate_files_one_approved_front_ticket_then_comments_on_it(pl):
+    p, gh = pl
+    p.t.dev_gate = "check -Full"
+    p.git = _DevGit()
+    p.dev_gate_path.parent.mkdir(parents=True, exist_ok=True)
+    p.dev_gate_path.write_text('{"last_ok": "base0"}')
+    p.run_gate = lambda cwd, slot, cmd, timeout: proc_mod.Result(1, "test godot_project failed", "")
+    p.job_dev_gate("base1")
+    n = json.loads(p.dev_gate_path.read_text())["ticket"]
+    assert S.PENDING_IMPLEMENTATION.label in gh.issues[n]["labels"]
+    key = f"ticket/{n}"
+    assert p.state.task(key)["track"] == "front" and key in p.state.data["triaged"]
+    assert "godot_project failed" in gh.issues[n]["body"] and "monsters wait" in gh.issues[n]["body"]
+    p.job_dev_gate("base2")
+    assert len([i for i in gh.issues.values() if "full gate fails" in i["title"]]) == 1
+    assert "base2"[:8] in gh.comments_by[n][-1]["body"]
+    p.run_gate = lambda cwd, slot, cmd, timeout: proc_mod.Result(0, "", "")
+    p.job_dev_gate("base3")
+    assert "passes" in gh.comments_by[n][-1]["body"]
+    assert json.loads(p.dev_gate_path.read_text())["last_ok"] == "base3"

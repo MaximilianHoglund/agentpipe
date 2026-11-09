@@ -7,6 +7,7 @@ holds what GitHub can't: agent session ids, retry counters, and caches.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 import os
@@ -39,6 +40,8 @@ IMPL_KINDS = {"implement", "revise"}
 # committing a dirty tree are narrow, and the gate checks the result.
 LIGHT_RUNS = {"conflict", "cleanup"}
 RELEASE_KEY = "milestone"  # job key and slot of the milestone release job
+DEV_GATE_KEY = "devgate"  # job key, slot and worktree of the full gate on the base branch
+DEV_GATE_TITLE = "The full gate fails on the base branch"
 MUTATION_FIXES = 2  # implementer runs on missed mutants before the PR goes to review anyway
 # Implementer runs that continue the session that wrote the code, on its model: fixing missed
 # mutants, and resolving a conflict or a gate failure from merging the base at handoff.
@@ -1111,6 +1114,8 @@ class Pipeline:
             # No release while new code waits to take over: the handoff waits for it to end.
             if self.t.milestones and RELEASE_KEY not in self.jobs and not self.restart_for:
                 self.check_milestones()
+            if self.t.dev_gate and not self.taken(DEV_GATE_KEY) and not self.restart_for and not self.stopping:
+                self.check_dev_gate()
             self.cap_cache()
         self.schedule()
 
@@ -1317,8 +1322,12 @@ class Pipeline:
                 continue
             if self.unblocking(key) and self.unblocking_running() >= self.t.unblocking_slots:
                 continue  # capped: milestone work keeps the other slots
+            slot = next((s for s in free_impl if self.slot_track(s) == self.track_of(key)), None)
+            if slot is None:
+                continue  # its track's slots are busy; the other track's stay its own
             self.held.pop(key, None)
-            self.start(kind, key, free_impl.pop(0), issues[key], prs.get(key))
+            free_impl.remove(slot)
+            self.start(kind, key, slot, issues[key], prs.get(key))
         for key in by_status(Status.PENDING_REVIEW):
             if not free_rev:
                 break
@@ -1343,6 +1352,28 @@ class Pipeline:
                 self.merge_order = order[:self.t.merge_batch]
                 t0 = order[0][0]
                 self.start("merge", t0.key, "merge", issues[t0.key], prs[t0.key])
+
+    def track_of(self, key: str) -> str:
+        """`front` or `engine` (see `front_paths`); `engine` for everything without a split. A
+        task can carry its own (`track` in state.json), as the dev gate's tickets do."""
+        if not self.t.front_implementers:
+            return "engine"
+        if track := self.state.data["tasks"].get(key, {}).get("track"):
+            return track
+        pd = conflicts.normalize(self.t.project_dir)
+        for path in self.touches_of(key):
+            rel = path[len(pd) + 1:] if pd not in ("", ".") and path.startswith(pd + "/") else path
+            if any(fnmatch.fnmatch(p, g) for p in (path, rel) for g in self.t.front_paths):
+                return "front"
+        return "engine"
+
+    def slot_track(self, slot: str) -> str:
+        """The track an implementer slot serves: the last `front_implementers` are the front's."""
+        n = self.implementers()
+        front = min(max(self.t.front_implementers, 0), n)
+        if not front or not slot.startswith("impl-"):
+            return "engine"
+        return "front" if int(slot.split("-", 1)[1]) >= n - front else "engine"
 
     def stale_approval(self, pr: dict) -> bool:
         """Whether an approved PR's head conflicts with the base as last fetched. Remembered
@@ -1673,7 +1704,7 @@ class Pipeline:
 
     def handoff_jobs(self) -> dict[str, dict]:
         return {k: {"kind": j.kind, "slot": j.slot, "issue": getattr(j, "issue", 0),
-                    "batch": list(self.state.task(k).get("batch") or [k])}
+                    "batch": list(self.state.data["tasks"].get(k, {}).get("batch") or [k])}
                 for k, j in self.jobs.items()}
 
     def hand_off(self) -> None:
@@ -2851,6 +2882,75 @@ class Pipeline:
                      "\nFix what the output names (usually a delta whose MODIFIED or "
                      "REMOVED requirement doesn't match the main spec), run the command, "
                      "and commit the result.")}])
+
+    # ------------------------------------------------------------------ dev gate
+    @property
+    def dev_gate_path(self) -> Path:
+        """Its own file, not state.json: a handed-over dispatcher writes only its own tasks there."""
+        return self.t.work_dir / "dev_gate.json"
+
+    def dev_gate_state(self) -> dict:
+        try:
+            return json.loads(self.dev_gate_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def check_dev_gate(self) -> None:
+        """Start the full gate on the base when it has moved since the last run, at most every
+        `dev_gate_minutes`."""
+        ds = self.dev_gate_state()
+        head = self.current_base()
+        if not head or head == ds.get("base") or time.time() - ds.get("at", 0) < self.t.dev_gate_minutes * 60:
+            return
+        self.log(f"full gate on {self.base_ref()} at {head[:8]}")
+        fut = self.pool.submit(self.job_dev_gate, head)
+        self.jobs[DEV_GATE_KEY] = Job("dev gate", DEV_GATE_KEY, DEV_GATE_KEY, fut)
+
+    def job_dev_gate(self, head: str) -> None:
+        ds = self.dev_gate_state()
+        wt = self.t.work_dir / DEV_GATE_KEY
+        try:
+            self.git.worktree_detached(wt, head)
+            g = self.run_gate(wt / self.t.project_dir, DEV_GATE_KEY, self.t.dev_gate, self.t.test_timeout)
+            since = ds.get("last_ok")
+            ds.update(base=head, at=time.time())
+            if g.ok:
+                ds["last_ok"] = head
+                if ds.get("ticket") and self.gh_issue_open(ds["ticket"]):
+                    self.gh.comment(ds["ticket"], review.bot(
+                        f"`{self.t.dev_gate}` passes on `{self.base_ref()}` at {head[:8]}."))
+                self.log(f"full gate passes on {self.base_ref()} at {head[:8]}")
+            else:
+                log = self.git.git("log", "--oneline", "--no-merges", "-40", f"{since}..{head}",
+                                   cwd=wt, check=False).out.strip() if since else ""
+                text = (f"`{self.t.dev_gate}` fails on `{self.base_ref()}` at {head[:8]}. The per-PR gate leaves "
+                        "the front's tests out of engine-only changes, so a merged engine change can break them; "
+                        "this catches it. The engine's change is merged work: adapt the front (its tests, "
+                        "scenes, scripts) to it rather than undoing it, unless the engine change is plainly "
+                        "wrong, then say so in `summary`."
+                        + (f"\n\nCommits since it last passed ({since[:8]}):" + fence(log) if log else "")
+                        + "\n\nThe gate's output:" + fence(g.tail(5000)))
+                if ds.get("ticket") and self.gh_issue_open(ds["ticket"]):
+                    self.gh.comment(ds["ticket"], review.bot(text))
+                    self.log(f"full gate fails on {self.base_ref()} at {head[:8]}; noted on #{ds['ticket']}")
+                else:
+                    n = self.file_ticket({"title": DEV_GATE_TITLE, "kind": "defect", "body": text},
+                                         "_Filed by the pipeline's full gate on the base branch._",
+                                         Status.PENDING_IMPLEMENTATION, f"the full gate on {self.base_ref()}")
+                    if n is not None:
+                        key = f"{TICKET_CHANGE}/{n}"
+                        self.state.task(key)["track"] = "front"
+                        with self.state.lock:
+                            self.state.data["triaged"] = sorted(
+                                set(self.state.data.get("triaged", [])) | {key}, key=key_sort)
+                        self.state.save()
+                        ds["ticket"] = n
+            self.dev_gate_path.write_text(json.dumps(ds, indent=1), encoding="utf-8")
+        finally:
+            self.git.worktree_remove(wt)
+
+    def gh_issue_open(self, number: int) -> bool:
+        return any(i["number"] == number and i["state"].upper() == "OPEN" for i in self.gh.list_issues())
 
     # ------------------------------------------------------------------ milestones
     def release_state(self, m: Milestone) -> dict:
