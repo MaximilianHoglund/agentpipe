@@ -165,6 +165,7 @@ class Pipeline:
         # Agents start only once the environment checks pass (see preflight).
         self.env_ok = not (target.preflight or target.preflight_gate)
         self.last_preflight = 0.0
+        self.cache_over_logged = False  # cap_cache said the cap can't be met; quiet until it can
         self.issue_map: dict[str, dict] = {}  # open issues by key, as of the last schedule()
         self.state = State(wd / "state.json")
         self.plan_path = wd / "plan.json"
@@ -854,8 +855,12 @@ class Pipeline:
         sizes = {d: dir_bytes(d) for d in dirs}
         total, cap = sum(sizes.values()), self.t.cache_max_gb * 2**30
         if total <= cap:
+            self.cache_over_logged = False
             return
-        idle = sorted((d for d in dirs if d.name not in busy), key=sizes.get, reverse=True)
+        # Dirs under 1% of the cap free nothing worth a log line; deleting them only made every
+        # sync log "deleted target/merge (0.0 GB)" while busy slots held the rest (2026-11-09).
+        idle = sorted((d for d in dirs if d.name not in busy and sizes[d] >= cap / 100),
+                      key=sizes.get, reverse=True)
         freed = []
         for d in idle:
             if total <= cap * 0.75:
@@ -863,8 +868,14 @@ class Pipeline:
             shutil.rmtree(d, ignore_errors=True)
             total -= sizes[d]
             freed.append(f"{d.parent.name}/{d.name} ({sizes[d] / 2**30:.1f} GB)")
-        self.log(f"build cache over {self.t.cache_max_gb:g} GB; deleted " + (", ".join(freed) or "nothing (all busy)")
-                 + f"; now about {total / 2**30:.1f} GB")
+        if freed:
+            self.cache_over_logged = False
+            self.log(f"build cache over {self.t.cache_max_gb:g} GB; deleted " + ", ".join(freed)
+                     + f"; now about {total / 2**30:.1f} GB")
+        elif not self.cache_over_logged:
+            self.cache_over_logged = True
+            self.log(f"build cache at about {total / 2**30:.1f} GB, over {self.t.cache_max_gb:g} GB, "
+                     "but busy slots hold the rest; logged again once something is deleted")
 
     def check_environment(self) -> None:
         """Run preflight at start, then once per sync interval while it fails."""

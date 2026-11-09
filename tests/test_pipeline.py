@@ -799,6 +799,29 @@ def test_cap_cache_deletes_largest_idle_slots_down_to_three_quarters(pl):
     assert len(list((p.t.work_dir / "target").iterdir())) == 3
 
 
+def test_cap_cache_logs_once_when_busy_slots_hold_the_cache(pl):
+    # 2026-11-09: with every large slot busy, each sync deleted empty dirs and logged it.
+    p, _ = pl
+    mb = 2**20
+    for slot, size in (("impl-0", 60), ("impl-1", 50)):
+        d = p.t.work_dir / "target" / slot
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "blob").write_bytes(b"\0" * size * mb)
+    (p.t.work_dir / "target" / "merge").mkdir()  # empty and idle: not worth deleting
+    p.jobs["a"] = _Job("implement", "impl-0")
+    p.jobs["b"] = _Job("implement", "impl-1")
+    p.t.cache_max_gb = 100 / 1024
+    logged = []
+    p.log = logged.append
+    p.cap_cache()
+    p.cap_cache()
+    assert len(logged) == 1 and "busy slots hold the rest" in logged[0]
+    assert (p.t.work_dir / "target" / "merge").exists()
+    del p.jobs["b"]  # impl-1 goes idle: it is deleted and logged
+    p.cap_cache()
+    assert len(logged) == 2 and "deleted target/impl-1" in logged[1] and "merge" not in logged[1]
+
+
 def test_approved_ticket_waits_for_the_tasks_it_names(pl):
     p, gh = pl
     n = gh.add(TICKET_MARKER + "\nNeeds c/1.2 first.", S.PENDING_IMPLEMENTATION, extra=("kind: defect",))
