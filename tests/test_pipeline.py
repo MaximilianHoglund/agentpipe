@@ -1809,3 +1809,49 @@ def test_exclusive_work_does_not_wait_for_files_held_by_work_the_hold_keeps_back
     gh.prs = [{"number": 20, "headRefOid": "s", "body": TASK_MARKER.format(key="c/1.1"), "files": []}]
     p.tick()
     assert [s[1] for s in p.started] == ["c/1.2"]
+
+
+def test_what_exclusive_work_waits_for_runs_too(pl):
+    from agentpipe.tasks import Task
+    p, gh = pl
+    p.t.exclusive = ["plan-x"]
+    task_issue(gh, "c/1.1", S.IN_PROGRESS)  # named by the ticket
+    task_issue(gh, "c/1.2", S.IN_PROGRESS)  # unrelated: held back
+    n = gh.add(TICKET_MARKER + "\nNeeds c/1.1 first.", S.PENDING_IMPLEMENTATION)
+    key = f"ticket/{n}"
+    p.tasks[key] = Task("ticket", str(n), "Plan x", False, "improvement", 0)
+    p.state.task(key)["origin"] = "plan-x"
+    p.issues_by_key = lambda raw: {(f"c/1.{i['number']}" if i["number"] < 3 else f"ticket/{i['number']}"): i
+                                   for i in raw}
+    p.load_tickets = lambda issues: p.ticket_bodies.update({key: gh.issues[n]["body"]})
+    p.ticket_bodies = {key: gh.issues[n]["body"]}
+    p.register_wait = lambda waiter, blockers, old=None: None
+    p.tick()
+    started = [s[1] for s in p.started]
+    assert "c/1.1" in started and "c/1.2" not in started
+
+
+def test_when_all_exclusive_work_waits_for_max_the_rest_runs(pl):
+    from agentpipe.tasks import Task
+    p, gh = pl
+    p.t.exclusive = ["plan-x"]
+    task_issue(gh, "c/1.1", S.IN_PROGRESS)
+    n = gh.add(TICKET_MARKER, S.NEEDS_DECISION)
+    p.tasks[f"ticket/{n}"] = Task("ticket", str(n), "Plan x", False, "improvement", 0)
+    p.state.task(f"ticket/{n}")["origin"] = "plan-x"
+    p.issues_by_key = lambda raw: {("c/1.1" if i["number"] == 1 else f"ticket/{i['number']}"): i for i in raw}
+    p.tick()
+    assert [s[1] for s in p.started] == ["c/1.1"] and not p.exclusive_on
+
+
+def test_a_filed_exclusive_ticket_never_listed_is_looked_up_after_a_while(pl):
+    p, gh = pl
+    p.t.exclusive = ["plan-x"]
+    task_issue(gh, "c/1.1", S.IN_PROGRESS)
+    p.state.data["exclusive_tickets"] = {"99": {"seen": False, "at": time.time()}}
+    gh.issue = lambda n: {"number": n, "state": "CLOSED", "body": "", "labels": []}
+    p.tick()
+    assert p.started == []  # too soon to look it up
+    p.state.data["exclusive_tickets"]["99"]["at"] = time.time() - 3600
+    p.tick()
+    assert [s[1] for s in p.started] == ["c/1.1"] and not p.state.data["exclusive_tickets"]

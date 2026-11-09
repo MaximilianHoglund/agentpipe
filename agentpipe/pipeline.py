@@ -42,6 +42,8 @@ LIGHT_RUNS = {"conflict", "cleanup"}
 RELEASE_KEY = "milestone"  # job key and slot of the milestone release job
 DEV_GATE_KEY = "devgate"  # job key, slot and worktree of the full gate on the base branch
 DEV_GATE_TITLE = "The full gate fails on the base branch"
+# A filed exclusive ticket GitHub still doesn't list after this long is looked up directly.
+EXCLUSIVE_UNLISTED_SECONDS = 900
 MUTATION_FIXES = 2  # implementer runs on missed mutants before the PR goes to review anyway
 # Implementer runs that continue the session that wrote the code, on its model: fixing missed
 # mutants, and resolving a conflict or a gate failure from merging the base at handoff.
@@ -316,7 +318,7 @@ class Pipeline:
         self.conflict_checked: dict[tuple[str, str], bool] = {}  # (PR head, base) -> conflicts
         # Whether `exclusive` work holds everything else back; assumed until a schedule has looked.
         self.exclusive_on = bool(target.exclusive)
-        self.exclusive_logged = False
+        self.exclusive_state: tuple | None = None  # what was last logged about the hold
         self.successor_stopped = False
         # Threads start lazily, so a generous cap costs nothing and lets a config reload
         # raise the slot counts without replacing the pool.
@@ -1006,7 +1008,8 @@ class Pipeline:
                         # Held for until it closes, though GitHub's issue list may not show it for a
                         # while (22:17 2026-11-09: the hold saw nothing open and let all work start).
                         with self.state.lock:
-                            self.state.data.setdefault("exclusive_tickets", {})[str(n)] = False
+                            self.state.data.setdefault("exclusive_tickets", {})[str(n)] = {
+                                "seen": False, "at": time.time()}
                 with self.state.lock:
                     self.state.data["triaged"] = sorted(set(self.state.data.get("triaged", [])) | {key},
                                                         key=key_sort)
@@ -1373,35 +1376,84 @@ class Pipeline:
         return key in ex or (key.startswith(TICKET_CHANGE + "/")
                              and self.state.data["tasks"].get(key, {}).get("origin") in ex)
 
+    # Statuses in which work waits for Max, not for the pipeline.
+    HUMAN_WAITS = (Status.NEEDS_DECISION, Status.PROPOSED, Status.WATCHING)
+
     def exclusive_work(self, issues: dict[str, dict]) -> set[str] | None:
-        """The open work `exclusive` names, or None when nothing holds the rest back: no entries,
-        or none open and none waiting in the inbox. Logs when the hold starts and ends."""
-        only = {k for k in issues if self.is_exclusive(k)} if self.t.exclusive else set()
+        """The work `exclusive` lets run, or None when nothing holds the rest back. Logs changes.
+
+        The hold must never wait on itself (audited 2026-11-09 after two deadlocks):
+        - what exclusive work waits for (a ticket's named tasks, a task's plan blockers, and
+          theirs in turn) runs too;
+        - when every piece of exclusive work waits for Max (needs decision, proposed, watching),
+          the rest runs meanwhile rather than the whole pipeline idling until he answers;
+        - a filed exclusive ticket is held for until GitHub lists it, and one never listed is
+          looked up directly after a while, so one closed before it was listed doesn't hold forever.
+        Fresh exclusive work skips the file-overlap wait (see schedule)."""
+        if not self.t.exclusive:
+            return None
+        named = {k for k in issues if self.is_exclusive(k)}
         # Tickets filed for it: held for from filing, seen open in the list, then gone (closed).
         filed = self.state.data.get("exclusive_tickets") or {}
         listed = {i["number"] for i in issues.values()}
-        before = dict(filed)
-        for n, seen in list(filed.items()):
+        before = {n: (dict(v) if isinstance(v, dict) else v) for n, v in filed.items()}
+        now = time.time()
+        for n, v in list(filed.items()):
+            v = v if isinstance(v, dict) else {"seen": bool(v), "at": now}
+            filed[n] = v
             if int(n) in listed:
-                filed[n] = True
-            elif seen:
+                v["seen"] = True
+            elif v["seen"]:
                 del filed[n]
+            elif now - v["at"] > EXCLUSIVE_UNLISTED_SECONDS:
+                try:
+                    if self.gh.issue(int(n))["state"].upper() != "OPEN":
+                        del filed[n]
+                except proc.CommandError as e:
+                    self.log(f"exclusive: could not look up #{n}: {str(e)[-200:]}")
         if filed != before:
             self.state.save()
-        waiting = bool(filed) and bool(self.t.exclusive)
-        if self.t.exclusive and not only and self.inbox_dir.is_dir():
+        waiting = bool(filed)
+        if not named and self.inbox_dir.is_dir():
             for f in self.inbox_dir.glob("*.json"):
                 try:
                     waiting |= json.loads(f.read_text(encoding="utf-8")).get("origin") in self.t.exclusive
                 except (OSError, ValueError):
                     waiting = True  # mid-write: hold on until it reads
-        on = bool(only) or waiting
-        if self.t.exclusive and (on != self.exclusive_on or not self.exclusive_logged):
-            self.exclusive_logged = True
-            self.log(f"exclusive: only {', '.join(sorted(only)) or 'the inbox ticket'} runs until it is done"
-                     if on else "exclusive: nothing it names is open; running everything")
+        # What the named work needs, transitively.
+        only, todo = set(named), list(named)
+        while todo:
+            k = todo.pop()
+            for b in self.exclusive_needs(k):
+                if b in issues and b not in only:
+                    only.add(b)
+                    todo.append(b)
+        actionable = {k for k in only if status_from_labels(issues[k]["labels"]) not in self.HUMAN_WAITS}
+        on = bool(actionable) or waiting
+        state = (on, frozenset(only) if on else None)
+        if state != self.exclusive_state:
+            self.exclusive_state = state
+            if on:
+                extra = sorted(only - named)
+                self.log(f"exclusive: only {', '.join(sorted(named)) or 'the filed ticket'} runs until it is done"
+                         + (f", with what it waits for: {', '.join(extra)}" if extra else ""))
+            elif only:
+                self.log(f"exclusive: {', '.join(sorted(only))} waits for you; running everything meanwhile")
+            else:
+                self.log("exclusive: nothing it names is open; running everything")
         self.exclusive_on = on
         return only if on else None
+
+    def exclusive_needs(self, key: str) -> list[str]:
+        """Unfinished tasks ``key`` waits for: a ticket's named tasks, a task's plan blockers."""
+        if key not in self.tasks:
+            return []
+        if key.startswith(TICKET_CHANGE + "/"):
+            task_keys = {k for k in self.tasks if not k.startswith(TICKET_CHANGE + "/")}
+            needs = ticket_blockers(self.ticket_bodies.get(key, ""), task_keys)
+        else:
+            needs = self.plan.get(key).blocked_by if self.plan else []
+        return [b for b in needs if b in self.tasks and not self.tasks[b].done]
 
     def track_of(self, key: str) -> str:
         """`front` or `engine` (see `front_paths`); `engine` for everything without a split. A
