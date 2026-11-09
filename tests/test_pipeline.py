@@ -1709,3 +1709,17 @@ def test_a_failing_dev_gate_files_one_approved_front_ticket_then_comments_on_it(
     p.job_dev_gate("base3")
     assert "passes" in gh.comments_by[n][-1]["body"]
     assert json.loads(p.dev_gate_path.read_text())["last_ok"] == "base3"
+
+
+def test_a_priority_entry_can_name_a_change_and_a_ticket_that_writes_it(pl):
+    from agentpipe import milestones
+    from agentpipe.tasks import Task
+    p, gh = pl
+    p.t.priority = ["c"]
+    assert p.rank_of("c/1.1") == milestones.PRIORITY_RANK
+    p.tasks["ticket/9"] = Task("ticket", "9", "plan c", False, "improvement", 0)
+    assert p.rank_of("ticket/9") != milestones.PRIORITY_RANK
+    p.t.priority = ["new-change"]
+    p.state.task("ticket/9")["origin"] = "new-change"
+    assert p.rank_of("ticket/9") == milestones.PRIORITY_RANK
+    assert p.rank_of("c/1.1") != milestones.PRIORITY_RANK

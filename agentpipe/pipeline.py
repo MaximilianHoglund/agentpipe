@@ -1419,11 +1419,16 @@ class Pipeline:
     def rank_of(self, key: str) -> float:
         """Milestone priority of a task or ticket: lower runs first (the next test build).
 
-        Tasks in the target's ``priority`` list go before all but unblocking tickets."""
-        if key in self.t.priority:
+        Tasks in the target's ``priority`` list go before all but unblocking tickets. An entry
+        can also name a whole change: its tasks, and tickets whose origin is that change (one
+        that writes the change, before its tasks exist), go first too."""
+        task = self.tasks[key]
+        if key in self.t.priority or task.change in self.t.priority:
             return milestones.PRIORITY_RANK
-        if self.tasks[key].change == TICKET_CHANGE:
+        if task.change == TICKET_CHANGE:
             st = self.state.task(key)
+            if st.get("origin") and st["origin"] in self.t.priority:
+                return milestones.PRIORITY_RANK
             return milestones.ticket_rank(self.t.milestones, st.get("origin"), st.get("unblocks", False))
         return milestones.rank(self.t.milestones, self.tasks[key].change)
 
