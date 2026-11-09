@@ -850,6 +850,13 @@ class Pipeline:
         if self.t.cache_max_gb <= 0:
             return
         busy = {j.slot for j in self.jobs.values()}
+        # Nested-build test scratch is dead once its job ends, and was most of a slot: 14 of an
+        # arpg slot's 18 GB, against 3.5 GB for its own build (2026-11-09). Drop it from idle
+        # slots first, so the cap keeps their builds warm instead of deleting them.
+        target = self.t.work_dir / "target"
+        for d in target.iterdir() if target.is_dir() else ():
+            if d.is_dir() and d.name not in busy:
+                self.prune_checkout_scratch(d.name)
         dirs = [d for root in ("target", "tmp") if (self.t.work_dir / root).is_dir()
                 for d in (self.t.work_dir / root).iterdir() if d.is_dir()]
         sizes = {d: dir_bytes(d) for d in dirs}

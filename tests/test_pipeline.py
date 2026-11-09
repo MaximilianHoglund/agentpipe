@@ -799,6 +799,19 @@ def test_cap_cache_deletes_largest_idle_slots_down_to_three_quarters(pl):
     assert len(list((p.t.work_dir / "target").iterdir())) == 3
 
 
+def test_cap_cache_drops_idle_slots_checkout_scratch_and_keeps_their_builds(pl):
+    p, _ = pl
+    p.t.cache_max_gb = 1
+    for slot in ("impl-0", "impl-1"):
+        (p.t.work_dir / "target" / slot / "tmp" / "checkout-abc").mkdir(parents=True)
+        (p.t.work_dir / "target" / slot / "debug").mkdir(parents=True)
+    p.jobs["k"] = _Job("implement", "impl-0")
+    p.cap_cache()
+    assert (p.t.work_dir / "target" / "impl-0" / "tmp" / "checkout-abc").exists()  # busy
+    assert not (p.t.work_dir / "target" / "impl-1" / "tmp" / "checkout-abc").exists()
+    assert (p.t.work_dir / "target" / "impl-1" / "debug").exists()
+
+
 def test_cap_cache_logs_once_when_busy_slots_hold_the_cache(pl):
     # 2026-11-09: with every large slot busy, each sync deleted empty dirs and logged it.
     p, _ = pl
