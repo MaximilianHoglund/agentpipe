@@ -185,6 +185,24 @@ class State:
                         tasks.pop(k, None)
                 self._write(out)
 
+    def take_back(self) -> None:
+        """End ``own_only``: the new dispatcher died, so this one owns the whole file again.
+
+        Everything but our own tasks comes from disk, since the dead one may have changed it."""
+        with self.lock, handoff.file_lock(self.path.with_suffix(".lock")):
+            disk = self.read()
+            mine = {k: self.data["tasks"][k] for k in self.own_only or () if k in self.data["tasks"]}
+            for k in ("tasks", "db_ids", "links", "flagged", "cleared"):
+                if k in disk:
+                    self.data[k] = disk[k]
+            self._take_shared(disk)
+            for k in self.own_only or ():
+                if k in mine:
+                    self.data["tasks"][k] = mine[k]
+                else:
+                    self.data["tasks"].pop(k, None)
+            self.own_only = None
+
     def refresh(self, keys) -> None:
         """Reload ``keys`` (tasks an old dispatcher just finished) and the shared usage fields."""
         with self.lock, handoff.file_lock(self.path.with_suffix(".lock")):
@@ -269,6 +287,7 @@ class Pipeline:
         self.last_code_check = 0.0
         self.handing_off = False  # handed over: only finishing the jobs already running
         self.handed_jobs: dict[str, dict] = {}  # what our handoff file lists, to rewrite on change
+        self.successor_deaths: dict[str, int] = {}  # commit -> times its new dispatcher died
         # Jobs an old dispatcher still finishes after handing over: key -> {kind, slot, issue,
         # batch, pid}. Their tasks (with batch followers) and slots count as taken.
         self.foreign: dict[str, dict] = {}
@@ -1292,6 +1311,11 @@ class Pipeline:
             exc = job.future.exception()
             if isinstance(exc, LimitHit):
                 self.pause(str(exc))
+            elif isinstance(exc, proc.CommandError) and github_mod.is_network(str(exc)):
+                # GitHub out of reach isn't the job's fault: no failure count, so two blips
+                # can't send the task to needs decision. Its status is unchanged, so it resumes.
+                self.log(f"{job.kind} {key} crashed: GitHub unreachable, runs again; "
+                         f"not counted as a failure ({str(exc)[-200:]})")
             elif exc:
                 tb = "".join(traceback.format_exception(exc))
                 self.log(f"{job.kind} {key} crashed: {exc}")
@@ -1405,14 +1429,18 @@ class Pipeline:
             self.git.enable_rerere()
         except proc.CommandError as e:
             self.log(f"could not enable git rerere: {str(e)[-200:]}")
+        older = sorted(handoff.live(self.t.work_dir, os.getpid()))
         self.log(f"running (pid {os.getpid()}); implementers={self.implementers()} "
-                 f"reviewers={self.reviewers()}")
+                 f"reviewers={self.reviewers()}"
+                 + (f"; taking over from dispatcher {', '.join(map(str, older))}" if older else ""))
         counted = threading.Event()
         if not once:
             threading.Thread(target=self.refresh_awaiting_forever, args=(counted,),
                              name="awaiting", daemon=True).start()
         try:
             while True:
+                if self.handing_off and service.running_pid(self.t.work_dir) is None:
+                    self.take_back()
                 if not once and not self.handing_off:
                     self.check_code()
                     if self.restart_for and not self.stopping and not self.stop_reason() and not any(
@@ -1488,9 +1516,32 @@ class Pipeline:
         self.handing_off = True
         self.stopping = True
         self.pid_file.write_text(str(pid), encoding="utf-8")
-        self.log(f"agentpipe {self.restart_for[:7]} landed: handed over to dispatcher {pid}; "
+        # Not "dispatcher {pid}": on Windows `pid` is the venv's launcher, which runs the real
+        # interpreter as a child under another pid. The new one logs its own in "running (pid".
+        self.log(f"agentpipe {self.restart_for[:7]} landed: handed over to a new dispatcher; "
                  f"finishing {len(jobs)} running job(s) here" + (
                      f"; command-line overrides dropped: {sorted(self.overrides)}" if self.overrides else ""))
+
+    def take_back(self) -> None:
+        """The dispatcher we handed over to died (13:31 2026-11-09: a GitHub blip, then 2318e5a's
+        successor was gone while the old one finished its jobs and nothing scheduled the rest).
+
+        Take the target back on this code and fill the free slots again. The handoff to the
+        same commit is retried once; after a second death this one stays until the next commit."""
+        rev = self.restart_for or ""
+        deaths = self.successor_deaths[rev] = self.successor_deaths.get(rev, 0) + 1
+        # The pid file first, then the handoff file: a linked watcher never sees neither.
+        self.pid_file.write_text(str(os.getpid()), encoding="utf-8")
+        handoff.remove(self.t.work_dir, os.getpid())
+        self.state.take_back()
+        self.handing_off = self.stopping = False
+        self.handed_jobs = {}
+        self.last_sync = 0.0  # its view of the issues is stale
+        if deaths >= 2:
+            self.bad_rev, self.restart_for = rev, None
+        self.log(f"the dispatcher on agentpipe {rev[:7]} died; taking the target back (pid {os.getpid()}), "
+                 + ("staying on this code until the next commit" if deaths >= 2 else "handing over again")
+                 + f"; {len(self.jobs)} job(s) still running here")
 
     def update_handoff(self) -> None:
         """Keep the handoff file in step as the jobs finish."""
@@ -1507,9 +1558,10 @@ class Pipeline:
                 now[k] = {**j, "pid": pid}
         for k, j in now.items():
             if k not in self.foreign:
-                # In pipeline.log's start format, so the watcher lists it again after our start.
-                self.log(f"start {j['kind']} {k} (#{j.get('issue', 0)}) on {j['slot']}: "
-                         f"finishing on dispatcher {j['pid']}")
+                # Not "start": nothing starts. The watcher reads it like a start line, so it
+                # lists the job again after our "running" line cleared its panes.
+                self.log(f"carried over {j['kind']} {k} (#{j.get('issue', 0)}) on {j['slot']}: "
+                         f"old dispatcher {j['pid']} finishes it")
         gone = {k: j for k, j in self.foreign.items() if k not in now}
         keys = {b for j in now.values() for b in j.get("batch") or []} | set(now)
         gone_keys = {b for j in gone.values() for b in j.get("batch") or []} | set(gone)

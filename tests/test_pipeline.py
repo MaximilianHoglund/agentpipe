@@ -530,7 +530,9 @@ def test_new_agentpipe_commit_hands_over_at_once_and_finishes_running_jobs(pl, m
     import json
     from agentpipe import handoff
     p, gh = pl
+    from agentpipe import service
     started = _code_pipeline(p, monkeypatch, ["a" * 40, "b" * 40])
+    monkeypatch.setattr(service, "is_alive", lambda pid: pid in (777, os.getpid()))
     lines, ticks, files = [], [], []
     p._log = lines.append
     job = type("J", (), {"kind": "implement", "slot": "impl-0", "issue": 5})()
@@ -555,7 +557,7 @@ def test_new_agentpipe_commit_hands_over_at_once_and_finishes_running_jobs(pl, m
     p.run_forever()
     assert set(files[0]) == {"c/1.1", "c/1.2"} and files[0]["c/1.1"]["issue"] == 5
     assert set(files[1]) == {"c/1.1"}  # rewritten as jobs end
-    assert any("handed over to dispatcher 777; finishing 2 running job(s)" in l for l in lines)
+    assert any("handed over to a new dispatcher; finishing 2 running job(s)" in l for l in lines)
     assert p.pid_file.read_text(encoding="utf-8") == "777"  # the new dispatcher's
     assert not mine.exists()  # removed once its last job ended
     assert p.state.own_only == {"c/1.1", "c/1.2"}
@@ -582,6 +584,73 @@ def test_handoff_waits_for_a_running_merge(pl, monkeypatch):
     assert started == ["t"]
 
 
+def test_old_dispatcher_takes_back_over_when_its_successor_dies(pl, monkeypatch):
+    import json
+    from agentpipe import handoff, service, watch
+    p, gh = pl
+    started = _code_pipeline(p, monkeypatch, ["a" * 40, "b" * 40])
+    alive = {777: True}
+    monkeypatch.setattr(service, "is_alive", lambda pid: pid == os.getpid() or alive.get(pid, False))
+    lines, ticks = [], []
+    p._log = lines.append
+    job = type("J", (), {"kind": "implement", "slot": "impl-0", "issue": 5})()
+    mine = handoff.handoff_dir(p.t.work_dir) / f"{os.getpid()}.json"
+    holder = type("H", (), {"seen_dispatcher": False})()
+
+    def tick():
+        ticks.append(1)
+        if len(ticks) == 1:
+            p.jobs["c/1.1"] = job
+            p.state.task("c/1.1")["runs"] = 1
+        elif len(ticks) == 2:
+            assert p.handing_off and mine.exists()
+            # Meanwhile the new dispatcher wrote another task, then died.
+            disk = p.state.read()
+            disk["tasks"]["c/2.1"] = {"runs": 7}
+            p.state.path.write_text(json.dumps(disk), encoding="utf-8")
+            alive[777] = False
+            assert not watch.linked_watcher_done(p.t.work_dir, holder)  # we still finish jobs
+        elif len(ticks) == 3:
+            # Taken back with the dead one's writes, then handed over again at once.
+            assert p.state.task("c/2.1") == {"runs": 7} and p.state.task("c/1.1") == {"runs": 1}
+            assert started == ["t", "t"] and p.handing_off and mine.exists()
+            alive[777] = False  # dies again
+        elif len(ticks) == 4:
+            assert started == ["t", "t"] and not p.handing_off and not p.stopping
+            assert p.restart_for is None and p.state.own_only is None
+            assert p.pid_file.read_text(encoding="utf-8") == str(os.getpid()) and not mine.exists()
+            assert not watch.linked_watcher_done(p.t.work_dir, holder)
+            p.stop_file.write_text("", encoding="utf-8")
+            p.jobs.clear()
+        assert len(ticks) < 10
+
+    def start(name, wd, cfg, handed_over=False):
+        started.append(name)
+        alive[777] = True
+        return 777
+
+    monkeypatch.setattr(service, "start", start)
+    p.tick = tick
+    p.run_forever()
+    assert any("died; taking the target back" in l and "handing over again" in l for l in lines)
+    assert any("staying on this code until the next commit" in l for l in lines)
+    assert p.bad_rev == "b" * 40
+
+
+def test_a_github_blip_in_a_job_is_not_counted_as_a_failure(pl):
+    from concurrent.futures import Future
+    p, gh = pl
+    lines = []
+    p._log = lines.append
+    fut = Future()
+    fut.set_exception(proc_mod.CommandError(["gh", "pr", "create"],
+                                            proc_mod.Result(1, "", "net/http: TLS handshake timeout")))
+    p.jobs["c/1.1"] = type("J", (), {"kind": "implement", "slot": "impl-0", "future": fut})()
+    p.reap()
+    assert "fail_implement" not in p.state.task("c/1.1")
+    assert any("implement c/1.1 crashed: GitHub unreachable" in l for l in lines)
+
+
 def test_new_dispatcher_leaves_handed_over_work_and_slots_alone(pl, monkeypatch):
     from agentpipe import handoff, service
     p, gh = pl
@@ -596,7 +665,12 @@ def test_new_dispatcher_leaves_handed_over_work_and_slots_alone(pl, monkeypatch)
     p._log = lines.append
     p.tick()
     assert p.started == [("implement", "c/1.1", "impl-1")]  # impl-0 is the old dispatcher's
-    assert any(l.endswith("start implement c/1.3 (#9) on impl-0: finishing on dispatcher 4242") for l in lines)
+    assert any(l.endswith("carried over implement c/1.3 (#9) on impl-0: old dispatcher 4242 finishes it")
+               for l in lines)
+    from agentpipe import watch
+    held = [l[l.index("carried over"):] for l in lines if "carried over" in l]
+    jobs = watch.parse_log([f"2026-11-09 14:29:11 [t] {l}" for l in held]).jobs
+    assert [(j.kind, j.key, j.slot) for j in jobs] == [("implement", "c/1.3", "impl-0")]
     # The old dispatcher finishes: its record of the task is taken over from state.json.
     disk = p.state.read()
     disk["tasks"]["c/1.3"] = {"runs": 3}

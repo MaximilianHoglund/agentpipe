@@ -25,7 +25,8 @@ PROJECTS = Path.home() / ".claude" / "projects"
 
 _LINE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[[^\]]+\] (.*)$")
 # Newer dispatchers append ": <short task description>".
-_START_RE = re.compile(r"^start (\w+) (\S+) \(#(\d+)\) on (\S+?)(?:: (.*))?$")
+# "carried over" lists a job an old dispatcher still finishes after a handoff.
+_START_RE = re.compile(r"^(?:start|carried over) (\w+) (\S+) \(#(\d+)\) on (\S+?)(?:: (.*))?$")
 _PHASE_RE = re.compile(r"^phase (\S+): (.*)$")
 _END_RE = re.compile(r"^(?:done (\w+) (\S+)|(\w+) (\S+) crashed: .*)$")
 
@@ -408,8 +409,9 @@ def linked_watcher_done(work_dir: Path, holder) -> bool:
 
     ``holder.seen_dispatcher`` remembers whether one was seen; a watcher opened before its
     dispatcher wrote its pid file must not close straight away."""
-    from agentpipe import service
-    if service.running_pid(work_dir) is not None:
+    from agentpipe import handoff, service
+    # An old dispatcher still finishing jobs counts: if the new one dies, it takes back over.
+    if service.running_pid(work_dir) is not None or handoff.live(work_dir):
         holder.seen_dispatcher = True
         return False
     return holder.seen_dispatcher
