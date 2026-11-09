@@ -120,7 +120,10 @@ changed lines and the reviewer gets the `MISSED` mutants as evidence; each real 
 a blocking coverage finding. It runs in place in the disposable review checkout,
 reusing the gate's build, and the checkout is reset afterwards.
 
-After `max_rounds` rejections a task goes to `needs decision`. Merge conflicts with
+After `max_rounds` rejections a task goes to `needs decision`. An implementer that stops
+unfinished returns `incomplete` with notes on what is left: its work is saved as a WIP
+commit and the task is requeued at once, and the next fresh session gets the notes. Only
+the third such run in a row goes to `needs decision`. Merge conflicts with
 the base branch are sent back without using up a round.
 
 ## Model tiers
@@ -150,7 +153,13 @@ full re-review. Four things cut that:
   implemented, or with an open PR not parked in `needs decision`) touches the same
   files, by prediction or by the PR's actual changed files. Tickets use the files their
   body names. Paths in the target's `overlap_ignore` don't count. Work already under
-  way always resumes. The log says `... waits for <key> (PR #n) to merge first`.
+  way always resumes, including a task requeued to `pending implementation` that has a
+  PR or earlier runs. The log says `... waits for <key> (PR #n) to merge first`.
+- **Merging at handoff.** Before a PR goes to review, the dispatcher merges the base
+  into the branch. The implementer's own session, on its own model, resolves a conflict.
+  After a clean merge the gate runs (once more if it fails, since some tests are
+  load-sensitive); if it still fails, the same session gets the output to fix it, up to
+  two times, and then review judges what is there.
 - **Mechanical resolution.** Merges use diff3 markers. A conflict where both sides only
   added lines (a `mod` line, a decision at the end of a doc) is resolved by keeping
   both, then the target's `format` command runs. A real conflict goes to an agent.

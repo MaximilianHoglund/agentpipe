@@ -47,7 +47,7 @@ PREFLIGHT_SCHEMA = {
 IMPLEMENTER_SCHEMA = {
     "type": "object",
     "properties": {
-        "status": {"type": "string", "enum": ["done", "needs_decision"]},
+        "status": {"type": "string", "enum": ["done", "incomplete", "needs_decision"]},
         "summary": {"type": "string"},
         "tests": {"type": "string"},
         "question": {"type": "string"},

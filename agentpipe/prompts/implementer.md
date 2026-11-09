@@ -149,9 +149,14 @@ retry it in another form:
 ## Finish
 
 Return the structured output:
-- `status`: `done`, or `needs_decision` if you hit something only a human can resolve
-  (missing information, a decision the spec leaves to the owner, a credential). Do not
-  use it for things you can figure out by reading the code.
+- `status`: `done`; `incomplete` if you are stopping before the work is finished but
+  another session could finish it (a search or command ran out of time, an approach
+  failed and you have a next one, the tests still fail); or `needs_decision` if you hit
+  something only a human can resolve (missing information, a decision the spec leaves to
+  the owner, a credential). Do not use `needs_decision` for things you can figure out by
+  reading the code, or for unfinished work: `incomplete` is requeued automatically.
+  With `incomplete`, commit what is finished first and put in `summary` exactly what is
+  left, what you tried, and the next steps: a fresh session continues from that.
 - `summary`: what you changed and why, written for the PR description.
 - `tests`: the behaviours and edge cases your tests cover.
 - `docs`: each doc you updated and what it now records, or `none` and why nothing needed

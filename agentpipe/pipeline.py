@@ -39,6 +39,11 @@ IMPL_KINDS = {"implement", "revise"}
 LIGHT_RUNS = {"conflict", "cleanup"}
 RELEASE_KEY = "milestone"  # job key and slot of the milestone release job
 MUTATION_FIXES = 2  # implementer runs on missed mutants before the PR goes to review anyway
+# Implementer runs that continue the session that wrote the code, on its model: fixing missed
+# mutants, and resolving a conflict or a gate failure from merging the base at handoff.
+SESSION_RUNS = {"mutants", "sync"}
+SYNC_FIXES = 2  # implementer runs on a gate the base merge broke before the PR goes to review anyway
+UNFINISHED_REQUEUES = 2  # "incomplete" runs in a row requeued automatically before asking Max
 MERGE_ATTEMPTS = 3  # tries to bring a behind branch up to date and merge it
 MERGE_RETRY_SECONDS = 15  # lets GitHub finish computing mergeability after a push
 
@@ -1159,8 +1164,12 @@ class Pipeline:
                                  f"{str(e)[-200:]}")
                 continue
             # Only fresh starts wait: work already under way resumes, or two waiting on each
-            # other would never run.
-            if status is Status.PENDING_IMPLEMENTATION and (why := self.overlap_hold(key, issues, prs)):
+            # other would never run. A task with a PR or earlier runs is under way even when
+            # requeued to pending implementation (2026-11-09: combat-simulation/5.1, back from
+            # needs decision, waited for 5.3, which had started on its files meanwhile).
+            fresh = (status is Status.PENDING_IMPLEMENTATION and key not in prs
+                     and not self.state.task(key).get("runs"))
+            if fresh and (why := self.overlap_hold(key, issues, prs)):
                 if self.held.get(key) != why:
                     self.held[key] = why
                     self.log(f"{self.what(key)} {why}")
@@ -1659,7 +1668,7 @@ class Pipeline:
         a = self.cfg.agents["implementer"]
         if not a.light_model or self.state.task(t.key).get("escalated"):
             return a.model
-        if run == "mutants":  # continues the session that wrote the code, on its model
+        if run in SESSION_RUNS:  # continues the session that wrote the code, on its model
             return self.state.task(t.key).get("session_model") or self.model_for(t, "impl")
         if run in LIGHT_RUNS or (run == "impl" and self.light_task(t)):
             return a.light_model
@@ -1686,10 +1695,14 @@ class Pipeline:
         exists = (wt / ".git").exists()
         ahead = self.git.commits_ahead(wt, self.base_ref()) if exists else 0
         dirty = exists and not self.git.is_clean(wt)
-        if not (pr or ahead or dirty):
+        notes = self.state.task(t.key).get("unfinished")
+        if not (pr or ahead or dirty or notes):
             return ""
         parts = ["## Earlier work on this task\n\nAn earlier session worked on this branch; continue "
                  "from it instead of starting over."]
+        if notes:
+            parts.append("The last session stopped before finishing. Its notes on what is left and "
+                         "what it tried:\n\n" + notes[:4000])
         if ahead:
             parts.append(f"It has {ahead} commit(s) on top of `{self.base_ref()}` "
                          f"(`git log {self.base_ref()}..HEAD`).")
@@ -1976,8 +1989,9 @@ class Pipeline:
             f"the task in tasks.md if it is too big for one session, or requeue it to continue in a fresh "
             f"session from what is committed."))
 
-    def save_wip(self, t: Task, what: str) -> str:
-        """Commit and push what a capped implementer left uncommitted, so a requeue keeps it.
+    def save_wip(self, t: Task, what: str, how: str = "hit") -> str:
+        """Commit and push what a capped or unfinished implementer left uncommitted, so a
+        requeue keeps it. The commit says the run ``how`` ``what`` ("hit its turn cap").
 
         Returns a sentence for the decision comment. A worktree in an unfinished merge is left
         alone: committing it would record conflict markers.
@@ -1989,14 +2003,14 @@ class Pipeline:
             if self.git.merging(wt):
                 return (" Its worktree is in an unfinished merge with uncommitted work, left as is: "
                         "resolve it by hand before requeueing.")
-            if not self.git.commit_all(wt, f"{t.key}: WIP from a run that hit {what}\n\n"
+            if not self.git.commit_all(wt, f"{t.key}: WIP from a run that {how} {what}\n\n"
                                            "Saved by the dispatcher; not yet gated."):
                 return ""
             self.git.push(wt, t.branch)
         except proc.CommandError as e:
             self.log(f"could not save WIP for {self.what(t.key)}: {e}")
             return " Saving its uncommitted work failed; it is still in the worktree."
-        self.log(f"saved WIP for {self.what(t.key)} after {what}")
+        self.log(f"saved WIP for {self.what(t.key)}: its run {how} {what}")
         return (" Its uncommitted work was saved as a WIP commit on the branch (not yet gated), "
                 "so a requeue continues from it.")
 
@@ -2010,6 +2024,8 @@ class Pipeline:
             raise RuntimeError(f"implementer run failed ({res.subtype}): {res.text[:1000]}")
         out = res.structured
         self.file_tickets(f"the implementer of {t.key} (#{issue})", out.get("tickets"))
+        if out["status"] == "incomplete":
+            return self.unfinished(t, issue, cur, out)
         if out["status"] == "needs_decision":
             self.to_decision(issue, cur, out.get("question") or out["summary"])
             return
@@ -2024,14 +2040,8 @@ class Pipeline:
         if self.git.commits_ahead(wt, self.base_ref()) == 0:
             self.to_decision(issue, cur, "The implementer reported done but committed nothing.\n\n" + out["summary"])
             return
-        self.git.fetch()
-        # No gate here: the review runs it on whatever is pushed.
-        if self.merge_base(wt, slot, gate=False) == "conflict":
-            res = self.resolve_conflict(t, slot)
-            if not res.ok or self.git.merging(wt) or not self.git.is_clean(wt):
-                self.git.merge_abort(wt)
-                self.to_decision(issue, cur, "Could not resolve merge conflicts with the base branch.")
-                return
+        if (out := self.sync_with_base(t, issue, cur, slot, out)) is None:
+            return
         out = self.mutation_pass(t, slot, out)
         self.git.push(wt, t.branch)
         tasks = self.batch(t)
@@ -2051,9 +2061,83 @@ class Pipeline:
                                                   f"\n\n**Docs:** {out.get('docs') or 'none'}"))
         self.gh.set_status(issue, Status.PENDING_REVIEW, cur)
         st = self.state.task(t.key)
-        st.pop("fail_implement", None)
-        st.pop("fail_revise", None)
+        for k in ("fail_implement", "fail_revise", "unfinished", "unfinished_runs"):
+            st.pop(k, None)
         self.state.save()
+
+    def unfinished(self, t: Task, issue: int, cur: Status, out: dict) -> None:
+        """An implementer that stopped before finishing, with notes on what is left: save its
+        work and requeue it in a fresh session that gets the notes (``prior_work``). Only after
+        UNFINISHED_REQUEUES such runs in a row does it go to Max. Before 2026-11-09 these runs
+        could only say needs decision (combat-simulation/5.1: a seed search timed out)."""
+        st = self.state.task(t.key)
+        n = st.get("unfinished_runs", 0) + 1
+        st.update(unfinished_runs=n, unfinished=out["summary"])
+        st.pop("session", None)  # a fresh session, from what is committed plus the notes
+        self.state.save()
+        saved = self.save_wip(t, "unfinished", how="stopped")
+        if n > UNFINISHED_REQUEUES:
+            self.to_decision(issue, cur, (
+                f"The implementer stopped unfinished {n} runs in a row.{saved} Split the task in "
+                f"tasks.md, answer what blocks it, or requeue it.\n\nIts last notes:\n\n{out['summary']}"))
+            return
+        self.gh.comment(issue, review.bot(
+            f"**Unfinished; requeued.** The implementer stopped before finishing (run {n} of "
+            f"{UNFINISHED_REQUEUES} requeued automatically).{saved} A fresh session continues from "
+            f"its notes:\n\n{out['summary']}"))
+        self.log(f"{self.what(t.key)} stopped unfinished; requeued ({n}/{UNFINISHED_REQUEUES})")
+
+    def sync_with_base(self, t: Task, issue: int, cur: Status, slot: str, out: dict) -> dict | None:
+        """Before handing work to review: merge the base, so the reviewer sees the branch as it
+        would merge. The implementer's own session (warm, on its model) resolves any conflict,
+        and fixes the gate when a clean merge brought in base changes that break it, rather than
+        a review round finding that later. Returns the implementer's structured output, updated
+        by any fix run, or None when the task went to a decision."""
+        wt = self.wt(t)
+        self.git.fetch()
+        m = self.merge_base(wt, slot, gate=False)
+        if m == "current":
+            return out  # the implementer's own gate run covered this tree
+        if m == "conflict":
+            self.log(f"phase {t.key}: resolving conflicts with {self.base_ref()} (before review)")
+            res = self.agent(t, self.conflict_prompt(t), slot, "sync")
+            if res.subtype not in CAPPED and self.git.merging(wt):
+                res = self.resolve_conflict(t, slot)  # its light-model escalation path
+            if not res.ok or self.git.merging(wt) or not self.git.is_clean(wt):
+                self.git.merge_abort(wt)
+                self.to_decision(issue, cur, "Could not resolve merge conflicts with the base branch.")
+                return None
+            return out  # the conflict run ran the tests on the merge; the review gates it again
+        for attempt in range(SYNC_FIXES + 1):
+            self.log(f"phase {t.key}: test gate (after merging {self.base_ref()}, before review)")
+            g = self.run_gate(wt / self.t.project_dir, slot, self.t.test, self.t.test_timeout)
+            if not g.ok and attempt == 0:
+                # arpg's gate has load-sensitive tests (#618): a failure an agent can't fix costs a run.
+                g = self.run_gate(wt / self.t.project_dir, slot, self.t.test, self.t.test_timeout)
+                if g.ok:
+                    self.log(f"{self.what(t.key)}: the gate failed once after merging {self.base_ref()}, "
+                             "then passed (flaky)")
+            if g.ok:
+                return out
+            if attempt == SYNC_FIXES:
+                self.log(f"{self.what(t.key)}: the gate still fails after merging {self.base_ref()}; "
+                         "the reviewer judges it")
+                return out
+            self.log(f"{self.what(t.key)}: merging {self.base_ref()} broke the gate; back to the implementer")
+            res = self.agent(t, (
+                f"Before handing your work to review, the pipeline merged `{self.base_ref()}` into your "
+                f"branch, and `{self.t.test}` now fails. The base's changes are merged work: adapt your "
+                "change to them rather than undoing them. Fix the failure, run the tests until they pass, "
+                "commit, and return the structured output again, with `summary`, `tests` and `docs` "
+                "describing the whole change.\n\n```\n" + g.tail(6000) + "\n```"), slot, "sync")
+            if not self.git.is_clean(wt):
+                self.git.restore(wt)  # uncommitted leftovers; what was committed stands
+            if not res.ok or res.subtype in CAPPED or (res.structured or {}).get("status") != "done":
+                self.log(f"{self.what(t.key)}: the gate fix run didn't finish; reviewing what is committed")
+                return out
+            self.file_tickets(f"the implementer of {t.key}", res.structured.get("tickets"))
+            out = {**out, **{k: v for k, v in res.structured.items() if k in ("summary", "tests", "docs") and v}}
+        return out
 
     def run_gate(self, cwd: Path, slot: str, cmd: str, timeout: int) -> proc.Result:
         self.clean_workspace_crates(cwd, slot)
