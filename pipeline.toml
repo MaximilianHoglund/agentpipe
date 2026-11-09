@@ -194,6 +194,9 @@ release_test = '''pwsh -NoProfile -File scripts/check.ps1 -Full'''
 # mutants: 8 min with copies, vs ~1 h --in-place. Branches without the script use the old one-liner.
 mutation = '''pwsh -NoProfile -Command "if (Test-Path scripts/mutants.ps1) { & ./scripts/mutants.ps1 -Diff '{diff}'; exit $LASTEXITCODE } elseif (Test-Path Cargo.toml) { Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue; cargo mutants -j 6 --in-diff '{diff}' --baseline skip --timeout 120 --no-shuffle -- -- --skip checkouts_sharing_a_target_directory } else { Write-Output 'No Cargo.toml yet: no mutation run.' }"'''
 mutation_timeout = 1800
+# Since 11-08 most coverage rejections were in code mutation never reaches (bridge, GDScript), while
+# the implementer was told mutation covers "the lines you changed" (2026-11-09).
+mutation_covers = "Rust outside crates/bridge. It does not touch crates/bridge or any GDScript (game/), and skips the nested-build tooling tests"
 # The mutants build in their own tree copies, so they run alongside the reviewer's gate (the two
 # were ~10 min each, one after the other, in Nov 2026). Off since 2026-11-08: the "large packs"
 # benchmark case (51 units) has no such headroom and failed under the load on PR #394 (fastest

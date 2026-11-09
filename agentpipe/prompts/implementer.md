@@ -28,8 +28,10 @@ don't say, write it down in the same PR, where the next agent in that area will 
   the change's `design.md` (the decision and its reason) or its spec delta under `specs/`
   (requirement and scenario), so they describe what the code now does. For a ticket, use
   the context docs above.
-- **A decision or fact from the human input** below: record it the same way, dated. It must
-  not live only in an issue comment.
+- **A decision or fact from the human input** below: record it, dated, where the project's
+  CLAUDE.md or context docs say owner decisions go (such as a decisions log), and otherwise the
+  same way as above. It must not live only in an issue comment or only in a change's design.md
+  when the project keeps a decisions log.
 - **A non-obvious fact that cost you time**: a pitfall, a constraint, why the obvious approach
   fails. Put it in the context docs, or a comment where it applies in the code.
 

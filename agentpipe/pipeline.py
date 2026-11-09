@@ -1667,9 +1667,16 @@ class Pipeline:
         target without one. The pipeline runs it (``mutation_pass``), so agents don't."""
         if not self.t.mutation:
             return ""
-        return ("When you finish, the pipeline runs mutation testing on the lines you changed and "
+        text = ("When you finish, the pipeline runs mutation testing on the lines you changed and "
                 "hands you every mutant no test caught before the PR goes to review. You don't need "
                 "to run it yourself, but each miss costs you another round, so probe first.")
+        if self.t.mutation_covers:
+            text += (f" It covers only {self.t.mutation_covers}. Everything else gets no mutants, so "
+                     "the reviewer breaks it by hand; most rejected PRs were rejected there. Probe "
+                     "every rule in those files yourself as described above, including a rule's "
+                     "data source (swap or reorder a lookup table, use live state where the design "
+                     "says a snapshot), which mutation tools never try.")
+        return text
 
     def ensure_worktree(self, t: Task) -> Path:
         wt = self.wt(t)

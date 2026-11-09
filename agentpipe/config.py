@@ -51,6 +51,10 @@ class Target:
     # mutation command that works on copies of the tree: an `--in-place` run edits the files the
     # gate is building.
     mutation_alongside_gate: bool = False
+    # What the mutation command reaches, in words, and what it leaves out, e.g. "Rust outside
+    # crates/bridge; not crates/bridge or GDScript". The implementer is told to probe the rest by
+    # hand: without it, agents read "mutation runs on your lines" as covering everything.
+    mutation_covers: str = ""
     # Up to this many approved PRs are merged together onto the base in a scratch worktree,
     # gated once, then squash-merged one by one. 1 merges each PR alone with its own gate.
     merge_batch: int = 1
@@ -230,6 +234,7 @@ def load(path: Path) -> Config:
             test_timeout=t.get("test_timeout", 3600),
             mutation_timeout=t.get("mutation_timeout", 3600),
             mutation_alongside_gate=bool(t.get("mutation_alongside_gate", False)),
+            mutation_covers=t.get("mutation_covers", ""),
             merge_batch=max(1, int(t.get("merge_batch", 1))),
             extra_tools=list(t.get("extra_tools", [])),
             env={k: str(v) for k, v in t.get("env", {}).items()},

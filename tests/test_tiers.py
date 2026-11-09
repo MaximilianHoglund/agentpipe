@@ -202,6 +202,17 @@ def test_self_check_mentions_the_mutation_pass_only_when_the_target_has_one(pl):
     assert p.self_check(t) == ""
 
 
+def test_self_check_names_what_mutation_leaves_out(pl):
+    p, _ = pl
+    t = next(iter(p.tasks.values()), None)
+    p.t.mutation = "mutants --in-diff {diff}"
+    assert "covers only" not in p.self_check(t)
+    p.t.mutation_covers = "Rust outside crates/bridge; not GDScript"
+    text = p.self_check(t)
+    assert "covers only Rust outside crates/bridge; not GDScript" in text
+    assert "by hand" in text
+
+
 def test_rating_records_every_open_tickets_origin(pl):
     p, _ = pl
     issues = ticket_pl(p)
