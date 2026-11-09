@@ -39,6 +39,9 @@ $prior_section
    boundary), run the relevant tests, record whether they caught it (mark a break `equivalent` if it cannot change observable behaviour), then restore the
    file with `git restore <file>`. Do at least three probes, aimed at edge cases.
    An uncaught break is strong evidence of a coverage gap.
+   Make each break with the Edit tool, which fails loudly when its text isn't found.
+   `sed -i` exits 0 on no match, so if you use it, check `git diff --stat` shows the
+   file changed before running tests; a probe with an empty diff is not a probe.
 
 Some commands are denied to every agent; a denied call only wastes a turn, so don't
 retry it in another form:
@@ -48,7 +51,7 @@ retry it in another form:
   foreground with a timeout rather than in the background.
 - `git checkout`: use `git restore <file>`.
 - `python` on Windows is a Microsoft Store stub that exits 49; use `py` (or `python3` on
-  Linux), or simply the Edit tool for probes.
+  Linux).
 
 ## Criteria (category in brackets)
 
