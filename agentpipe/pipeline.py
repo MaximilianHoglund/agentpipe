@@ -1328,7 +1328,9 @@ class Pipeline:
             # needs decision, waited for 5.3, which had started on its files meanwhile).
             fresh = (status is Status.PENDING_IMPLEMENTATION and key not in prs
                      and not self.state.task(key).get("runs"))
-            if fresh and (why := self.overlap_hold(key, issues, prs)):
+            # Exclusive work doesn't wait on files held by work the hold itself keeps back, or
+            # neither ever runs (22:53 2026-11-09: #643 waited for combat-simulation/5.1's PR).
+            if fresh and only is None and (why := self.overlap_hold(key, issues, prs)):
                 if self.held.get(key) != why:
                     self.held[key] = why
                     self.log(f"{self.what(key)} {why}")

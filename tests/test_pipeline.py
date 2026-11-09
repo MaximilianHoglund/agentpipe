@@ -1798,3 +1798,14 @@ def test_a_dispatcher_that_handed_over_does_not_take_back_a_target_stopped_on_re
     assert any("stopped on request; finishing 1 job(s) here, then exiting" in l for l in lines)
     assert not any("taking the target back" in l for l in lines)
     assert "finished the jobs it handed over" in lines[-1]
+
+
+def test_exclusive_work_does_not_wait_for_files_held_by_work_the_hold_keeps_back(pl):
+    p, gh = pl
+    p.t.exclusive = ["c/1.2"]
+    touching(p, **{"1_1": ["game/tests/run_setup.gd"], "1_2": ["game/tests/run_setup.gd"]})
+    task_issue(gh, "c/1.1", S.CHANGES_REQUESTED)  # has a PR on the same file, held back
+    task_issue(gh, "c/1.2", S.PENDING_IMPLEMENTATION)
+    gh.prs = [{"number": 20, "headRefOid": "s", "body": TASK_MARKER.format(key="c/1.1"), "files": []}]
+    p.tick()
+    assert [s[1] for s in p.started] == ["c/1.2"]
