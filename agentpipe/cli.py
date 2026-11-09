@@ -43,6 +43,8 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--implementers", type=int)
             p.add_argument("--reviewers", type=int)
             p.add_argument("--once", action="store_true", help="exit when no job is running")
+            p.add_argument("--handed-over", action="store_true",
+                           help="started by a handoff: the old dispatcher's preflight passed, skip ours")
         if name == "watch":
             p.add_argument("--follow", metavar="KEY", help="stream one task's agent in full, e.g. project-foundation/1.1")
             p.add_argument("--events", type=int, default=8, help="recent events shown per agent")
@@ -254,6 +256,11 @@ def main(argv: list[str] | None = None) -> int:
                                        ("max_reviewers", args.reviewers)) if v is not None}
         pl = Pipeline(cfg, target)
         pl.watch_config(args.config, overrides)  # pipeline.toml edits apply without a restart
+        if args.handed_over:
+            # The full test gate as preflight costs minutes of idle slots per handoff, and the
+            # dispatcher handing over had just passed it on this machine.
+            pl.env_ok = True
+            pl.log("started by a handoff: environment already checked, skipping preflight")
         pl.run_forever(once=args.once)
         return 0
     return 1

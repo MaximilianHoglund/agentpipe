@@ -1465,7 +1465,7 @@ class Pipeline:
         jobs = self.handoff_jobs()
         handoff.write(self.t.work_dir, os.getpid(), jobs)
         try:
-            pid = service.start(self.t.name, self.t.work_dir, self.config_path)
+            pid = service.start(self.t.name, self.t.work_dir, self.config_path, handed_over=self.env_ok)
         except Exception as e:
             handoff.remove(self.t.work_dir, os.getpid())
             self.bad_rev, self.restart_for = self.restart_for, None

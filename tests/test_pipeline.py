@@ -520,7 +520,9 @@ def _code_pipeline(p, monkeypatch, revs, imports=""):
     p.read_code_rev = lambda: next(it, revs[-1])
     p.code_imports = lambda: imports
     started = []
-    monkeypatch.setattr(service, "start", lambda name, wd, cfg: (started.append(name), 777)[1])
+    p.env_ok = True  # preflight passed here, so the successor may skip its own
+    monkeypatch.setattr(service, "start",
+                        lambda name, wd, cfg, handed_over=False: (started.append(name if handed_over else "PREFLIGHT"), 777)[1])
     return started
 
 

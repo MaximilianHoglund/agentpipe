@@ -50,12 +50,14 @@ def running_pid(work_dir: Path) -> int | None:
     return pid if is_alive(pid) else None
 
 
-def start(target: str, work_dir: Path, config: Path) -> int:
-    """Launch a hidden dispatcher; returns its pid."""
+def start(target: str, work_dir: Path, config: Path, handed_over: bool = False) -> int:
+    """Launch a hidden dispatcher; returns its pid. ``handed_over`` skips its preflight."""
     logs = work_dir / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     out = open(logs / "dispatcher.out", "a", encoding="utf-8")
     cmd = [sys.executable, "-m", "agentpipe", "--config", str(config), "run", target]
+    if handed_over:
+        cmd.append("--handed-over")
     cwd = Path(__file__).resolve().parent.parent
     if os.name != "nt":
         return subprocess.Popen(cmd, cwd=cwd, stdout=out, stderr=subprocess.STDOUT,
