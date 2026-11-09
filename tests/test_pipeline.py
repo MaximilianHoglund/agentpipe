@@ -1745,3 +1745,56 @@ def test_exclusive_work_runs_alone_until_it_is_done(pl):
     gh.issues[n]["state"] = "CLOSED"
     p.tick()
     assert "c/1.1" in [s[1] for s in p.started] and not p.exclusive_on
+
+
+def test_an_exclusive_ticket_holds_the_rest_while_github_has_not_listed_it_yet(pl):
+    p, gh = pl
+    p.t.exclusive = ["godot-thin-tests"]
+    task_issue(gh, "c/1.1", S.IN_PROGRESS)
+    p.inbox_dir.mkdir(parents=True, exist_ok=True)
+    (p.inbox_dir / "1.json").write_text('{"title": "Plan it", "body": "b", "origin": "godot-thin-tests"}')
+    listed = gh.list_issues
+    gh.list_issues = lambda: [i for i in listed() if "Plan it" not in i["title"]]  # not listed yet
+    p.tick()
+    assert p.started == [] and p.exclusive_on
+    gh.list_issues = listed
+    p.tick()
+    assert [s[1] for s in p.started] == ["ticket/2"]
+    gh.issues[2]["state"] = "CLOSED"
+    p.tick()
+    assert "c/1.1" in [s[1] for s in p.started]
+
+
+def test_a_dispatcher_that_handed_over_does_not_take_back_a_target_stopped_on_request(pl, monkeypatch):
+    from agentpipe import service
+    p, gh = pl
+    started = _code_pipeline(p, monkeypatch, ["a" * 40, "b" * 40])
+    alive = {777: True}
+    monkeypatch.setattr(service, "is_alive", lambda pid: pid == os.getpid() or alive.get(pid, False))
+    lines, ticks = [], []
+    p._log = lines.append
+    job = type("J", (), {"kind": "implement", "slot": "impl-0", "issue": 5})()
+
+    def tick():
+        ticks.append(1)
+        if len(ticks) == 1:
+            p.jobs["c/1.1"] = job
+        elif len(ticks) == 2:
+            assert p.handing_off
+            p.stopped_file.write_text("777", encoding="utf-8")  # the successor stopped on request
+            alive[777] = False
+        elif len(ticks) == 4:
+            assert started == ["t"] and p.handing_off  # not taken back, nothing restarted
+            p.jobs.clear()
+        assert len(ticks) < 10
+
+    def start(name, wd, cfg, handed_over=False):
+        started.append(name)
+        return 777
+
+    monkeypatch.setattr(service, "start", start)
+    p.tick = tick
+    p.run_forever()
+    assert any("stopped on request; finishing 1 job(s) here, then exiting" in l for l in lines)
+    assert not any("taking the target back" in l for l in lines)
+    assert "finished the jobs it handed over" in lines[-1]

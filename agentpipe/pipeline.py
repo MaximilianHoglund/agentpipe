@@ -317,6 +317,7 @@ class Pipeline:
         # Whether `exclusive` work holds everything else back; assumed until a schedule has looked.
         self.exclusive_on = bool(target.exclusive)
         self.exclusive_logged = False
+        self.successor_stopped = False
         # Threads start lazily, so a generous cap costs nothing and lets a config reload
         # raise the slot counts without replacing the pool.
         self.pool = ThreadPoolExecutor(max_workers=64)
@@ -1001,6 +1002,11 @@ class Pipeline:
                 key = f"{TICKET_CHANGE}/{n}"
                 if tk.get("origin"):
                     self.state.task(key)["origin"] = tk["origin"]
+                    if tk["origin"] in self.t.exclusive:
+                        # Held for until it closes, though GitHub's issue list may not show it for a
+                        # while (22:17 2026-11-09: the hold saw nothing open and let all work start).
+                        with self.state.lock:
+                            self.state.data.setdefault("exclusive_tickets", {})[str(n)] = False
                 with self.state.lock:
                     self.state.data["triaged"] = sorted(set(self.state.data.get("triaged", [])) | {key},
                                                         key=key_sort)
@@ -1369,7 +1375,18 @@ class Pipeline:
         """The open work `exclusive` names, or None when nothing holds the rest back: no entries,
         or none open and none waiting in the inbox. Logs when the hold starts and ends."""
         only = {k for k in issues if self.is_exclusive(k)} if self.t.exclusive else set()
-        waiting = False
+        # Tickets filed for it: held for from filing, seen open in the list, then gone (closed).
+        filed = self.state.data.get("exclusive_tickets") or {}
+        listed = {i["number"] for i in issues.values()}
+        before = dict(filed)
+        for n, seen in list(filed.items()):
+            if int(n) in listed:
+                filed[n] = True
+            elif seen:
+                del filed[n]
+        if filed != before:
+            self.state.save()
+        waiting = bool(filed) and bool(self.t.exclusive)
         if self.t.exclusive and not only and self.inbox_dir.is_dir():
             for f in self.inbox_dir.glob("*.json"):
                 try:
@@ -1646,6 +1663,13 @@ class Pipeline:
         return self.t.work_dir / "stop"
 
     @property
+    def stopped_file(self) -> Path:
+        """Written when a dispatcher stops on request, removed when one starts. A dispatcher that
+        handed over sees its successor gone either way; this tells a stop from a death, so it
+        doesn't take the target back and start a new dispatcher (22:17 2026-11-09)."""
+        return self.t.work_dir / "stopped"
+
+    @property
     def resume_file(self) -> Path:
         """`agentpipe resume` creates this; the dispatcher then drops its usage pause."""
         return self.t.work_dir / "resume"
@@ -1671,6 +1695,7 @@ class Pipeline:
 
     def run_forever(self, once: bool = False) -> None:
         self.stop_file.unlink(missing_ok=True)  # a stale request must not stop a new run
+        self.stopped_file.unlink(missing_ok=True)
         self.pid_file.write_text(str(os.getpid()), encoding="utf-8")
         self.had_watcher = False
         self.gh.ensure_labels()
@@ -1689,7 +1714,13 @@ class Pipeline:
         try:
             while True:
                 if self.handing_off and service.running_pid(self.t.work_dir) is None:
-                    self.take_back()
+                    if self.stopped_file.exists():
+                        if not self.successor_stopped:
+                            self.successor_stopped = True
+                            self.log(f"the dispatcher on agentpipe {self.restart_for[:7]} stopped on request; "
+                                     f"finishing {len(self.jobs)} job(s) here, then exiting")
+                    else:
+                        self.take_back()
                 if not once and not self.handing_off:
                     self.check_code()
                     if self.restart_for and not self.stopping and not self.stop_reason() and not any(
@@ -1719,6 +1750,8 @@ class Pipeline:
                 deadline = time.time() + (self.cfg.poll_seconds if not once else 5)
                 while time.time() < deadline and self.stopping == bool(self.stop_reason()):
                     time.sleep(min(2.0, max(deadline - time.time(), 0)))
+            if not self.handing_off and not once:
+                self.stopped_file.write_text(str(os.getpid()), encoding="utf-8")
             self.log("stopped" if not self.handing_off else
                      f"finished the jobs it handed over to agentpipe {self.restart_for[:7]}")
         except KeyboardInterrupt:
