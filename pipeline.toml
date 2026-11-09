@@ -220,6 +220,9 @@ auto_approve = true
 # The gate checks rustfmt, so dev stays formatted: after keeping both sides of an additive
 # conflict, fmt re-sorts the appended `mod`/`use` lines.
 format = "cargo fmt --all"
+# After resolving conflicts, agents run this instead of the gate (the review gates the merge next):
+# the gate's first two steps, which compile every target, tests included (2026-11-09).
+conflict_check = "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings"
 # Files most tasks edit in passing; their conflicts are additive and resolved mechanically,
 # so they don't hold tasks apart (top conflict files in Nov 2026: design.md, lib.rs).
 overlap_ignore = ["**/lib.rs", "**/mod.rs", "**/Cargo.toml", "Cargo.lock", "README.md", "docs/*.md",

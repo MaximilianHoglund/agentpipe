@@ -188,3 +188,14 @@ def test_an_unresolved_conflict_at_handoff_goes_to_a_decision(pl):
     p.resolve_conflict = lambda t, slot: ClaudeResult(False, "s", "", None, False, subtype="error")
     assert p.sync_with_base(t, n, S.IN_PROGRESS, "impl-0", {"summary": "x"}) is None
     assert S.NEEDS_DECISION.label in gh.issues[n]["labels"]
+
+
+def test_a_conflict_run_runs_the_quick_check_and_leaves_the_full_gate_to_review(pl):
+    p, gh = pl
+    n, t = with_issue(p, gh)
+    p.t.conflict_check = "cargo clippy --all-targets"
+    prompt = p.conflict_prompt(t)
+    assert "run `cargo clippy --all-targets`" in prompt
+    assert f"Don't run the full `{p.t.test}`" in prompt
+    p.t.conflict_check = ""
+    assert "only the tests that cover the code you resolved" in p.conflict_prompt(t)

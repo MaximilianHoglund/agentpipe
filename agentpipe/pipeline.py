@@ -1993,14 +1993,21 @@ class Pipeline:
         return "auto"
 
     def conflict_prompt(self, t: Task) -> str:
+        # Every caller hands the resolved merge to a review, whose gate runs the full `test`. Before
+        # 2026-11-09 this prompt asked for `test` too, so each resolution paid the gate twice (arpg
+        # combat-simulation/5.1: 2 min resolving, then ~20 min of Godot tests).
+        check = (f"run `{self.t.conflict_check}` from the project dir until it passes, plus any test "
+                 "you name that covers code you resolved by hand" if self.t.conflict_check else
+                 "build, and run only the tests that cover the code you resolved by hand, by name")
         return (f"You are an implementer agent in an unattended pipeline, working on **{t.key}** — {t.text} "
                 f"({self.spec_ref(t)}). `{self.base_ref()}` has moved on and is being merged into your "
                 "branch; the merge is in progress in this worktree and conflicts. Resolve every conflict "
                 "keeping both sides' intent (the base's changes are merged work: keep them), change "
-                f"nothing the merge doesn't need, run `{self.t.test}` from the project dir until it "
-                "passes, and commit the merge. `git checkout` is denied: take one side of a file with "
-                "`git restore --theirs <file>` (or `--ours`). Then return the structured output with "
-                "status `done`; in `summary`, say how you resolved each conflicted file.")
+                f"nothing the merge doesn't need, {check}, and commit the merge. Don't run the full "
+                f"`{self.t.test}`: the review runs it on this merge next. `git checkout` is denied: take "
+                "one side of a file with `git restore --theirs <file>` (or `--ours`). Then return the "
+                "structured output with status `done`; in `summary`, say how you resolved each "
+                "conflicted file.")
 
     def resolve_conflict(self, t: Task, slot: str) -> ClaudeResult:
         """A conflict run for the merge in progress in ``t``'s worktree. A light run that ends
@@ -2246,7 +2253,7 @@ class Pipeline:
                 self.git.merge_abort(wt)
                 self.to_decision(issue, cur, "Could not resolve merge conflicts with the base branch.")
                 return None
-            return out  # the conflict run ran the tests on the merge; the review gates it again
+            return out  # the conflict run only compiled and spot-tested; the review gates the merge
         for attempt in range(SYNC_FIXES + 1):
             self.log(f"phase {t.key}: test gate (after merging {self.base_ref()}, before review)")
             g = self.run_gate(wt / self.t.project_dir, slot, self.t.test, self.t.test_timeout)
