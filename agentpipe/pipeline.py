@@ -314,6 +314,9 @@ class Pipeline:
         self.tiers_tried: set[str] = set()  # ticket keys sent to rate_tickets this run
         self.held: dict[str, str] = {}  # task key -> why it waits for another's files (logged once)
         self.conflict_checked: dict[tuple[str, str], bool] = {}  # (PR head, base) -> conflicts
+        # Whether `exclusive` work holds everything else back; assumed until a schedule has looked.
+        self.exclusive_on = bool(target.exclusive)
+        self.exclusive_logged = False
         # Threads start lazily, so a generous cap costs nothing and lets a config reload
         # raise the slot counts without replacing the pool.
         self.pool = ThreadPoolExecutor(max_workers=64)
@@ -1112,9 +1115,10 @@ class Pipeline:
             except LimitHit as e:
                 return self.pause(str(e))
             # No release while new code waits to take over: the handoff waits for it to end.
-            if self.t.milestones and RELEASE_KEY not in self.jobs and not self.restart_for:
+            if self.t.milestones and RELEASE_KEY not in self.jobs and not self.restart_for and not self.exclusive_on:
                 self.check_milestones()
-            if self.t.dev_gate and not self.taken(DEV_GATE_KEY) and not self.restart_for and not self.stopping:
+            if (self.t.dev_gate and not self.taken(DEV_GATE_KEY) and not self.restart_for and not self.stopping
+                    and not self.exclusive_on):
                 self.check_dev_gate()
             self.cap_cache()
         self.schedule()
@@ -1246,10 +1250,13 @@ class Pipeline:
         # While new code waits to take over, start no merge: the handoff waits for it to end.
         merging = any(j.kind == "merge" for j in self.jobs.values()) or bool(self.restart_for)
 
+        only = self.exclusive_work(issues)
+
         def by_status(s: Status) -> list[str]:
             return sorted((k for k, i in issues.items()
                            if status_from_labels(i["labels"]) is s and not self.taken(k)
-                           and k not in self.merging), key=lambda k: (self.rank_of(k), key_sort(k)))
+                           and k not in self.merging and (only is None or k in only)),
+                          key=lambda k: (self.rank_of(k), key_sort(k)))
 
         for s in (Status.PENDING_REVIEW, Status.CHANGES_REQUESTED, Status.APPROVED):
             for key in by_status(s):
@@ -1352,6 +1359,30 @@ class Pipeline:
                 self.merge_order = order[:self.t.merge_batch]
                 t0 = order[0][0]
                 self.start("merge", t0.key, "merge", issues[t0.key], prs[t0.key])
+
+    def is_exclusive(self, key: str) -> bool:
+        ex = self.t.exclusive
+        return key in ex or (key.startswith(TICKET_CHANGE + "/")
+                             and self.state.data["tasks"].get(key, {}).get("origin") in ex)
+
+    def exclusive_work(self, issues: dict[str, dict]) -> set[str] | None:
+        """The open work `exclusive` names, or None when nothing holds the rest back: no entries,
+        or none open and none waiting in the inbox. Logs when the hold starts and ends."""
+        only = {k for k in issues if self.is_exclusive(k)} if self.t.exclusive else set()
+        waiting = False
+        if self.t.exclusive and not only and self.inbox_dir.is_dir():
+            for f in self.inbox_dir.glob("*.json"):
+                try:
+                    waiting |= json.loads(f.read_text(encoding="utf-8")).get("origin") in self.t.exclusive
+                except (OSError, ValueError):
+                    waiting = True  # mid-write: hold on until it reads
+        on = bool(only) or waiting
+        if self.t.exclusive and (on != self.exclusive_on or not self.exclusive_logged):
+            self.exclusive_logged = True
+            self.log(f"exclusive: only {', '.join(sorted(only)) or 'the inbox ticket'} runs until it is done"
+                     if on else "exclusive: nothing it names is open; running everything")
+        self.exclusive_on = on
+        return only if on else None
 
     def track_of(self, key: str) -> str:
         """`front` or `engine` (see `front_paths`); `engine` for everything without a split. A

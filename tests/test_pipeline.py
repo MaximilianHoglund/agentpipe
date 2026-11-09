@@ -1723,3 +1723,25 @@ def test_a_priority_entry_can_name_a_change_and_a_ticket_that_writes_it(pl):
     p.state.task("ticket/9")["origin"] = "new-change"
     assert p.rank_of("ticket/9") == milestones.PRIORITY_RANK
     assert p.rank_of("c/1.1") != milestones.PRIORITY_RANK
+
+
+def test_exclusive_work_runs_alone_until_it_is_done(pl):
+    from agentpipe.tasks import Task
+    p, gh = pl
+    p.t.exclusive = ["godot-thin-tests"]
+    task_issue(gh, "c/1.1", S.IN_PROGRESS)
+    p.inbox_dir.mkdir(parents=True, exist_ok=True)
+    (p.inbox_dir / "1.json").write_text('{"title": "Plan it", "origin": "godot-thin-tests"}')
+    p.take_inbox = lambda: None  # still waiting in the inbox
+    p.tick()
+    assert p.started == [] and p.exclusive_on
+    (p.inbox_dir / "1.json").unlink()
+    n = gh.add(TICKET_MARKER, S.PENDING_IMPLEMENTATION)
+    p.tasks[f"ticket/{n}"] = Task("ticket", str(n), "Plan it", False, "improvement", 0)
+    p.state.task(f"ticket/{n}")["origin"] = "godot-thin-tests"
+    p.issues_by_key = lambda raw: {("c/1.1" if i["number"] == 1 else f"ticket/{i['number']}"): i for i in raw}
+    p.tick()
+    assert [s[1] for s in p.started] == [f"ticket/{n}"]
+    gh.issues[n]["state"] = "CLOSED"
+    p.tick()
+    assert "c/1.1" in [s[1] for s in p.started] and not p.exclusive_on

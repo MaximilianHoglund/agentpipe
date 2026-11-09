@@ -176,6 +176,9 @@ release_branch = "main"
 # (its origin is the change).
 priority = ["run-viewer-and-reports/5.1", "run-viewer-and-reports/5.2",
             "run-viewer-and-reports/5.3", "combat-simulation/5.1", "godot-thin-tests"]
+# Max, 2026-11-09: the ticket that plans the thin Godot test layer runs alone first (implement,
+# review, merge); everything else waits until it is closed. Remove this line once it is done.
+exclusive = ["godot-thin-tests"]
 # Each release carries the playable build. project-foundation 4.1 (in step 1) adds the script,
 # so it exists by the first release.
 release_build = "pwsh -NoProfile -File scripts/export.ps1"
