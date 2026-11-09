@@ -1606,3 +1606,25 @@ def test_a_target_can_run_fewer_agents_than_run_says(pl):
     assert len([s for s in p.started if s[0] == "implement"]) == 1
     p.overrides = {"max_implementers": 2}  # a command-line count still wins
     assert p.implementers() == p.cfg.max_implementers and p.reviewers() == 1
+
+
+def test_an_approved_pr_that_conflicts_is_updated_before_its_merge_turn_and_jumps_the_queue(pl):
+    p, gh = pl
+    p.t.merge_batch = 1
+    task_issue(gh, "c/1.1", S.APPROVED)  # next to merge: left to the merge job
+    n = task_issue(gh, "c/1.2", S.APPROVED)  # waits behind it, and already conflicts
+    task_issue(gh, "c/1.3", S.IN_PROGRESS)  # would otherwise take the first implementer slot
+    gh.prs = [{"number": 10 + i, "headRefOid": f"sha{i}", "body": TASK_MARKER.format(key=f"c/1.{i}")}
+              for i in (1, 2)]
+    p.state.task("c/1.1")["approved_at"] = 100.0
+    p.state.task("c/1.2")["approved_at"] = 200.0
+    p.current_base = lambda: "base1"
+    checked = []
+    p.git.merge_conflicts = lambda base, head: checked.append(head) or True
+    p.tick()
+    assert checked == ["sha2"]  # the next merge isn't checked; conflicts are its merge job's
+    assert S.CHANGES_REQUESTED.label in gh.issues[n]["labels"]
+    assert "verdict=conflict" in gh.comments_by[12][-1]["body"]
+    assert p.started[0] == ("revise", "c/1.2", "impl-0")
+    assert [s for s in p.started if s[0] == "merge"] == [("merge", "c/1.1", "merge")]
+    assert "conflict_update" in p.state.task("c/1.2")

@@ -164,7 +164,7 @@ class GitHub:
     # -- pull requests ----------------------------------------------------
     def list_prs(self) -> list[dict]:
         return self._json("pr", "list", "-R", self.repo, "--label", PIPELINE_LABEL, "--state", "open",
-                          "--limit", "500", "--json", "number,headRefName,headRefOid,body,title,files") or []
+                          "--limit", "500", "--json", "number,headRefName,headRefOid,body,title,files,mergeable") or []
 
     def create_pr(self, branch: str, base: str, title: str, body: str) -> int:
         url = self._gh("pr", "create", "-R", self.repo, "--head", branch, "--base", base,

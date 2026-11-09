@@ -310,6 +310,7 @@ class Pipeline:
         self.touches_tried: set[str] = set()  # task keys sent to backfill_touches this run
         self.tiers_tried: set[str] = set()  # ticket keys sent to rate_tickets this run
         self.held: dict[str, str] = {}  # task key -> why it waits for another's files (logged once)
+        self.conflict_checked: dict[tuple[str, str], bool] = {}  # (PR head, base) -> conflicts
         # Threads start lazily, so a generous cap costs nothing and lets a config reload
         # raise the slot counts without replacing the pool.
         self.pool = ThreadPoolExecutor(max_workers=64)
@@ -1259,12 +1260,30 @@ class Pipeline:
                     continue
                 self.to_decision(issues[key]["number"], s, f"Status is `{s.value}` but no open PR was found.")
         self.record_awaiting(raw)
+        # An approved PR that already conflicts with the base is sent to its update now, not when
+        # it reaches the head of the merge queue: by then the base has moved further, and the
+        # update waits for a slot on top (2026-11-09: 3.5 approved 19:03, conflict found 19:20,
+        # update started 19:47, back to review 20:40+). The next merge batch is left to the merge
+        # job, which resolves additive conflicts itself. Checked locally, as GitHub's `mergeable`
+        # in a PR list is UNKNOWN until each PR is fetched on its own.
+        waiting = sorted(by_status(Status.APPROVED), key=lambda k: self.state.task(k).get("approved_at", 0))
+        for key in waiting[max(self.t.merge_batch, 1):]:
+            pr = prs.get(key)
+            if pr and self.stale_approval(pr):
+                self.log(f"{self.what(key)} PR #{pr['number']}: approved, but conflicts with "
+                         f"{self.base_ref()}; updating it before its merge turn")
+                self.merge_conflict(issues[key]["number"], pr, f"The approved branch conflicts with "
+                                    f"`{self.base_ref()}`; updating it before its turn to merge.", key)
+                issues[key]["labels"] = [Status.CHANGES_REQUESTED.label]
         # Earliest milestone (or `priority`) first; within one rank, work under way resumes before
         # fresh starts. Resuming first across ranks let Step 3 revisions take slots from Step 1
-        # tasks (Max, 2026-11-09: everything toward the next test build goes first).
+        # tasks (Max, 2026-11-09: everything toward the next test build goes first). Conflict
+        # updates of approved PRs go before all of it: they are short and nearly merged.
         impl_order = (Status.IN_PROGRESS, Status.CHANGES_REQUESTED, Status.PENDING_IMPLEMENTATION)
         queue = sorted((k for s in impl_order for k in by_status(s)),
-                       key=lambda k: (self.rank_of(k), impl_order.index(status_from_labels(issues[k]["labels"])),
+                       key=lambda k: (not self.state.data["tasks"].get(k, {}).get("conflict_update"),
+                                      self.rank_of(k),
+                                      impl_order.index(status_from_labels(issues[k]["labels"])),
                                       key_sort(k)))
         for key in queue:
             if not free_impl:
@@ -1324,6 +1343,21 @@ class Pipeline:
                 self.merge_order = order[:self.t.merge_batch]
                 t0 = order[0][0]
                 self.start("merge", t0.key, "merge", issues[t0.key], prs[t0.key])
+
+    def stale_approval(self, pr: dict) -> bool:
+        """Whether an approved PR's head conflicts with the base as last fetched. Remembered
+        per (head, base), so each tick costs one `git merge-tree` per new pair at most."""
+        base = self.current_base()
+        if not base:
+            return False
+        pair = (pr["headRefOid"], base)
+        if pair not in self.conflict_checked:
+            try:
+                self.conflict_checked[pair] = self.git.merge_conflicts(base, pr["headRefOid"])
+            except Exception as e:  # never let a hint stop scheduling
+                self.log(f"could not check PR #{pr['number']} against {self.base_ref()}: {str(e)[-200:]}")
+                self.conflict_checked[pair] = False
+        return self.conflict_checked[pair]
 
     def touches_of(self, key: str) -> list[str]:
         """Repo-relative paths a task (with its batch) will likely change: the planner's
@@ -2029,6 +2063,8 @@ class Pipeline:
         history = review.review_history(comments)
         last = history[-1] if history else None
         merge_note = ""
+        if self.state.data["tasks"].get(t.key, {}).pop("conflict_update", None):
+            self.state.save()
         if last and last["verdict"] == review.CONFLICT:
             # Only the base moved: update the branch without a full revise. A clean or mechanical
             # merge needs no agent at all; a real conflict gets a short conflict-only run.
@@ -2708,11 +2744,18 @@ class Pipeline:
         self.state.save()
         self.last_sync = 0.0  # dependents may be unblocked now
 
-    def merge_conflict(self, issue: int, pr: dict, summary: str) -> None:
-        """Send an approved PR that cannot be merged back to its implementer to update it."""
+    def merge_conflict(self, issue: int, pr: dict, summary: str, key: str | None = None) -> None:
+        """Send an approved PR that cannot be merged back to its implementer to update it. The
+        update jumps the implementer queue (``conflict_update``): it is approved work, and every
+        hour it waits the base moves further (2026-11-09: run-viewer-and-reports/3.5 waited 27 min
+        for a slot behind fresh work)."""
         v = {"verdict": review.CONFLICT, "findings": [], "probes": [], "summary": summary}
         self.gh.comment(pr["number"], review.render_review(v, pr["headRefOid"], 0, self.cfg.max_rounds))
         self.gh.set_status(issue, Status.CHANGES_REQUESTED, Status.APPROVED)
+        key = key or task_key_from_body(pr.get("body", ""))
+        if key:
+            self.state.task(key)["conflict_update"] = time.time()
+            self.state.save()
 
     def commit_to_base(self, tasks: list[Task], message: str) -> None:
         """Tick ``tasks`` (all of one change: a batch never mixes changes) in one commit."""

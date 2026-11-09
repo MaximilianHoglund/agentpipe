@@ -86,6 +86,12 @@ class Git:
         """True if ``ref`` is already an ancestor of HEAD."""
         return self.git("merge-base", "--is-ancestor", ref, "HEAD", cwd=wt, check=False).ok
 
+    def merge_conflicts(self, base_ref: str, head: str) -> bool:
+        """True if merging ``head`` (a commit) into ``base_ref`` would conflict, worked out without
+        a worktree (`git merge-tree`, exit 1 on conflicts). False when it can't tell, e.g. the
+        head isn't fetched."""
+        return self.git("merge-tree", "--write-tree", "--quiet", base_ref, head, check=False).code == 1
+
     def enable_rerere(self) -> None:
         """Record conflict resolutions, so a branch that merges its base again isn't asked to
         resolve the same conflict twice. Repo config, so every worktree shares the records."""
