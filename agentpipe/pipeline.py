@@ -1076,6 +1076,10 @@ class Pipeline:
         """Fill free implementer, reviewer and merge slots from GitHub's current state."""
         if not self.env_ok:
             return
+        # Read the handoff files again here, not only at the top of tick: a preflight or sync
+        # in between can take minutes, and work an old dispatcher finished meanwhile must not
+        # still hold its slots (2026-11-09: 3 implementer slots idled through a 7-minute preflight).
+        self.refresh_foreign()
         raw = self.gh.list_issues()
         issues = {k: i for k, i in self.issues_by_key(raw).items()
                   if i["state"].upper() == "OPEN" and k in self.tasks}

@@ -611,6 +611,25 @@ def test_new_dispatcher_leaves_handed_over_work_and_slots_alone(pl, monkeypatch)
     assert any(l.endswith("done implement c/1.3") for l in lines)
 
 
+def test_work_the_old_dispatcher_finishes_mid_tick_frees_its_slot_at_once(pl, monkeypatch):
+    from agentpipe import handoff, service
+    p, gh = pl
+    monkeypatch.setattr(service, "is_alive", lambda pid: pid == 4242)
+    handoff.write(p.t.work_dir, 4242, {"c/1.3": {"kind": "implement", "slot": "impl-0", "issue": 9,
+                                                 "batch": ["c/1.3"]}})
+    task_issue(gh, "c/1.1", S.PENDING_IMPLEMENTATION)
+    task_issue(gh, "c/1.2", S.PENDING_IMPLEMENTATION)
+    p.env_ok = False
+
+    def preflight_meanwhile():  # takes minutes for real; the old job ends during it
+        handoff.write(p.t.work_dir, 4242, {})
+        p.env_ok = True
+
+    p.check_environment = preflight_meanwhile
+    p.tick()
+    assert p.started == [("implement", "c/1.1", "impl-0"), ("implement", "c/1.2", "impl-1")]
+
+
 def test_dead_old_dispatchers_handoff_is_ignored(pl, monkeypatch):
     from agentpipe import handoff, service
     p, gh = pl
