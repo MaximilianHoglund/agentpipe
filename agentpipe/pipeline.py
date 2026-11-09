@@ -179,6 +179,12 @@ class State:
         self.data.update(paused_until=until, paused_at=at, resumed_at=resumed)
         if (disk.get("rate") or {}).get("_at", 0) > (self.data.get("rate") or {}).get("_at", 0):
             self.data["rate"] = disk["rate"]
+        # Tickets either one filed: ownership decides which tickets a dispatcher triages and
+        # works. An old dispatcher's filings never reached the new one, so they sat in proposed,
+        # counted as waiting on Max, untriaged (#659, #661-#663, 2026-11-09).
+        filed = set(self.data.get("tickets", [])) | set(disk.get("tickets", []))
+        if filed:
+            self.data["tickets"] = sorted(filed)
 
     def _take_tasks(self, disk: dict, keys) -> None:
         for k in keys:
@@ -201,6 +207,8 @@ class State:
                                   if k in self.data}}
                 if "rate" in self.data:
                     out["rate"] = self.data["rate"]
+                if "tickets" in self.data:
+                    out["tickets"] = self.data["tickets"]
                 tasks = out.setdefault("tasks", {})
                 for k in self.own_only:
                     if k in self.data["tasks"]:

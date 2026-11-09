@@ -740,6 +740,28 @@ def test_state_merges_two_dispatchers_writes(tmp_path):
     assert new.task("old") == {"runs": 3}
 
 
+def test_tickets_an_old_dispatcher_files_become_the_new_ones(tmp_path):
+    from agentpipe.pipeline import State
+    path = tmp_path / "state.json"
+    s = State(path)
+    s.data["tickets"] = [1]
+    s.save()
+    old, new = State(path), State(path)
+    old.own_only, new.foreign = {"x"}, {"x"}
+    new.data["tickets"].append(3)
+    new.save()
+    old.data["tickets"].append(2)  # filed while finishing its jobs
+    old.save()
+    assert State(path).data["tickets"] == [1, 2, 3]  # the old one keeps the new one's filings
+    new.save()
+    assert new.data["tickets"] == [1, 2, 3]  # so the new one triages and works #2
+    old.data["tickets"].append(4)
+    old.save()
+    new.foreign = set()
+    new.refresh({"x"})
+    assert 4 in new.data["tickets"]
+
+
 def test_commit_that_fails_to_import_is_not_restarted_onto(pl, monkeypatch):
     p, gh = pl
     started = _code_pipeline(p, monkeypatch, ["a" * 40, "b" * 40], imports="SyntaxError: bad")
