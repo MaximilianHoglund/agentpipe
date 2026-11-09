@@ -39,3 +39,30 @@ def test_message_reset_reads_12_hour_and_24_hour_times():
     assert message_reset("resets 12am", noon) > noon
     assert time.localtime(message_reset("resets at 23:30", noon))[3:5] == (23, 30)
     assert message_reset("no time here", noon) is None
+
+
+def test_a_resume_is_not_undone_by_an_old_dispatcher_holding_the_pause(tmp_path):
+    from agentpipe.pipeline import State, clear_pause
+    path = tmp_path / "state.json"
+    State(path).save()
+    old, new = State(path), State(path)
+    old.own_only, new.foreign = {"x"}, {"x"}
+    old.data["paused_until"] = new.data["paused_until"] = time.time() + 1800  # older code: no paused_at
+    clear_pause(new)
+    old.save()  # still holds the pause Max cleared
+    new.save()
+    assert State(path).data["paused_until"] == 0.0 and new.data["paused_until"] == 0.0
+
+
+def test_a_pause_set_after_a_resume_still_holds(tmp_path):
+    from agentpipe.pipeline import State, clear_pause
+    path = tmp_path / "state.json"
+    State(path).save()
+    old, new = State(path), State(path)
+    old.own_only, new.foreign = {"x"}, {"x"}
+    clear_pause(new)
+    later = time.time() + 1
+    old.data.update(paused_until=later + 1800, paused_at=later)  # a limit hit after the resume
+    old.save()
+    new.save()
+    assert new.data["paused_until"] == later + 1800

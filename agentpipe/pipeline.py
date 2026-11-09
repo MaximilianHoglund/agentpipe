@@ -161,8 +161,17 @@ class State:
         replace_retrying(tmp, self.path)
 
     def _take_shared(self, disk: dict) -> None:
-        """Merge the usage pause and windows another dispatcher may have written."""
-        self.data["paused_until"] = max(self.data.get("paused_until", 0.0), disk.get("paused_until", 0.0))
+        """Merge the usage pause and windows another dispatcher may have written.
+
+        The later pause wins, except one set before the latest `agentpipe resume`: an old
+        dispatcher finishing its jobs still holds the pause Max cleared, and writing it back
+        undid the resume (19:13 2026-11-09)."""
+        resumed = max(self.data.get("resumed_at", 0.0), disk.get("resumed_at", 0.0))
+        pauses = [(d.get("paused_until", 0.0), d.get("paused_at", 0.0)) for d in (self.data, disk)]
+        # A pause with no time (written by older code) counts until the first resume.
+        live = [(u, a) for u, a in pauses if u and (a > resumed if resumed else True)]
+        until, at = max(live) if live else (0.0, 0.0)
+        self.data.update(paused_until=until, paused_at=at, resumed_at=resumed)
         if (disk.get("rate") or {}).get("_at", 0) > (self.data.get("rate") or {}).get("_at", 0):
             self.data["rate"] = disk["rate"]
 
@@ -183,7 +192,8 @@ class State:
                 if self.own_only is None:
                     self._take_tasks(disk, self.foreign)
                     return self._write(self.data)
-                out = {**disk, "paused_until": self.data["paused_until"]}
+                out = {**disk, **{k: self.data[k] for k in ("paused_until", "paused_at", "resumed_at")
+                                  if k in self.data}}
                 if "rate" in self.data:
                     out["rate"] = self.data["rate"]
                 tasks = out.setdefault("tasks", {})
@@ -226,6 +236,7 @@ def clear_pause(state: State) -> None:
     re-pauses if it is still near a limit."""
     with state.lock:
         state.data["paused_until"] = 0.0
+        state.data["resumed_at"] = time.time()
         state.data.pop("rate", None)
     state.save()
 
@@ -1478,7 +1489,8 @@ class Pipeline:
             known = [r + 60]
         until = max(known) if known else now + self.cfg.limit_backoff_seconds
         with self.state.lock:
-            self.state.data["paused_until"] = max(until, self.state.data["paused_until"])
+            if until > self.state.data["paused_until"]:
+                self.state.data.update(paused_until=until, paused_at=now)
         self.state.save()
         self.log(f"usage limit hit, pausing until {time.strftime('%H:%M', time.localtime(until))}: {why[:200]}")
 
@@ -1491,7 +1503,7 @@ class Pipeline:
                 w = windows.get(name) or {}
                 used, resets = float(w.get("utilization") or 0), float(w.get("resetsAt") or 0)
                 if used >= cap and resets > now and resets + 60 > self.state.data["paused_until"]:
-                    self.state.data["paused_until"] = resets + 60
+                    self.state.data.update(paused_until=resets + 60, paused_at=now)
                     self.log(f"usage {name} at {used:.0%} (throttle {cap:.0%}): starting nothing new "
                              f"until it resets at {time.strftime('%a %H:%M', time.localtime(resets))}; "
                              "running jobs finish")
