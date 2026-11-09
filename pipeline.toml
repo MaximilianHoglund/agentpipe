@@ -170,6 +170,10 @@ github_repo = "MaximilianHoglund/arpg-manager"
 # for a human to play and test.
 base = "dev"
 release_branch = "main"
+# Max, 2026-11-09: the run setup screen (5.1) and starter tuning (5.2) first, so Step 1 is
+# playable. 5.2 waits on monster awareness (combat-simulation 5.1) and `arpg-cli simulate` (5.3).
+priority = ["run-viewer-and-reports/5.1", "run-viewer-and-reports/5.2",
+            "run-viewer-and-reports/5.3", "combat-simulation/5.1"]
 # Each release carries the playable build. project-foundation 4.1 (in step 1) adds the script,
 # so it exists by the first release.
 release_build = "pwsh -NoProfile -File scripts/export.ps1"

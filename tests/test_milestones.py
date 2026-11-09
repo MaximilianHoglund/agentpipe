@@ -107,6 +107,12 @@ def test_only_unblocking_tickets_jump_the_queue():
     assert milestones.ticket_rank(ms, None, False) == milestones.ticket_rank(ms, "b", False)
 
 
+def test_priority_tasks_go_after_unblocking_tickets_only():
+    ms = [Milestone("m1", "", ["b"])]
+    assert milestones.ticket_rank(ms, None, True) < milestones.PRIORITY_RANK < milestones.rank(ms, "b")
+    assert milestones.PRIORITY_RANK < milestones.ticket_rank(ms, "b", False)
+
+
 def test_filed_from_reads_the_pipeline_footer():
     from agentpipe.tickets import filed_from
     assert filed_from("x\n_Filed by the pipeline from the implementer of strategy-rules/3.4 (#203).") \

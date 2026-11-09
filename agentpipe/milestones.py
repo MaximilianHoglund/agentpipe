@@ -9,6 +9,8 @@ from agentpipe.status import TICKET_CHANGE
 from agentpipe.tasks import parse_tasks
 
 CHANGES = Path("openspec") / "changes"
+# Rank of a task in the target's `priority` list: after unblocking tickets (-1), before the rest.
+PRIORITY_RANK = -0.5
 
 
 def change_done(checkout: Path, change: str, skip: frozenset[str] | set[str] = frozenset()) -> bool:

@@ -89,6 +89,9 @@ class Target:
     # Items Max has parked (issue numbers or task keys): they stay as they are, but don't count
     # as waiting on him. Milestone `deferred` tasks count as parked too.
     parked: list[int | str] = field(default_factory=list)
+    # Task keys Max wants done first: they start before every other task and ticket, after
+    # only tickets that unblock the gate or release. List what they wait on too.
+    priority: list[str] = field(default_factory=list)
     # Run at the repo root once every task of a change is ticked: syncs its spec deltas into
     # openspec/specs/ and moves it to changes/archive/. {change} is the change name; "" turns
     # archiving off.
@@ -244,6 +247,7 @@ def load(path: Path) -> Config:
             format=t.get("format", ""),
             overlap_ignore=list(t.get("overlap_ignore", [])),
             parked=list(t.get("parked", [])),
+            priority=list(t.get("priority", [])),
             archive=t.get("archive", "openspec archive {change} --yes"),
             auto_approve=bool(t.get("auto_approve", False)),
             max_implementers=t.get("max_implementers"),

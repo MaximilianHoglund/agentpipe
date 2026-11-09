@@ -1076,7 +1076,11 @@ class Pipeline:
             "max_reviewers") else self.cfg.max_reviewers
 
     def rank_of(self, key: str) -> float:
-        """Milestone priority of a task or ticket: lower runs first (the next test build)."""
+        """Milestone priority of a task or ticket: lower runs first (the next test build).
+
+        Tasks in the target's ``priority`` list go before all but unblocking tickets."""
+        if key in self.t.priority:
+            return milestones.PRIORITY_RANK
         if self.tasks[key].change == TICKET_CHANGE:
             st = self.state.task(key)
             return milestones.ticket_rank(self.t.milestones, st.get("origin"), st.get("unblocks", False))
