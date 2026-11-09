@@ -9,6 +9,43 @@ def test_columns_grow_with_jobs():
     assert [panes.columns_for(n) for n in (0, 1, 2, 4, 5, 9, 10)] == [1, 1, 2, 2, 3, 3, 4]
 
 
+def test_clicking_a_tool_call_summary_opens_and_closes_it():
+    from textual.app import App
+
+    class One(App):
+        def compose(self):
+            self.pane = panes.JobPane(watch.Job("implement", "c/1.1", 5, "impl-0", 0.0))
+            yield self.pane
+
+    async def go():
+        app = One()
+        async with app.run_test(size=(80, 20)) as pilot:
+            p = app.pane
+            p.event("10:00:00", "think", "Looking at the gate.")
+            p.event("10:00:01", "tool", "Bash: cargo test --workspace")
+            p.event("10:00:02", "tool", "Read: crates/sim/src/a.rs")
+            p.event("10:00:03", "text", "Done.")
+            await rendered(pilot, p)
+
+            def text():
+                return "\n".join(s.text for s in p.lines)
+
+            row = next(i for i, s in enumerate(p.lines) if "2 tool calls" in s.text)
+            assert "[+]" in text() and "cargo test" not in text()
+            await pilot.click(p, offset=(20, row))
+            await pilot.pause()
+            assert "[-]" in text() and "cargo test --workspace" in text() and "crates/sim/src/a.rs" in text()
+            row = next(i for i, s in enumerate(p.lines) if "Read: crates" in s.text)
+            await pilot.click(p, offset=(20, row))  # any line of an opened group closes it
+            await pilot.pause()
+            assert "[+]" in text() and "cargo test" not in text()
+            await pilot.click(p, offset=(20, next(i for i, s in enumerate(p.lines) if "Done." in s.text)))
+            await pilot.pause()
+            assert "cargo test" not in text()  # other lines do nothing
+
+    asyncio.run(go())
+
+
 def test_maximized_dispatcher_log_fills_the_screen(tmp_path):
     from textual.widgets import RichLog
     work = tmp_path / "work"

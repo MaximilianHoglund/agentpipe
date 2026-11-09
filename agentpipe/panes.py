@@ -86,8 +86,9 @@ QUIET = ("tool", "error", "denied")  # folded into one summary line unless tool 
 
 class JobPane(RichLog):
     """One job's stream. By default it shows the agent's reasoning and messages in full and folds
-    each run of tool calls (with their errors) into one dim summary line; ``detail`` shows every
-    call. Entries are kept so a resize or a detail toggle can re-wrap them."""
+    each run of tool calls (with their errors) into one summary line; clicking that line opens or
+    closes it, and ``detail`` shows every call. Entries are kept so a resize, a detail toggle or
+    a click can re-wrap them."""
 
     can_focus = True
 
@@ -97,33 +98,74 @@ class JobPane(RichLog):
         self.job = job
         self.state = PaneState()
         self.detail = detail
-        self.entries: list[w.Event] = []
+        self.entries: list[tuple[int, w.Event]] = []  # (sequence number, event)
+        self.seq = 0
         self.group: list[w.Event] = []  # quiet events since the last loud one, not yet summarized
+        self.group_id = 0  # sequence number of the group's first event: names it for `expanded`
+        self.expanded: set[int] = set()  # groups opened by a click
+        self.owners: list[int | None] = []  # per drawn line, the group it belongs to (clickable)
         self.last_kind = ""  # kind of the last line written, for block spacing
 
     def event(self, when: str, kind: str, text: str) -> None:
         ev = w.Event(when, kind, text)
-        self.entries.append(ev)
+        self.seq += 1
+        self.entries.append((self.seq, ev))
         if len(self.entries) > MAX_ENTRIES:
             del self.entries[: len(self.entries) - MAX_ENTRIES]
-        self._show(ev)
+        self._show(self.seq, ev)
 
-    def _show(self, ev: w.Event) -> None:
+    def _show(self, n: int, ev: w.Event) -> None:
         if ev.kind in QUIET:
+            if not self.group:
+                self.group_id = n
             self.group.append(ev)
             if self.detail:
                 self._write(ev.when, ev.kind, w._short(ev.text, 600))
             return
         if self.group and not self.detail:
-            self._write(self.group[0].when, "dim", summarize(self.group))
+            self._flush_group()
         self.group = []
         self._write(ev.when, ev.kind, ev.text)
 
-    def _write(self, when: str, kind: str, text: str) -> None:
+    def _flush_group(self) -> None:
+        """The group's summary line; an opened group also lists each call under it."""
+        gid, opened = self.group_id, self.group_id in self.expanded
+        self._write(self.group[0].when, "dim", summarize(self.group) + (" [-]" if opened else " [+]"), gid)
+        if opened:
+            for e in self.group:
+                self._write(e.when, e.kind, w._short(e.text, 2000), gid)
+
+    def _write(self, when: str, kind: str, text: str, owner: int | None = None) -> None:
+        # Before the pane has a size RichLog only queues writes; on_resize redraws everything
+        # then, so skip them here and keep `owners` in step with the lines actually drawn.
+        if not self._size_known:
+            return
         if kind in BLOCKS and self.last_kind and self.last_kind != kind:
-            self.write(Text(""))
-        self.write(self._line(when, kind, text))
+            self._put(Text(""), None)
+        self._put(self._line(when, kind, text), owner)
         self.last_kind = kind
+
+    def _put(self, renderable, owner: int | None) -> None:
+        # Follow new output only while at the bottom, so reading an opened group isn't yanked away.
+        follow = self.scroll_y >= self.max_scroll_y
+        before = len(self.lines) + self._start_line  # _start_line counts lines dropped at max_lines
+        self.write(renderable, scroll_end=follow)
+        self.owners.extend([owner] * (len(self.lines) + self._start_line - before))
+        if len(self.owners) > len(self.lines):  # RichLog dropped its oldest lines (max_lines)
+            del self.owners[: len(self.owners) - len(self.lines)]
+
+    def on_click(self, event) -> None:
+        offset = event.get_content_offset(self)
+        if offset is None:
+            return
+        y = offset.y + int(self.scroll_y)
+        gid = self.owners[y] if 0 <= y < len(self.owners) else None
+        if gid is None:
+            return
+        self.expanded ^= {gid}
+        keep = self.scroll_y
+        self.rerender()
+        self.scroll_to(y=keep, animate=False, immediate=True)
 
     def _line(self, when: str, kind: str, text: str) -> Table:
         """Time, marker, then the text with a hanging indent, so wrapped lines stay in its column."""
@@ -139,17 +181,20 @@ class JobPane(RichLog):
 
     def rerender(self) -> None:
         self.clear()
+        self.owners = []
         self.group = []
         self.last_kind = ""
-        for ev in self.entries:
-            self._show(ev)
+        for n, ev in self.entries:
+            self._show(n, ev)
 
     def now_doing(self) -> str:
         """The latest tool call of the run not yet summarized, for the border."""
         tool = next((e.text for e in reversed(self.group) if e.kind == "tool"), "")
         return w._short(tool, 70)
 
-    def on_resize(self) -> None:
+    def on_resize(self, event) -> None:
+        if event.size.width:
+            self._size_known = True  # whichever resize handler runs first; nothing is queued
         self.rerender()  # RichLog wraps at write time; re-wrap to the new width
 
 
