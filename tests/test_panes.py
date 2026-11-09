@@ -23,7 +23,7 @@ def test_summarize_counts_tools_errors_and_denials():
     E = watch.Event
     group = [E("t", "tool", "Bash: a"), E("t", "tool", "Read: b"), E("t", "tool", "Bash: c"),
              E("t", "error", "boom"), E("t", "denied", "DENIED Bash: x")]
-    assert panes.summarize(group) == "⋯ 3 tool calls (Bash 2, Read 1), 1 error, 1 DENIED"
+    assert panes.summarize(group) == "3 tool calls (Bash 2, Read 1), 1 error, 1 DENIED"
 
 
 def test_tail_returns_only_new_complete_lines(tmp_path):
@@ -55,6 +55,15 @@ def test_theme_is_remembered_and_ansi_themes_are_not_offered(tmp_path):
     asyncio.run(go("textual-dark"))
     assert (tmp_path / "watch-theme").read_text(encoding="utf-8") == "nord"
     asyncio.run(go("nord"))
+
+
+async def rendered(pilot, pane, tries: int = 100):
+    """Wait until ``pane`` has drawn lines: a RichLog holds writes back until it has a size, which
+    can take more than one pause on a busy machine (the test failed now and then without this)."""
+    for _ in range(tries):
+        if pane.lines:
+            return
+        await pilot.pause(0.02)
 
 
 def _stamp(t):
@@ -93,6 +102,7 @@ def test_app_shows_a_pane_per_job_with_its_transcript(tmp_path, monkeypatch):
             await pilot.pause()
             assert set(app.panes) == {"c/1.1", "c/1.2"}
             impl, rev = app.panes["c/1.1"], app.panes["c/1.2"]
+            await rendered(pilot, impl)
             text = "\n".join(s.text for s in impl.lines)
             assert "Checking whether validate" in text and "Tests pass" in text
             assert "2 tool calls (Bash 1, Read 1)" in text and "cargo test" not in text
@@ -149,6 +159,7 @@ def test_mutation_testing_streams_missed_mutants_and_progress(tmp_path, monkeypa
             app.tick()
             await pilot.pause()
             rev = app.panes["c/1.2"]
+            await rendered(pilot, rev)
             text = "\n".join(s.text for s in rev.lines)
             assert "MISSED a.rs:2: replace" in text
             assert "4/30 mutants, 1 missed" in text and "4/30 mutants" in str(rev.parent.border_subtitle)

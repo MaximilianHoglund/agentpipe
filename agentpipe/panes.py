@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from rich.markup import escape
+from rich.table import Table
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -28,10 +29,20 @@ def styles_for(theme) -> dict[str, str]:
     def c(value, fallback):
         return str(value) if value else fallback
 
-    return {"tool": c(theme.primary, "cyan"), "text": "bold", "think": "",
+    return {"tool": c(theme.primary, "cyan"), "text": "bold " + c(theme.foreground, "white"),
+            "think": "italic " + c(theme.secondary, "blue"),
             "error": c(theme.error, "red"), "denied": c(theme.warning, "yellow"),
-            "done": c(theme.success, "green"), "step": "bold " + c(theme.accent, "yellow"), "dim": "dim",
+            "done": c(theme.success, "green"), "step": "bold " + c(theme.accent, "yellow"),
+            "dim": c(theme.primary, "cyan"),  # folded tool calls: the tool colour, not grey
             "missed": "bold " + c(theme.error, "red"), "timeout": c(theme.warning, "yellow")}
+
+
+# A marker per kind, so thinking, messages and tool calls tell apart without colour too
+# (Max, 2026-11-09: it was "just a big grey blob").
+MARKS = {"think": "~", "text": ">", "tool": "$", "dim": "$", "error": "!", "denied": "!",
+         "done": "+", "step": "#", "missed": "!", "timeout": "!"}
+# Prose blocks get a blank line before them, unless the line before is the same kind.
+BLOCKS = ("think", "text", "step")
 
 
 def columns_for(n: int) -> int:
@@ -87,6 +98,7 @@ class JobPane(RichLog):
         self.detail = detail
         self.entries: list[w.Event] = []
         self.group: list[w.Event] = []  # quiet events since the last loud one, not yet summarized
+        self.last_kind = ""  # kind of the last line written, for block spacing
 
     def event(self, when: str, kind: str, text: str) -> None:
         ev = w.Event(when, kind, text)
@@ -99,22 +111,35 @@ class JobPane(RichLog):
         if ev.kind in QUIET:
             self.group.append(ev)
             if self.detail:
-                self.write(self._line(ev.when, ev.kind, w._short(ev.text, 600)))
+                self._write(ev.when, ev.kind, w._short(ev.text, 600))
             return
         if self.group and not self.detail:
-            self.write(self._line(self.group[0].when, "dim", summarize(self.group)))
+            self._write(self.group[0].when, "dim", summarize(self.group))
         self.group = []
-        self.write(self._line(ev.when, ev.kind, ev.text))
+        self._write(ev.when, ev.kind, ev.text)
 
-    def _line(self, when: str, kind: str, text: str) -> Text:
-        line = Text(f"{when} ", style="dim", overflow="fold")
-        line.append(text.strip() if kind in ("text", "think") else text,
-                    style=styles_for(self.app.current_theme).get(kind, ""))
-        return line
+    def _write(self, when: str, kind: str, text: str) -> None:
+        if kind in BLOCKS and self.last_kind and self.last_kind != kind:
+            self.write(Text(""))
+        self.write(self._line(when, kind, text))
+        self.last_kind = kind
+
+    def _line(self, when: str, kind: str, text: str) -> Table:
+        """Time, marker, then the text with a hanging indent, so wrapped lines stay in its column."""
+        style = styles_for(self.app.current_theme).get(kind, "")
+        grid = Table.grid(padding=(0, 1), expand=True)
+        grid.add_column(no_wrap=True, style="dim")
+        grid.add_column(no_wrap=True)
+        grid.add_column(ratio=1, overflow="fold")
+        body = text.strip() if kind in ("text", "think") else text
+        grid.add_row(when, Text(MARKS.get(kind, " "), style="bold " + style if style else "bold"),
+                     Text(body, style=style, overflow="fold"))
+        return grid
 
     def rerender(self) -> None:
         self.clear()
         self.group = []
+        self.last_kind = ""
         for ev in self.entries:
             self._show(ev)
 
@@ -160,7 +185,7 @@ def summarize(group: list[w.Event]) -> str:
             name = e.text.split(":", 1)[0]
             names[name] = names.get(name, 0) + 1
     calls = sum(names.values())
-    text = f"⋯ {calls} tool call{'s' if calls != 1 else ''}"
+    text = f"{calls} tool call{'s' if calls != 1 else ''}"
     if names:
         text += " (" + ", ".join(f"{n} {c}" for n, c in sorted(names.items(), key=lambda x: -x[1])) + ")"
     errors = sum(e.kind == "error" for e in group)
