@@ -326,6 +326,9 @@ class Pipeline:
             self.log(f"agentpipe {rev[:7]} doesn't import ({err}); not restarting onto it")
             return
         self.restart_for = rev
+        busy = [f"{j.kind} {k}" for k, j in self.jobs.items() if j.kind in ("merge", "release")]
+        self.log(f"agentpipe {rev[:7]} committed: handing over "
+                 + (f"once {', '.join(busy)} ends; no new merge or release meanwhile" if busy else "now"))
 
     def reload_config(self) -> None:
         """Apply pipeline.toml edits on the fly; a broken file keeps the current settings."""
