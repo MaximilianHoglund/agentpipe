@@ -204,8 +204,10 @@ context = ["docs/design.md", "docs/decisions.md", "docs/roadmap.md", "docs/agent
 # Ticket #217: slots reuse a target dir across branches; clean the game's crates first.
 clean_workspace_crates = true
 # Slot build dirs grow to ~25 GB each (245 GB on the desktop, 2026-11-09; the laptop's filled C:
-# and broke WSL). A slot rebuilds in a few minutes after it is deleted.
-cache_max_gb = 80
+# and broke WSL). A slot rebuilds in a few minutes after it is deleted. 150 (Max, 2026-11-09):
+# 8 busy slots held ~94 GB, so a cap of 80 wiped every slot after each job and every job
+# started with a cold build. E: had ~104 GB free besides the cache.
+cache_max_gb = 150
 # Max, 2026-11-07: technical tickets shouldn't wait for him; triage approves them.
 auto_approve = true
 # The gate checks rustfmt, so dev stays formatted: after keeping both sides of an additive
