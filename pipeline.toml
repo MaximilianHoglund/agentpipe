@@ -254,15 +254,16 @@ changes = ["balance-and-content"]
 
 [machines.desktop]
 hostnames = ["Amiariel"]
-# arpg moved to the laptop 2026-11-08 so it runs while the desktop is off; move it back the same way.
-targets = []
+# arpg back from the laptop 2026-11-09: its C: filled up overnight and broke WSL.
+targets = ["arpg"]
 
 # The laptop runs agentpipe inside WSL2 Ubuntu-24.04: Smart App Control blocks unsigned
 # native binaries (rustc), so Windows-side builds don't work there. 12 threads, 12 GB for WSL.
 [machines.laptop]
 hostnames = ["DESKTOP-AJ9U89K"]
-# Only arpg runs here since 2026-11-08 (Max); riftbound and dota run nowhere until listed again.
-targets = ["arpg"]
+# Nothing runs here since 2026-11-09 (arpg moved back to the desktop after C: filled up);
+# riftbound and dota run nowhere until listed again.
+targets = []
 claude_bin = "~/.local/bin/claude"
 gh_bin = "~/.local/bin/gh"
 work_root = "~/pipeline-work"
