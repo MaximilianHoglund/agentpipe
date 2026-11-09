@@ -117,7 +117,7 @@ class Target:
     # only tickets that unblock the gate or release. List what they wait on too.
     priority: list[str] = field(default_factory=list)
     # Work to run alone (Max, 2026-11-09): entries are task keys, or a change name that matches the
-    # tickets whose origin is that change (not the change's own tasks). While any of them is open,
+    # change's tasks and the tickets whose origin is that change. While any of them is open,
     # or waiting in the inbox, only that work is started (implement, review, merge), and no dev gate
     # or release; then the dispatcher carries on as usual by itself. Remove the entry once done.
     exclusive: list[str] = field(default_factory=list)

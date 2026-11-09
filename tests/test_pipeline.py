@@ -1855,3 +1855,11 @@ def test_a_filed_exclusive_ticket_never_listed_is_looked_up_after_a_while(pl):
     p.state.data["exclusive_tickets"]["99"]["at"] = time.time() - 3600
     p.tick()
     assert [s[1] for s in p.started] == ["c/1.1"] and not p.state.data["exclusive_tickets"]
+
+
+def test_an_exclusive_change_name_covers_the_changes_own_tasks(pl):
+    p, gh = pl
+    p.t.exclusive = ["c"]
+    assert p.is_exclusive("c/1.1")
+    p.t.exclusive = ["other"]
+    assert not p.is_exclusive("c/1.1")

@@ -1372,9 +1372,12 @@ class Pipeline:
                 self.start("merge", t0.key, "merge", issues[t0.key], prs[t0.key])
 
     def is_exclusive(self, key: str) -> bool:
+        """`exclusive` names ``key``: the key itself, its change, or (for a ticket) its origin."""
         ex = self.t.exclusive
-        return key in ex or (key.startswith(TICKET_CHANGE + "/")
-                             and self.state.data["tasks"].get(key, {}).get("origin") in ex)
+        if key in ex or (key in self.tasks and self.tasks[key].change in ex):
+            return True
+        return (key.startswith(TICKET_CHANGE + "/")
+                and self.state.data["tasks"].get(key, {}).get("origin") in ex)
 
     # Statuses in which work waits for Max, not for the pipeline.
     HUMAN_WAITS = (Status.NEEDS_DECISION, Status.PROPOSED, Status.WATCHING)
