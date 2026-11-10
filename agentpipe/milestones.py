@@ -56,17 +56,24 @@ def rank(milestones: list[Milestone], change: str) -> int:
     return len(milestones)
 
 
-def ticket_rank(milestones: list[Milestone], origin: str | None, unblocks: bool) -> float:
+def ticket_rank(milestones: list[Milestone], origin: str | None, unblocks: bool,
+                released: set[str] | frozenset[str] = frozenset()) -> float:
     """Scheduling priority of an approved ticket, on the same scale as ``rank``.
 
     A ticket that fixes something broken now (the gate, build, export or release) goes before
     everything. Any other ticket goes after the tasks of the milestone its origin belongs to, and
     before the next milestone's: it was filed while that work was done, but that work doesn't
     need it. With no known origin it counts as coming from the first milestone.
+
+    Once that milestone is released (its tag in ``released``), its tickets no longer hold the
+    next step back: they go after the tasks of the first unreleased milestone instead (Max,
+    2026-11-10: Step 1's leftover tickets kept Step 2 from starting after its playtest).
     """
     if unblocks:
         return -1
-    return (rank(milestones, origin) if origin else 0) + 0.5
+    base = rank(milestones, origin) if origin else 0
+    first_open = next((i for i, m in enumerate(milestones) if m.tag not in released), len(milestones))
+    return max(base, first_open) + 0.5
 
 
 def task_paths(m: Milestone) -> list[str]:

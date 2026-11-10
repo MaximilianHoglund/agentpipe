@@ -107,6 +107,22 @@ def test_only_unblocking_tickets_jump_the_queue():
     assert milestones.ticket_rank(ms, None, False) == milestones.ticket_rank(ms, "b", False)
 
 
+def test_released_milestones_tickets_wait_for_the_next_step():
+    ms = [Milestone("m1", "", ["b"]), Milestone("m2", "", ["a"]), Milestone("m3", "", ["c"])]
+    done = {"m1"}
+    # m1 is out: its tickets, and tickets with no known origin, go after m2's tasks, before m3's.
+    for origin in ("b", None):
+        r = milestones.ticket_rank(ms, origin, False, done)
+        assert milestones.rank(ms, "a") < r < milestones.rank(ms, "c")
+        assert r == milestones.ticket_rank(ms, "a", False, done)
+    # Tickets of later or unlisted work keep their place, and unblocking ones still go first.
+    assert milestones.ticket_rank(ms, "c", False, done) == milestones.ticket_rank(ms, "c", False)
+    assert milestones.ticket_rank(ms, "loose", False, done) > milestones.rank(ms, "loose")
+    assert milestones.ticket_rank(ms, "b", True, done) == -1
+    # Everything released: tickets rank with work in no milestone.
+    assert milestones.ticket_rank(ms, "b", False, {"m1", "m2", "m3"}) == len(ms) + 0.5
+
+
 def test_priority_tasks_go_after_unblocking_tickets_only():
     ms = [Milestone("m1", "", ["b"])]
     assert milestones.ticket_rank(ms, None, True) < milestones.PRIORITY_RANK < milestones.rank(ms, "b")

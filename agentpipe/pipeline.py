@@ -1848,7 +1848,8 @@ class Pipeline:
             st = self.state.task(key)
             if st.get("origin") and st["origin"] in self.t.priority:
                 return milestones.PRIORITY_RANK
-            return milestones.ticket_rank(self.t.milestones, st.get("origin"), st.get("unblocks", False))
+            return milestones.ticket_rank(self.t.milestones, st.get("origin"), st.get("unblocks", False),
+                                          self.released_tags or frozenset())
         return milestones.rank(self.t.milestones, self.tasks[key].change)
 
     def unblocking(self, key: str) -> bool:

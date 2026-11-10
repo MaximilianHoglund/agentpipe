@@ -6,15 +6,15 @@ gh_bin = "E:/Programs/GitHubCLI/bin/gh.exe"
 work_root = "E:/Source/.pipeline"
 
 [run]
-max_implementers = 5     # parallel implementer agents (each builds in its own cargo target dir)
-max_reviewers = 3
+max_implementers = 4     # parallel implementer agents (each builds in its own cargo target dir); 5 -> 4 on 2026-11-10 (usage cap)
+max_reviewers = 2         # 3 -> 2 on 2026-11-10 (usage cap)
 max_rounds = 3            # rejections before a task goes to "needs decision"
 poll_seconds = 60         # how often GitHub is checked
 sync_seconds = 600        # how often tasks.md is re-read and issues reconciled
 limit_backoff_seconds = 1800  # pause after a usage/capacity limit (or until the window resets, if known)
 # Start nothing new once a usage window reaches this share; resume when it resets.
 # Running jobs finish, so the gap below 1.0 is their headroom.
-throttle = { five_hour = 0.95, seven_day = 0.93 }  # 5h raised from 0.85 with the 10x plan (Max, 2026-11-08)
+throttle = { five_hour = 0.85, seven_day = 0.93 }  # 5h back to 0.85 (Max, 2026-11-10): at 0.95 running jobs overshot the cap
 # Caps: a run that hits one goes to "needs decision" instead of being retried, since a
 # stuck run's late turns are its most expensive (its context only grows). The longest
 # task so far took 49 turns.
@@ -178,11 +178,11 @@ github_repo = "MaximilianHoglund/arpg-manager"
 # for a human to play and test.
 base = "dev"
 release_branch = "main"
-# Max, 2026-11-10: the last Step 1 tasks before his playtest (run-viewer-and-reports 4.2) run
-# alone. 5.2 (starter tuning) waits on monster awareness (combat-simulation 5.1). The playtest
-# itself isn't listed: it needs the release, which the hold keeps off.
-priority = ["combat-simulation/5.1", "run-viewer-and-reports/5.2", "strategy-rules/1.6"]
-exclusive = ["combat-simulation/5.1", "run-viewer-and-reports/5.2", "strategy-rules/1.6"]
+# Tasks to run ahead of the rest of their milestone; `exclusive` ones run alone. Emptied
+# 2026-11-10 once the last Step 1 tasks (combat-simulation 5.1, run-viewer-and-reports 5.2,
+# strategy-rules 1.6) merged.
+priority = []
+exclusive = []
 # Each release carries the playable build. project-foundation 4.1 (in step 1) adds the script,
 # so it exists by the first release.
 release_build = "pwsh -NoProfile -File scripts/export.ps1"
