@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from agentpipe import handoff, milestones, proc, review, service, syncplan
-from agentpipe.claude import CAPPED, MAX_TURNS, Claude, ClaudeResult
+from agentpipe.claude import CAPPED, MAX_TURNS, Claude, ClaudeResult, guard_env
 from agentpipe.config import Agent, Config, Milestone, Target
 from agentpipe import conflicts
 from agentpipe.deps import (PLAN_SCHEMA, TIER_SCHEMA, TOUCHES_SCHEMA, TRIAGE_SCHEMA, Plan, PlanError, clean_tier, clean_touches, key_sort,
@@ -297,7 +297,7 @@ class Pipeline:
         mcp = wd / "mcp.json"
         mcp.write_text(json.dumps({"mcpServers": cfg.mcp_servers}, indent=2), encoding="utf-8")
         self.claude = Claude(cfg.claude_bin, self.logs, cfg.agent_timeout, on_denials=self.log_denials,
-                             mcp_config=mcp, on_rate=self.note_rate)
+                             mcp_config=mcp, on_rate=self.note_rate, guard=self.agent_env)
         # Agents start only once the environment checks pass (see preflight).
         self.env_ok = not (target.preflight or target.preflight_gate)
         self.last_preflight = 0.0
@@ -381,12 +381,27 @@ class Pipeline:
             return repr(e)
         return "" if r.returncode == 0 else (r.stderr.strip().splitlines() or ["exit code"])[-1]
 
+    # What a running dispatcher executes. Commits that change nothing here (pipeline.toml, README,
+    # tests, tools, openspec: 14 of 68 commits by 2026-11-10) need no handoff.
+    CODE_PATHS = ("agentpipe", "pyproject.toml", "uv.lock")
+
+    def code_changed(self, old: str, new: str) -> bool:
+        """Whether anything the dispatcher runs differs between two commits. True when git can't
+        say (the old commit is gone after a rebase): better one handoff too many."""
+        try:
+            r = subprocess.run(["git", "diff", "--quiet", old, new, "--", *self.CODE_PATHS],
+                               cwd=self.CODE_DIR, capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            return True
+        return r.returncode != 0  # 0: no difference, 1: differences, anything else: an error
+
     def check_code(self) -> None:
         """Restart on new agentpipe commits, so code changes need no hand restart.
 
         Once a minute, compare the checkout's HEAD with the one this dispatcher started on. On a
         new commit whose code imports cleanly, hand over to a new dispatcher (``hand_off``) as
         soon as no merge or release runs; until then everything else goes on as usual.
+        A commit that leaves ``CODE_PATHS`` as they were only moves the commit compared against.
         pipeline.toml edits don't need this: reload_config applies them each tick. Uncommitted
         edits don't trigger it, so a half-made change never restarts the dispatcher."""
         if self.code_rev is None or self.config_path is None or self.restart_for:
@@ -396,6 +411,10 @@ class Pipeline:
         self.last_code_check = time.time()
         rev = self.read_code_rev()
         if not rev or rev == self.code_rev or rev == self.bad_rev:
+            return
+        if not self.code_changed(self.code_rev, rev):
+            self.log(f"agentpipe {rev[:7]} committed: no code change, no handover")
+            self.code_rev = rev
             return
         if err := self.code_imports():
             self.bad_rev = rev
@@ -503,6 +522,12 @@ class Pipeline:
         tmp.mkdir(parents=True, exist_ok=True)
         env["TEMP"] = env["TMP"] = env["TMPDIR"] = str(tmp)
         return env
+
+    def agent_env(self, env: dict | None) -> dict | None:
+        """What `Claude.run` gives an agent in place of ``env``: with `env_guard` on, the same
+        plus a logged-out gh and a failing git push. Only agents get it; gates, mutation runs and
+        the dispatcher's own git and gh calls don't go through `Claude.run`."""
+        return guard_env(env, self.t.work_dir / "no-gh") if self.cfg.env_guard else env
 
     def context_list(self) -> str:
         return ", ".join(f"`{c}`" for c in self.t.context) or "nothing beyond the change itself"
@@ -1253,7 +1278,7 @@ class Pipeline:
         # in between can take minutes, and work an old dispatcher finished meanwhile must not
         # still hold its slots (2026-11-09: 3 implementer slots idled through a 7-minute preflight).
         self.refresh_foreign()
-        raw = self.gh.list_issues()
+        raw = self.gh.list_issues(state="open")
         issues = {k: i for k, i in self.issues_by_key(raw).items()
                   if i["state"].upper() == "OPEN" and k in self.tasks}
         self.issue_map = issues
@@ -1407,11 +1432,9 @@ class Pipeline:
         # Tickets filed for it: held for from filing, seen open in the list, then gone (closed).
         filed = self.state.data.get("exclusive_tickets") or {}
         listed = {i["number"] for i in issues.values()}
-        before = {n: (dict(v) if isinstance(v, dict) else v) for n, v in filed.items()}
+        before = {n: dict(v) for n, v in filed.items()}
         now = time.time()
         for n, v in list(filed.items()):
-            v = v if isinstance(v, dict) else {"seen": bool(v), "at": now}
-            filed[n] = v
             if int(n) in listed:
                 v["seen"] = True
             elif v["seen"]:
@@ -1613,7 +1636,7 @@ class Pipeline:
         failed = False
         while not done.wait(self.cfg.poll_seconds):
             try:
-                self.record_awaiting(self.gh.list_issues())
+                self.record_awaiting(self.gh.list_issues(state="open"))
                 failed = False
             except Exception as e:  # a GitHub hiccup must not end the thread
                 if not failed:
@@ -1652,7 +1675,7 @@ class Pipeline:
         st[f"fail_{kind}"] = st.get(f"fail_{kind}", 0) + 1
         self.state.save()
         if st[f"fail_{kind}"] >= 2:
-            issues = self.issues_by_key(self.gh.list_issues())
+            issues = self.issues_by_key(self.gh.list_issues(state="open"))
             if i := issues.get(key):
                 self.to_decision(i["number"], status_from_labels(i["labels"]),
                                  f"The `{kind}` job failed twice. Last error:\n\n```\n{detail[-3000:]}\n```")
@@ -3085,7 +3108,7 @@ class Pipeline:
             self.git.worktree_remove(wt)
 
     def gh_issue_open(self, number: int) -> bool:
-        return any(i["number"] == number and i["state"].upper() == "OPEN" for i in self.gh.list_issues())
+        return self.gh.issue(number)["state"].upper() == "OPEN"
 
     # ------------------------------------------------------------------ milestones
     def release_state(self, m: Milestone) -> dict:
@@ -3170,10 +3193,7 @@ class Pipeline:
         self.log(f"release {m.tag} failed: {why.splitlines()[0][:120]}")
 
     def gh_issue_labels(self, number: int) -> list[str]:
-        for i in self.gh.list_issues():
-            if i["number"] == number:
-                return i["labels"]
-        return []
+        return self.gh.issue(number)["labels"]
 
 
 class LimitHit(RuntimeError):

@@ -84,10 +84,11 @@ class GitHub:
                      "--description", desc, "--force")
 
     # -- issues -----------------------------------------------------------
-    def list_issues(self) -> list[dict]:
-        """Every pipeline issue, open and closed: number, state, title, body, labels (names)."""
+    def list_issues(self, state: str = "all") -> list[dict]:
+        """Pipeline issues: number, state, title, body, labels (names). ``state`` is "all" (open
+        and closed; the closed set only grows, so only sync asks for it) or "open"."""
         items = self._json("issue", "list", "-R", self.repo, "--label", PIPELINE_LABEL,
-                           "--state", "all", "--limit", "5000",
+                           "--state", state, "--limit", "5000",
                            "--json", "number,state,title,body,labels") or []
         for it in items:
             it["labels"] = [l["name"] for l in it["labels"]]

@@ -179,6 +179,9 @@ class Config:
     resume_within_seconds: int = 3000
     max_batch: int = 4  # most tasks the planner may put in one batch (one PR); 1 turns batching off
     mcp_servers: dict = field(default_factory=dict)  # the only MCP servers agents get
+    # Agent runs get an environment in which gh is logged out and git push fails (see
+    # claude.guard_env); [permissions] env_guard = false turns it off.
+    env_guard: bool = True
     extra: dict = field(default_factory=dict)
     # The [machines.<name>] section in effect ("" when none matched), and the targets it may
     # run (None: any). A target runs on one machine at a time, so each machine lists its own.
@@ -281,7 +284,7 @@ def load(path: Path) -> Config:
             preflight=list(t.get("preflight", [])),
             preflight_gate=bool(t.get("preflight_gate", False)),
             format=t.get("format", ""),
-            quick_check=t.get("quick_check", t.get("conflict_check", "")),
+            quick_check=t.get("quick_check", ""),
             front_paths=list(t.get("front_paths", [])),
             front_implementers=int(t.get("front_implementers", 0)),
             dev_gate=t.get("dev_gate", ""),
@@ -319,6 +322,7 @@ def load(path: Path) -> Config:
         resume_within_seconds=run.get("resume_within_seconds", 3000),
         max_batch=run.get("max_batch", 4),
         mcp_servers=dict(data.get("mcp_servers", {})),
+        env_guard=bool(data.get("permissions", {}).get("env_guard", True)),
         machine=machine,
         machine_targets=machine_targets,
     )

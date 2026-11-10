@@ -33,8 +33,13 @@ class FakeGitHub:
                                "labels": ["pipeline", status.label, *extra]}
         return self.n
 
-    def list_issues(self):
-        return [dict(i, labels=list(i["labels"])) for i in self.issues.values()]
+    def list_issues(self, state="all"):
+        return [dict(i, labels=list(i["labels"])) for i in self.issues.values()
+                if state == "all" or i["state"].lower() == state]
+
+    def issue(self, number):
+        i = self.issues[number]
+        return {"number": number, "state": i["state"], "body": i["body"], "labels": list(i["labels"])}
 
     def list_prs(self):
         return self.prs
@@ -1776,7 +1781,7 @@ def test_an_exclusive_ticket_holds_the_rest_while_github_has_not_listed_it_yet(p
     p.inbox_dir.mkdir(parents=True, exist_ok=True)
     (p.inbox_dir / "1.json").write_text('{"title": "Plan it", "body": "b", "origin": "godot-thin-tests"}')
     listed = gh.list_issues
-    gh.list_issues = lambda: [i for i in listed() if "Plan it" not in i["title"]]  # not listed yet
+    gh.list_issues = lambda state="all": [i for i in listed(state) if "Plan it" not in i["title"]]  # not listed yet
     p.tick()
     assert p.started == [] and p.exclusive_on
     gh.list_issues = listed

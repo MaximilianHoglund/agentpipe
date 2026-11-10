@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -82,10 +83,49 @@ def parse_output(stdout: str, stderr: str, code: int) -> ClaudeResult:
     )
 
 
+# Where an agent's pushes end up: a URL scheme git has no helper for, so the push fails at once
+# ("git: 'remote-no-push' is not a git command") before anything reaches the network.
+NO_PUSH_URL = "no-push://the-dispatcher-pushes-for-agents/"
+PUSH_PREFIXES = ("https://", "http://", "ssh://", "git://", "git@")
+NO_GH_TOKEN = "agentpipe-agents-have-no-gh"
+
+
+def guard_env(env: dict | None, no_gh_dir: Path) -> dict:
+    """``env`` (default: this process's) plus what keeps an agent run off GitHub however it
+    phrases the command; the deny rules in pipeline.toml only match command prefixes.
+
+    - gh: an invalid GH_TOKEN (it beats the keyring login: every call gets HTTP 401) and
+      GH_CONFIG_DIR at an empty directory (no login at all if only the token is unset).
+    - git push: `url.<NO_PUSH_URL>.pushInsteadOf` for every network URL prefix, passed as
+      GIT_CONFIG_* variables, rewrites the push URL of any remote or explicit URL. Fetches,
+      commits and pushes to a local path (tests that push to a scratch repository) are untouched.
+      A remote with its own `pushurl` is not rewritten; agents are denied setting one.
+    git itself authenticates through its credential helper, not GH_TOKEN, so fetch keeps working
+    (checked 2026-11-10 with Git Credential Manager on the desktop). An agent that unsets these
+    variables on purpose gets past them: like the deny rules, this guards against mistakes."""
+    env = dict(os.environ if env is None else env)
+    no_gh_dir.mkdir(parents=True, exist_ok=True)
+    env["GH_TOKEN"] = NO_GH_TOKEN
+    env["GH_CONFIG_DIR"] = str(no_gh_dir)
+    try:
+        n = int(env.get("GIT_CONFIG_COUNT") or 0)
+    except ValueError:
+        n = 0
+    for prefix in PUSH_PREFIXES:
+        env[f"GIT_CONFIG_KEY_{n}"] = f"url.{NO_PUSH_URL}.pushInsteadOf"
+        env[f"GIT_CONFIG_VALUE_{n}"] = prefix
+        n += 1
+    env["GIT_CONFIG_COUNT"] = str(n)
+    return env
+
+
 class Claude:
     def __init__(self, bin: str, log_dir: Path, timeout: int, run=proc.run, on_denials=None,
-                 mcp_config: Path | None = None, on_rate=None):
+                 mcp_config: Path | None = None, on_rate=None, guard=None):
         self.bin = bin
+        # Called with each run's env (None: inherit) and returns the env to use: the place for
+        # what only agent runs get (see guard_env), since every agent starts through `run`.
+        self.guard = guard
         self.on_rate = on_rate  # called with ClaudeResult.rate after a run that reported it
         # Agents get only these MCP servers, not the user's own (connectors, browser, ...):
         # fewer tool definitions per turn, and no mail or drive access for unattended runs.
@@ -109,6 +149,8 @@ class Claude:
             cmd += ["--disallowedTools", *agent.deny]
         if agent.tools:
             cmd += ["--allowedTools", *agent.tools]
+        if self.guard:
+            env = self.guard(env)
         # The prompt goes on stdin: --allowedTools is variadic and would swallow it.
         r = self._run(cmd, cwd, input=prompt, env=env, timeout=self.timeout, check=False)
         # Windows treats ':' in a file name as an alternate data stream; keep names plain.
