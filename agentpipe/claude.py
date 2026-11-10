@@ -10,12 +10,35 @@ from pathlib import Path
 from agentpipe import proc
 from agentpipe.config import Agent
 
-# Messages that mean "out of quota / capacity", as opposed to a failed task.
+# Messages that mean "out of quota / capacity", as opposed to a failed task. A match pauses the
+# whole dispatcher, so every alternative needs context: a target's own prose ("inventory capacity
+# check failed", "fire rate limit of the weapon", "player is overloaded") must not match.
+_CODE = r"\b(?:429|529)\b"
 LIMIT_RE = re.compile(
-    # "You've hit your 5-hour limit · resets 11:30pm (...)" matched none of these until 2026-11-04.
-    r"usage limit|rate[ _-]?limit|limit (?:reached|exceeded)|hit your [\w -]*limit|"
-    r"resets? (?:at )?\d|overloaded|"
-    r"low[ -]priority|capacity|\b429\b|\b529\b",
+    "|".join([
+        # Claude Code quota: "Claude usage limit reached", "You've hit your 5-hour limit · resets
+        # 11:30pm (...)", "5-hour limit reached ∙ resets 3pm", "Weekly limit reached".
+        r"\busage limit",
+        r"\b(?:hit|reached|exceeded) your (?:[\w-]+ ){0,3}limit",
+        r"\b(?:\d+[- ]hour|hourly|daily|weekly|monthly|session|opus|sonnet|haiku|model) limit "
+        r"(?:reached|exceeded|hit)",
+        r"\blimit\W{1,5}resets?\b",
+        # API rate limiting: "rate limit exceeded", "rate_limit_error", "429 ... rate limit".
+        r"\brate_limit",
+        r"\brate[ -]?limit(?:s)? (?:exceeded|reached|hit|error)",
+        r"\b(?:exceeded|hit|reached) (?:the |your |an? )?(?:api )?rate[ -]?limit",
+        r"\b(?:are|been|being|was|were|got) rate[ -]?limited",
+        # API overload: "overloaded_error", "API Error: 529 ... Overloaded", "Error: 529 overloaded".
+        r"\boverloaded_error",
+        r"\bAPI Error\b[^\n]{0,200}\boverloaded",
+        r'"message"\s*:\s*"Overloaded',
+        _CODE + r"[^\n]{0,200}?(?:rate[ _-]?limit|overloaded|too many requests)",
+        r"\bAPI Error:?\s*\(?" + _CODE,
+        r"\b(?:HTTP(?:/[\d.]+)?|status(?: code)?)[ :=]{1,3}" + _CODE,
+        # Capacity: low-priority capacity notices, "capacity constraints".
+        r"\blow[ -]priority\b[^\n]{0,80}\bcapacity|\bcapacity\b[^\n]{0,80}\blow[ -]priority",
+        r"\bcapacity constraints?\b",
+    ]),
     re.I,
 )
 
@@ -42,36 +65,53 @@ class ClaudeResult:
 
 
 def parse_output(stdout: str, stderr: str, code: int) -> ClaudeResult:
-    data = last_json = rate = None
+    """Read a run's result from its stdout: stream-json lines, or one plain json object.
+
+    The result is the ``{"type": "result"}`` event, or (plain ``--output-format json``) an object
+    with no ``type`` at all. Every stream event has a ``type``, so a run cut short before its
+    result (a timeout, a crash) has none, and is reported from stderr and the exit code.
+    """
+    data = session = rate = None
+    events = 0
+    plain: list[str] = []  # stdout that is not a JSON event: a crash message, usually
     for line in stdout.strip().splitlines():
         line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+        obj = None
+        if line.startswith("{"):
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                pass
         if not isinstance(obj, dict):
+            if line:
+                plain.append(line)
             continue
-        last_json = obj
-        if obj.get("type") == "result":
+        events += 1
+        if isinstance(obj.get("session_id"), str) and obj["session_id"]:
+            session = obj["session_id"]
+        kind = obj.get("type")
+        if kind == "result":
             data = obj
-        elif obj.get("type") == "rate_limit_event":
+        elif kind is None and (data is None or data.get("type") != "result"):
+            data = obj
+        elif kind == "rate_limit_event":
             info = obj.get("rate_limit_info") or {}
             rate = info.get("unifiedWindows") or rate
-    data = data or last_json  # plain --output-format json, or a run cut short
     if data is None:
-        msg = (stderr or stdout or f"exit {code}").strip()
+        msg = stderr.strip() or "\n".join(plain)
         if code == proc.TIMEOUT_CODE:
-            return ClaudeResult(False, None, msg, None, False, subtype=TIMEOUT, rate=rate)
-        return ClaudeResult(False, None, msg, None, bool(LIMIT_RE.search(msg)), rate=rate)
+            return ClaudeResult(False, session, msg or "timed out", None, False,
+                                subtype=TIMEOUT, rate=rate)
+        if not msg:
+            msg = f"exit {code}" + (f": no result after {events} stream events" if events else "")
+        return ClaudeResult(False, session, msg, None, bool(LIMIT_RE.search(msg)), rate=rate)
     text = str(data.get("result", ""))
     is_error = bool(data.get("is_error")) or data.get("subtype") != "success"
     structured = data.get("structured_output")
     limited = is_error and bool(LIMIT_RE.search(text + " " + stderr))
     return ClaudeResult(
         ok=not is_error and structured is not None,
-        session_id=data.get("session_id"),
+        session_id=data.get("session_id") or session,
         text=text,
         structured=structured,
         limited=limited,
