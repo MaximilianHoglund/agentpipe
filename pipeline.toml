@@ -170,15 +170,11 @@ github_repo = "MaximilianHoglund/arpg-manager"
 # for a human to play and test.
 base = "dev"
 release_branch = "main"
-# Max, 2026-11-09: the run setup screen (5.1) and starter tuning (5.2) first, so Step 1 is
-# playable. 5.2 waits on monster awareness (combat-simulation 5.1) and `arpg-cli simulate` (5.3).
-# Then the thin Godot test layer (Max, 2026-11-09): a whole change, and the ticket that writes it
-# (its origin is the change).
-priority = ["run-viewer-and-reports/5.1", "run-viewer-and-reports/5.2",
-            "run-viewer-and-reports/5.3", "combat-simulation/5.1", "godot-thin-tests"]
-# Max, 2026-11-09 23:4x: the thin Godot test layer (the whole change) and combat-simulation/5.1,
-# which several of its tasks build on, run alone; everything else waits until they are done.
-exclusive = ["godot-thin-tests", "combat-simulation/5.1"]
+# Max, 2026-11-10: the last Step 1 tasks before his playtest (run-viewer-and-reports 4.2) run
+# alone. 5.2 (starter tuning) waits on monster awareness (combat-simulation 5.1). The playtest
+# itself isn't listed: it needs the release, which the hold keeps off.
+priority = ["combat-simulation/5.1", "run-viewer-and-reports/5.2", "strategy-rules/1.6"]
+exclusive = ["combat-simulation/5.1", "run-viewer-and-reports/5.2", "strategy-rules/1.6"]
 # Each release carries the playable build. project-foundation 4.1 (in step 1) adds the script,
 # so it exists by the first release.
 release_build = "pwsh -NoProfile -File scripts/export.ps1"
@@ -288,17 +284,17 @@ changes = ["balance-and-content"]
 
 [machines.desktop]
 hostnames = ["Amiariel"]
-# arpg moved to the laptop 2026-11-10 for a nightly run (it was here from 2026-11-09, after the
-# laptop's C: filled up; cache_max_gb now caps the laptop's build dirs).
-targets = []
+# arpg back here 2026-11-10 ~12:40 after the laptop's nightly run (its C: ran low and a WSL
+# update killed the VM).
+targets = ["arpg"]
 
 # The laptop runs agentpipe inside WSL2 Ubuntu-24.04: Smart App Control blocks unsigned
 # native binaries (rustc), so Windows-side builds don't work there. 12 threads, 12 GB for WSL.
 [machines.laptop]
 hostnames = ["DESKTOP-AJ9U89K"]
-# arpg runs here since 2026-11-10 (Max: a nightly run while the desktop is off); riftbound and
-# dota run nowhere until listed again.
-targets = ["arpg"]
+# arpg ran here overnight 2026-11-10 and moved back to the desktop; riftbound and dota run
+# nowhere until listed again.
+targets = []
 claude_bin = "~/.local/bin/claude"
 gh_bin = "~/.local/bin/gh"
 work_root = "~/pipeline-work"
