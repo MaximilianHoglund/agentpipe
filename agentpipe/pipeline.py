@@ -747,9 +747,11 @@ class Pipeline:
     def rate_tickets(self, issues: dict[str, dict]) -> None:
         """Rate approved tickets (one run, on the planner's light model), into state.json:
         `tier` (`light` or `standard`) for those not yet started, and for every one `unblocks`,
-        whether it fixes something broken now. Tickets aren't planned, so this is where they get
-        the tier the plan gives tasks; `unblocks` and the ticket's origin set its place in the
-        queue (``milestones.ticket_rank``). Only approved ones: a proposal may never be built.
+        whether it fixes something broken now, and `needs`, the tasks it must wait for (the
+        run's `waits_for`; see ``ticket_needs``). Tickets aren't planned, so this is where they
+        get the tier and the blockers the plan gives tasks; `unblocks` and the ticket's origin
+        set its place in the queue (``milestones.ticket_rank``). Only approved ones: a proposal
+        may never be built. A ticket rated before `needs` existed is rated again while unstarted.
         A failed run is logged and not retried until a restart; an unrated ticket runs as
         `standard`, after its milestone's tasks."""
         open_tickets = [k for k, i in issues.items()
@@ -766,7 +768,8 @@ class Pipeline:
         need = [k for k in open_tickets
                 if status_from_labels(issues[k]["labels"]) in live and k not in self.tiers_tried
                 and ("unblocks" not in self.state.task(k) or stale(k)
-                     or ("tier" not in self.state.task(k) and not self.state.task(k).get("runs")))]
+                     or ("tier" not in self.state.task(k) and not self.state.task(k).get("runs"))
+                     or ("needs" not in self.state.task(k) and not self.state.task(k).get("runs")))]
         if not need:
             return
         self.tiers_tried |= set(need)
@@ -776,8 +779,11 @@ class Pipeline:
             return f"\n\nPromoted from watching after being seen {n} times." if n > 1 else ""
         rows = "\n\n".join(f"### {k}: {self.tasks[k].text}\n\n{self.ticket_bodies.get(k, '')[:4000]}{seen(k)}"
                              for k in need)
+        task_keys = self.plain_task_keys()
+        open_tasks = "\n".join(f"- {k}: {self.tasks[k].text[:160]}" for k in sorted(task_keys, key=key_sort)
+                               if not self.tasks[k].done) or "(none)"
         prompt = review.prompt("ticket_tiers", repo_root=self.base_wt, target=self.t.name,
-                               project_dir=self.t.project_dir, tickets=rows)
+                               project_dir=self.t.project_dir, tickets=rows, tasks=open_tasks)
         planner = self.cfg.agents["planner"]
         res = self.claude.run(prompt, self.base_wt, replace(planner, model=planner.light_model or planner.model),
                               TIER_SCHEMA, log_name=f"ticket-tiers-{len(need)}")
@@ -798,6 +804,9 @@ class Pipeline:
             if isinstance(e.get("unblocks"), bool):
                 st["unblocks"], st["unblocks_rule"] = e["unblocks"], UNBLOCKS_RULE
                 unblocking += e["unblocks"]
+            if isinstance(e.get("waits_for"), list):
+                named = {str(w).strip() for w in e["waits_for"]}
+                st["needs"] = sorted(named & task_keys, key=key_sort)
         self.state.save()
         self.log(f"rated {len(need)} ticket(s); {light} light, {unblocking} unblocking")
 
@@ -985,12 +994,25 @@ class Pipeline:
                 self.tasks[key] = Task(TICKET_CHANGE, str(i["number"]), i["title"], False, kind, 0)
                 self.ticket_bodies[key] = i["body"]
 
+    def plain_task_keys(self) -> set[str]:
+        """Keys of the target's OpenSpec tasks: everything known that isn't a ticket."""
+        return {k for k in self.tasks if not k.startswith(TICKET_CHANGE + "/")}
+
+    def ticket_needs(self, key: str) -> set[str]:
+        """Tasks ticket ``key`` needs merged before it can be built, done or not. The rating
+        run decides (`needs` in state.json, from ``rate_tickets``); until a ticket has that
+        answer, they are guessed from its text (``ticket_blockers``)."""
+        task_keys = self.plain_task_keys()
+        rated = self.state.data["tasks"].get(key, {}).get("needs")
+        if isinstance(rated, list):
+            return set(rated) & task_keys
+        return ticket_blockers(self.ticket_bodies.get(key, ""), task_keys)
+
     def ticket_waits_for(self, key: str) -> list[str]:
         """Unfinished tasks an approved, not yet started ticket needs; logged once per change."""
         if not key.startswith(TICKET_CHANGE + "/") or self.state.task(key).get("runs"):
             return []
-        task_keys = {k for k in self.tasks if not k.startswith(TICKET_CHANGE + "/")}
-        needs = ticket_blockers(self.ticket_bodies.get(key, ""), task_keys)
+        needs = self.ticket_needs(key)
         waiting = sorted((k for k in needs if not self.tasks[k].done), key=key_sort)
         st = self.state.task(key)
         if st.get("waits_for") != waiting:
@@ -1571,12 +1593,12 @@ class Pipeline:
         return only if on else None
 
     def exclusive_needs(self, key: str) -> list[str]:
-        """Unfinished tasks ``key`` waits for: a ticket's named tasks, a task's plan blockers."""
+        """Unfinished tasks ``key`` waits for: what a ticket needs (``ticket_needs``), a task's
+        plan blockers."""
         if key not in self.tasks:
             return []
         if key.startswith(TICKET_CHANGE + "/"):
-            task_keys = {k for k in self.tasks if not k.startswith(TICKET_CHANGE + "/")}
-            needs = ticket_blockers(self.ticket_bodies.get(key, ""), task_keys)
+            needs = self.ticket_needs(key)
         else:
             needs = self.plan.get(key).blocked_by if self.plan else []
         return [b for b in needs if b in self.tasks and not self.tasks[b].done]

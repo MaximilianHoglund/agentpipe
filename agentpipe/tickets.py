@@ -1,8 +1,11 @@
-"""Which OpenSpec tasks an agent-filed ticket needs merged before it can be worked on.
+"""Which OpenSpec tasks a ticket needs merged before it can be worked on, guessed from its text.
 
-Tickets aren't planned, so their blockers come from their own text: task keys it names
-(`combat-simulation/1.4`), bare task ids (`3.3`) when the ticket names exactly one change,
-and the task whose implementer filed it, since a ticket usually builds on that task's code.
+Tickets aren't planned. The run that rates an approved ticket decides what it waits for
+(``Pipeline.rate_tickets``, kept as `needs` in state.json). This guess is the fallback for a
+ticket without that answer (not rated yet, the run failed, or no light model is configured):
+task keys the text names (`combat-simulation/1.4`), bare task ids (`3.3`) when it names
+exactly one change, and the task whose implementer filed it. It can't tell needing a task
+from mentioning one, so it errs towards waiting.
 """
 
 from __future__ import annotations

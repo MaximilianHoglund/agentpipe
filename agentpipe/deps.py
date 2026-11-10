@@ -79,8 +79,9 @@ TIER_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {"key": {"type": "string"}, "tier": {"type": "string", "enum": list(TIERS)},
-                               "unblocks": {"type": "boolean"}},
-                "required": ["key", "tier", "unblocks"],
+                               "unblocks": {"type": "boolean"},
+                               "waits_for": {"type": "array", "items": {"type": "string"}}},
+                "required": ["key", "tier", "unblocks", "waits_for"],
             },
         }
     },
