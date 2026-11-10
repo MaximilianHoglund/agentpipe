@@ -100,7 +100,11 @@ dispatcher checks the issues it blocks. A waiter goes to `pending implementation
 last blocker is done; a waiter with several blockers waits for all of them. Each sync also
 sweeps every waiter, which catches issues closed by hand. If a blocker is closed as not
 planned, or a waiter has no blockers, the waiter goes to `needs decision`. An approved
-ticket whose text names unfinished tasks is registered the same way.
+ticket that needs unfinished tasks merged first is registered the same way. The run that
+rates the ticket (see Model tiers) decides which: tasks whose code or decisions it builds on,
+not ones its text only mentions. Until a ticket has that answer (not rated yet, the run
+failed, or no light model is set), every unfinished task its text names counts, and so does
+the task whose agent filed it.
 
 **Agent-filed tickets:** implementers and the reviewer report defects and improvements
 they notice outside their scope. They arrive as issues labelled `kind: defect` or
@@ -146,7 +150,8 @@ An agent in `pipeline.toml` may set `light_model` beside `model`. The planner ra
 task `light` (routine, fully specified) or `standard`; tasks planned earlier get rated in
 the same extra run that predicts their `touches`, on the planner's light model. Tickets
 aren't planned: once approved, and before their first run, they're rated in one run per
-sync on the planner's light model, and the tier goes in `state.json`. The
+sync on the planner's light model, and the tier goes in `state.json`, with the unfinished
+tasks the ticket has to wait for. The
 implementer's light model takes the first implementation of a light task (a batch only if
 every member is light) and every conflict-resolution and cleanup run. Revisions always run
 on the full model; so does every run after a task escalates, which happens when a light
