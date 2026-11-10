@@ -29,6 +29,11 @@ _LINE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[[^\]]+\] (.*)$"
 _START_RE = re.compile(r"^(?:start|carried over) (\w+) (\S+) \(#(\d+)\) on (\S+?)(?:: (.*))?$")
 _PHASE_RE = re.compile(r"^phase (\S+): (.*)$")
 _END_RE = re.compile(r"^(?:done (\w+) (\S+)|(\w+) (\S+) crashed: .*)$")
+# The release and the base branch's full gate log no "start" line (Max, 2026-11-10: a running
+# release didn't show, so it looked like merges went ahead of it). Their keys are their slots.
+_RELEASE_RE = re.compile(r"^milestone (\S+) complete; releasing (\w+) to ")
+_DEV_GATE_RE = re.compile(r"^full gate on (\S+) at (\w+)$")
+_DEV_GATE_END = "done dev gate devgate"
 
 
 @dataclass
@@ -67,6 +72,14 @@ def parse_log(lines: list[str], recent: int = 6) -> LogState:
         elif s := _START_RE.match(msg):
             kind, key, issue, slot, about = s.groups()
             jobs[key] = Job(kind, key, int(issue), slot, last_time, about=about or "")
+        elif r := _RELEASE_RE.match(msg):
+            jobs["milestone"] = Job("release", "milestone", 0, "milestone", last_time,
+                                    about=f"{r.group(1)} from {r.group(2)}")
+        elif g := _DEV_GATE_RE.match(msg):
+            jobs["devgate"] = Job("dev gate", "devgate", 0, "devgate", last_time,
+                                  about=f"{g.group(1)} at {g.group(2)}")
+        elif msg == _DEV_GATE_END:
+            jobs.pop("devgate", None)
         elif (ph := _PHASE_RE.match(msg)) and ph.group(1) in jobs:
             jobs[ph.group(1)].phase, jobs[ph.group(1)].phase_at = ph.group(2), last_time
         elif e := _END_RE.match(msg):
@@ -272,7 +285,7 @@ def render(target: str, work_dir: Path, project_dir: str, *, events: int = 8,
     for job in sorted(st.jobs, key=lambda j: j.slot):
         cwd = job_cwd(work_dir, project_dir, job)
         path = live_transcript(cwd, job.started)
-        head = (f"[{job.slot}] {job.kind} {job.key} (#{job.issue})"
+        head = (f"[{job.slot}] {job.kind}" + (f" {job.key} (#{job.issue})" if job.issue else "")
                 + (f' "{job.about}"' if job.about else "") + f", {_ago(now - job.started)}")
         if path is None or (job.phase and not job.phase.startswith("agent")):
             # Not in an agent (yet): say which step, how far along, and when it last did anything.
@@ -359,6 +372,9 @@ def job_step(work_dir: Path, cwd: Path, job: Job) -> tuple[str, str, float | Non
         return "mutation testing", m[0], m[1]
     if job.phase:
         return job.phase, "", max(filter(None, (build, job.phase_at)), default=None)
+    if job.kind in ("release", "dev gate"):
+        return "full test gate, then the build" if job.kind == "release" else "full test gate", "", \
+            max(filter(None, (build, job.started)), default=None)
     if job.kind in ("review", "merge"):
         # Old dispatchers log no phases; a review without an agent or mutants is in its gate.
         return "test gate", "", max(filter(None, (build, job.started)), default=None)

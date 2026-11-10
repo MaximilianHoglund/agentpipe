@@ -112,3 +112,14 @@ def test_parse_log_reads_the_task_description_on_a_start_line():
     st = watch.parse_log(["2026-11-03 12:00:01 [t] start implement c/1.1 (#5) on impl-0: Add a combat log: v2"])
     [job] = st.jobs
     assert (job.slot, job.issue, job.about) == ("impl-0", 5, "Add a combat log: v2")
+
+
+def test_a_running_release_and_dev_gate_are_listed_as_jobs():
+    from agentpipe.watch import parse_log
+    lines = ["2026-11-10 14:18:19 [arpg] milestone step-1 complete; releasing ad1d010b to main",
+             "2026-11-10 14:18:20 [arpg] full gate on origin/dev at ad1d010b"]
+    st = parse_log(lines)
+    assert sorted((j.kind, j.slot) for j in st.jobs) == [("dev gate", "devgate"), ("release", "milestone")]
+    st = parse_log(lines + ["2026-11-10 14:30:00 [arpg] done release milestone",
+                            "2026-11-10 14:30:01 [arpg] done dev gate devgate"])
+    assert st.jobs == []
