@@ -179,11 +179,12 @@ github_repo = "MaximilianHoglund/arpg-manager"
 base = "dev"
 release_branch = "main"
 # Tasks to run ahead of the rest of their milestone; `exclusive` ones run alone.
-# Max, 2026-11-10: his Step 1 playtest tickets (741 boss wake, 742 party vision), and the engine
-# bugs Step 2's equipping and run building will hit (389, 733, 732, 501, 369, 331, 706).
-# Remove entries once they merge.
-priority = ["ticket/741", "ticket/742", "ticket/389", "ticket/733", "ticket/732", "ticket/501",
-            "ticket/369", "ticket/331", "ticket/706"]
+# Max, 2026-11-10: his Step 1 playtest ticket 742 (party vision), the engine bugs Step 2's
+# equipping and run building will hit (389, 733, 369; 331, 501, 706, 732 and 741 merged), and
+# all of Step 2 itself (Max, 2026-11-10 evening: "prioritize Step 2 tasks"), so its tasks also
+# rank with these tickets and no longer wait on lower-ranked files. Remove entries once they merge.
+priority = ["ticket/742", "ticket/389", "ticket/733", "ticket/369",
+            "items-and-equipment", "loot-filter", "save-system"]
 exclusive = []
 # Each release carries the playable build. project-foundation 4.1 (in step 1) adds the script,
 # so it exists by the first release.
