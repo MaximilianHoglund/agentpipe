@@ -187,8 +187,9 @@ project_dir = "."
 # merged before the workspace exists (e.g. 1.2's setup scripts) aren't failed for it.
 test = '''pwsh -NoProfile -Command "if (Test-Path scripts/check.ps1) { & ./scripts/check.ps1; exit $LASTEXITCODE } elseif (Test-Path Cargo.toml) { cargo test --workspace; exit $LASTEXITCODE } else { Write-Output 'No Cargo.toml or scripts/check.ps1 yet: nothing to gate.'; exit 0 }"'''
 # Releases run every test; the per-PR gate leaves out tooling tests whose files didn't change
-# (scripts/check.ps1, $toolingTests; Max, 2026-11-07).
-release_test = '''pwsh -NoProfile -File scripts/check.ps1 -Full'''
+# (scripts/check.ps1, $toolingTests; Max, 2026-11-07). -Performance: since godot-thin-tests 3.5
+# the frame rate check (viewer_performance) runs only with that switch, once per release.
+release_test = '''pwsh -NoProfile -File scripts/check.ps1 -Full -Performance'''
 # scripts/mutants.ps1 (2026-11-07): -j 6 in tree copies (in the slot's TEMP, each with its own
 # target dir); sim/cli mutants skip the ~110 s nested-build tests, bridge mutants leave out
 # test_mode, shared_target and line_endings, which made every bridge mutant time out. PR #367's 86
