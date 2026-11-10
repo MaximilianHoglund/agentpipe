@@ -232,8 +232,9 @@ builds there): code in `~/agentpipe`, work dir `~/pipeline-work`, launched by
 - Agents work from `origin/main`. Uncommitted work in your own checkout is invisible
   to them; push what they should build on. The dispatcher pushes merges and tasks.md
   ticks to `main`, so pull afterwards.
-- Usage or capacity limits pause the dispatcher for `limit_backoff_seconds`; the
-  interrupted agent resumes its session afterwards.
+- Usage or capacity limits pause agent work (implement, revise, review, planning, triage) for
+  `limit_backoff_seconds` or until the known reset. Syncing, merges, the release and the dev
+  gate use no tokens and go on meanwhile; the interrupted agent resumes its session afterwards.
 
 ## Setup
 

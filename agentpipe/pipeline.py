@@ -49,10 +49,10 @@ MUTATION_FIXES = 2  # implementer runs on missed mutants before the PR goes to r
 # mutants, and resolving a conflict or a gate failure from merging the base at handoff.
 SESSION_RUNS = {"mutants", "sync"}
 SYNC_FIXES = 2  # implementer runs on a gate the base merge broke before the PR goes to review anyway
-UNFINISHED_REQUEUES = 2
+UNFINISHED_REQUEUES = 2  # "incomplete" runs in a row requeued automatically before asking Max
 # Version of the ticket rater's `unblocks` rule. Tickets rated unblocking under an older one, and
 # not started, are rated again (2: one sighting is no longer enough, Max 2026-11-09).
-UNBLOCKS_RULE = 2  # "incomplete" runs in a row requeued automatically before asking Max
+UNBLOCKS_RULE = 2
 MERGE_ATTEMPTS = 3  # tries to bring a behind branch up to date and merge it
 MERGE_RETRY_SECONDS = 15  # lets GitHub finish computing mergeability after a push
 BASE_MOVED = "the base branch moved"
@@ -175,8 +175,26 @@ class State:
     def _write(self, data: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.write_text(json.dumps(self._snapshot(data), indent=2), encoding="utf-8")
         replace_retrying(tmp, self.path)
+
+    @staticmethod
+    def _snapshot(data: dict) -> dict:
+        """A private copy of ``data`` to serialise at leisure.
+
+        Job threads change the dicts ``task`` hands out without the lock. ``json.dumps`` with
+        ``indent`` runs the pure-Python encoder, which iterates those dicts live, so a key added
+        meanwhile raised "dictionary changed size during iteration" and lost the save. Without
+        ``indent`` the C encoder does the whole pass without giving up the GIL (the data is
+        plain dicts, lists, strings and numbers), so no other thread runs during it. The retry
+        covers an interpreter where that doesn't hold."""
+        for attempt in range(20):
+            try:
+                return json.loads(json.dumps(data))
+            except RuntimeError:
+                if attempt == 19:
+                    raise
+        raise AssertionError("unreachable")
 
     def _take_shared(self, disk: dict) -> None:
         """Merge the usage pause and windows another dispatcher may have written.
@@ -361,6 +379,12 @@ class Pipeline:
         # batch, pid}. Their tasks (with batch followers) and slots count as taken.
         self.foreign: dict[str, dict] = {}
         self.foreign_keys: set[str] = set()
+        # `tasks` and `ticket_bodies` are replaced whole, never changed in place, by whoever holds
+        # this: job threads read them (and file tickets) while the tick thread syncs.
+        self.tickets_lock = threading.Lock()
+        # Loop steps that raised, by step ("tick", "sync", "plan"): logged once, not every tick.
+        self.errors: dict[str, dict] = {}
+        self.plan_failed: tuple[str, float, str] | None = None  # (fingerprint, when, error)
 
     # Settings read once at startup; changing them in the file still needs a restart.
     RESTART_ONLY = ("claude_bin", "gh_bin", "agent_timeout", "mcp_servers")
@@ -566,10 +590,11 @@ class Pipeline:
             tasks += parse_tasks(change, path.read_text(encoding="utf-8"))
         return tasks
 
-    def make_plan(self, tasks: list[Task], fp: str, old: Plan | None = None) -> Plan:
+    def make_plan(self, tasks: list[Task], fp: str, old: Plan | None = None, agents: bool = True) -> Plan:
         """Plan the target's tasks. With an ``old`` plan, only new or reworded tasks (and
         batches they touch) go to the planner, unless so much changed that a full plan is
-        as cheap; everything else is kept as it was."""
+        as cheap; everything else is kept as it was. Without ``agents`` (a usage pause) a plan
+        that needs the planner raises PlanDeferred instead of running it."""
         stale, removed = stale_keys(tasks, old) if old else (set(), set())
         open_keys = {t.key for t in tasks if not t.done}
         incremental = old is not None and len(stale) <= max(10, len(open_keys) // 2)
@@ -577,6 +602,8 @@ class Pipeline:
             # Only removals, or only done tasks changed: no planner needed.
             return validate_plan(tasks, merge_plans(old, {"tasks": []}, stale, removed), fp, self.cfg.max_batch)
         plan_t = [t for t in tasks if t.key in stale] if incremental else [t for t in tasks if not t.done]
+        if not agents:
+            raise PlanDeferred(f"{len(plan_t)} new or changed task(s) are planned once the usage pause ends")
         self.log(f"planning {len(plan_t)} task(s)" + (f" incrementally ({len(open_keys)} open)" if incremental else ""))
         prompt = self.planner_prompt(tasks, plan_t, old if incremental else None, removed)
         errors = ""
@@ -842,9 +869,12 @@ class Pipeline:
             existing_section=existing, answer_rule=rule, max_batch=self.cfg.max_batch,
         )
 
-    def sync(self, gh: GitHub | None = None, on_ready=None) -> list:
+    def sync(self, gh: GitHub | None = None, on_ready=None, agents: bool = True) -> list:
         """Reconcile GitHub with tasks.md. ``on_ready`` runs once every ready task has
-        its issue, before the slower rest (blocked issues, links), so agents start early."""
+        its issue, before the slower rest (blocked issues, links), so agents start early.
+
+        Without ``agents`` (a usage pause) nothing here runs an agent: no planner, no touches
+        backfill, no triage, no ticket rating. The GitHub side still syncs."""
         gh = gh or self.gh
         self.refresh_base()
         tasks = self.load_tasks()
@@ -854,15 +884,19 @@ class Pipeline:
             # A plan from before per-task hashes: treat its tasks as unchanged.
             plan.texts = {t.key: text_hash(t) for t in tasks if t.key in plan.tasks}
             plan.save(self.plan_path)
+        current = True  # the plan covers tasks.md as it is now
         if plan is None or plan.fingerprint != fp:
-            plan = self.make_plan(tasks, fp, plan)
-            plan.save(self.plan_path)
-        self.tasks = {t.key: t for t in tasks}
-        self.plan = plan
+            tasks, plan, current = self.replan(tasks, fp, plan, agents)
         issues = self.issues_by_key(gh.list_issues())
         if self.tick_closed(gh, tasks, issues):
-            tasks = self.load_tasks()
-            self.tasks = {t.key: t for t in tasks}
+            # Read the ticks back, keeping to the tasks this sync works with (after a failed
+            # replan, only those the kept plan knows).
+            keys = {t.key for t in tasks}
+            tasks = [t for t in self.load_tasks() if t.key in keys]
+        # Tickets go in with the tasks, in one swap: the scheduler (on_ready below) and job
+        # threads must never see the tasks without the open tickets.
+        self.plan = plan
+        self.load_tickets(issues, tasks)
         st = self.state
         play = milestones.play_tags(self.t.milestones)
         released = self.git.remote_tags() if play else set()
@@ -876,14 +910,15 @@ class Pipeline:
                 pending_ready = False
             self.apply(gh, a, issues)
         st.save()
-        self.load_tickets(issues)
         self.sync_links(gh, issues)
         self.check_waiters(issues)
-        # After the ready agents started: a task without a prediction is simply never held back.
-        if self.backfill_touches(tasks, plan):
-            plan.save(self.plan_path)
-        self.triage_tickets(gh, issues)
-        self.rate_tickets(issues)
+        if agents:
+            # After the ready agents started: a task without a prediction is simply never held
+            # back. Not for a plan kept after a failed replan: that one must not reach plan.json.
+            if current and self.backfill_touches(tasks, plan):
+                plan.save(self.plan_path)
+            self.triage_tickets(gh, issues)
+            self.rate_tickets(issues)
         self.last_sync = time.time()
         return actions
 
@@ -947,6 +982,52 @@ class Pipeline:
                 self.log(f"could not tick {keys} (closed as completed): {str(e)[-300:]}")
         return ticked
 
+    def replan(self, tasks: list[Task], fp: str, old: Plan | None, agents: bool) -> tuple[list[Task], Plan, bool]:
+        """tasks.md changed since ``old`` was made: plan it again. Returns the tasks to sync, their
+        plan, and whether that is the new plan.
+
+        When the planner fails (or may not run: ``agents``), the previous plan stays in effect
+        for the tasks it knows, so known work keeps flowing; new tasks wait for a plan. The
+        planner is tried again once per sync interval, or at once when tasks.md changes again:
+        a failure costs two planner runs, and every tick retried it. With no previous plan
+        there is nothing to work from, and the error goes to the caller."""
+        failed = self.plan_failed
+        recent = bool(agents and failed and failed[0] == fp
+                      and time.time() - failed[1] < self.cfg.sync_seconds)
+        try:
+            if recent:
+                raise PlanError(failed[2])  # not again yet
+            plan = self.make_plan(tasks, fp, old) if agents else self.make_plan(tasks, fp, old, agents=False)
+        except LimitHit:
+            raise
+        except Exception as e:  # PlanError, or the planner run itself breaking
+            if isinstance(e, PlanDeferred):
+                if old is not None and self.held.get("plan") != fp:
+                    self.held["plan"] = fp
+                    self.log(f"{e}; the previous plan stays in effect")
+            elif not recent:
+                self.plan_failed = (fp, time.time(), str(e))
+                if old is not None:  # with no plan to keep, the caller logs it
+                    self.note_error("plan", e, "planning failed; the previous plan stays in effect, and the "
+                                               f"planner runs again in {self.cfg.sync_seconds}s or when "
+                                               "tasks.md changes")
+            if old is None:
+                raise
+            known = [t for t in tasks if t.key in old.tasks]
+            removed = {k for k in old.tasks if k not in {t.key for t in tasks}}
+            kept = old
+            try:  # as make_plan does for removals: blockers and batches without the tasks now gone
+                kept = Plan(old.fingerprint, validate_plan(known, merge_plans(old, {"tasks": []}, set(), removed),
+                                                           old.fingerprint, self.cfg.max_batch).tasks, old.texts)
+            except PlanError:
+                pass
+            return known, kept, False
+        self.plan_failed = None
+        self.note_ok("plan")
+        self.held.pop("plan", None)
+        plan.save(self.plan_path)
+        return tasks, plan, True
+
     def apply(self, gh: GitHub, a, issues: dict) -> None:
         st = self.state
         if isinstance(a, syncplan.Create):
@@ -985,14 +1066,35 @@ class Pipeline:
                 st.data["cleared"].append(a.key)
             self.log(f"{a.key}: decision cleared by a human")
 
-    def load_tickets(self, issues: dict[str, dict]) -> None:
-        """Agent-filed tickets become tasks too; they wait in proposed until a human (or triage) approves."""
-        self.ticket_bodies = {}
-        for key, i in issues.items():
-            if key.startswith(TICKET_CHANGE + "/") and i["state"].upper() == "OPEN":
-                kind = next((l.split(": ", 1)[1] for l in i["labels"] if l.startswith("kind: ")), "ticket")
-                self.tasks[key] = Task(TICKET_CHANGE, str(i["number"]), i["title"], False, kind, 0)
-                self.ticket_bodies[key] = i["body"]
+    def load_tickets(self, issues: dict[str, dict], tasks: list[Task] | None = None) -> None:
+        """Agent-filed tickets become tasks too; they wait in proposed until a human (or triage) approves.
+
+        With ``tasks`` (a sync) those replace the tasks.md tasks as well. Either way the new
+        ``tasks`` and ``ticket_bodies`` are built aside and swapped in whole, so the scheduler
+        and job threads never see a moment without the open tickets: a sync used to drop them
+        until its end, and a schedule in between released an exclusive hold and missed
+        duplicate ticket titles. A ticket the listing doesn't have (filed since, or not listed by
+        GitHub yet) stays; a closed one goes."""
+        def is_ticket(key: str) -> bool:
+            return key.startswith(TICKET_CHANGE + "/")
+
+        with self.tickets_lock:
+            new = ({t.key: t for t in tasks} if tasks is not None
+                   else {k: t for k, t in self.tasks.items() if not is_ticket(k)})
+            bodies = {}
+            for key, i in issues.items():
+                if is_ticket(key) and i["state"].upper() == "OPEN":
+                    kind = next((l.split(": ", 1)[1] for l in i["labels"] if l.startswith("kind: ")), "ticket")
+                    new[key] = Task(TICKET_CHANGE, str(i["number"]), i["title"], False, kind, 0)
+                    bodies[key] = i["body"]
+            for key, t in self.tasks.items():
+                if is_ticket(key) and key not in issues:
+                    new[key] = t
+                    bodies[key] = self.ticket_bodies.get(key, "")
+            # Bodies of both the old and the new set while the tasks change over.
+            self.ticket_bodies = {**self.ticket_bodies, **bodies}
+            self.tasks = new
+            self.ticket_bodies = bodies
 
     def plain_task_keys(self) -> set[str]:
         """Keys of the target's OpenSpec tasks: everything known that isn't a ticket."""
@@ -1007,6 +1109,16 @@ class Pipeline:
         if isinstance(rated, list):
             return set(rated) & task_keys
         return ticket_blockers(self.ticket_bodies.get(key, ""), task_keys)
+
+    def rating_due(self, key: str) -> bool:
+        """An approved ticket nobody has started that the next sync's rating run will still
+        rate. It isn't scheduled before that: the guess from its text could park it in
+        `awaiting task` for a task it merely mentions, and the rating doesn't undo that. A
+        ticket the rating run was already asked about (and gave no answer for) uses the guess."""
+        if not key.startswith(TICKET_CHANGE + "/") or not self.cfg.agents["implementer"].light_model:
+            return False
+        st = self.state.data["tasks"].get(key, {})
+        return not st.get("runs") and not isinstance(st.get("needs"), list) and key not in self.tiers_tried
 
     def ticket_waits_for(self, key: str) -> list[str]:
         """Unfinished tasks an approved, not yet started ticket needs; logged once per change."""
@@ -1109,8 +1221,9 @@ class Pipeline:
             self.state.data.setdefault("tickets", []).append(n)
         self.state.save()
         key = f"{TICKET_CHANGE}/{n}"
-        self.tasks[key] = Task(TICKET_CHANGE, str(n), title, False, kind, 0)
-        self.ticket_bodies[key] = body
+        with self.tickets_lock:  # replaced, not changed in place: other threads iterate them
+            self.ticket_bodies = {**self.ticket_bodies, key: body}
+            self.tasks = {**self.tasks, key: Task(TICKET_CHANGE, str(n), title, False, kind, 0)}
         self.log(f"#{n} ticket filed ({kind}) from {source}: {title}")
         return n
 
@@ -1247,25 +1360,65 @@ class Pipeline:
             self.resume_file.unlink(missing_ok=True)
             clear_pause(self.state)
             self.log("resume requested: usage pause cleared; the next agent run reports fresh usage")
-        if time.time() < self.state.data["paused_until"]:
-            return
-        try:
-            self.check_environment()
-        except LimitHit as e:
-            return self.pause(str(e))
-        if time.time() - self.last_sync >= self.cfg.sync_seconds or not self.tasks:
+        # A usage pause stops what uses tokens, nothing else: GitHub still syncs, approved PRs
+        # still merge, and the release and the dev gate still run. `agents` is that one switch,
+        # passed down to sync and schedule (as a keyword, and only when off).
+        agents = time.time() >= self.state.data["paused_until"]
+        off = {} if agents else {"agents": False}
+        if agents:
             try:
-                self.sync(on_ready=self.schedule)
+                self.check_environment()
             except LimitHit as e:
                 return self.pause(str(e))
-            # No release while new code waits to take over: the handoff waits for it to end.
-            if self.t.milestones and RELEASE_KEY not in self.jobs and not self.restart_for and not self.exclusive_on:
-                self.check_milestones()
-            if (self.t.dev_gate and not self.taken(DEV_GATE_KEY) and not self.restart_for and not self.stopping
-                    and not self.exclusive_on):
-                self.check_dev_gate()
-            self.cap_cache()
-        self.schedule()
+        if time.time() - self.last_sync >= self.cfg.sync_seconds or not self.tasks:
+            try:
+                self.sync(on_ready=lambda: self.schedule(**off), **off)
+            except LimitHit as e:
+                return self.pause(str(e))
+            except Exception as e:
+                if isinstance(e, proc.CommandError) and github_mod.is_network(str(e)):
+                    raise  # GitHub out of reach: scheduling can't work either; run_forever logs it
+                # A tasks.md that doesn't parse, a failed first plan, a broken plan.json, a GitHub
+                # refusal: the sync is tried again next tick, and work already known goes on.
+                self.note_error("sync", e, "sync failed, trying again next tick; known work goes on")
+                if not self.tasks:
+                    return  # nothing known yet: scheduling would see no task at all
+            else:
+                self.note_ok("sync")
+                # No release while new code waits to take over: the handoff waits for it to end.
+                if (self.t.milestones and RELEASE_KEY not in self.jobs and not self.restart_for
+                        and not self.exclusive_on):
+                    self.check_milestones()
+                if (self.t.dev_gate and not self.taken(DEV_GATE_KEY) and not self.restart_for and not self.stopping
+                        and not self.exclusive_on):
+                    self.check_dev_gate()
+                self.cap_cache()
+        self.schedule(**off)
+
+    ERROR_REMINDER_SECONDS = 1800
+
+    def note_error(self, step: str, e: BaseException, what: str) -> None:
+        """Log a loop step's error once, with its traceback, and again only when the message
+        changes. One that keeps coming is said again every half hour, with how long it has
+        lasted, so a night of the same failure is a few lines and still plain to see."""
+        msg, now = f"{type(e).__name__}: {e}", time.time()
+        seen = self.errors.get(step)
+        if not seen or seen["msg"] != msg:
+            self.errors[step] = {"msg": msg, "since": now, "logged": now, "count": 1}
+            tb = "".join(traceback.format_exception(e)).rstrip()
+            self.log(f"{what}: {msg[-500:]}\n{tb}")
+            return
+        seen["count"] += 1
+        if now - seen["logged"] >= self.ERROR_REMINDER_SECONDS:
+            seen["logged"] = now
+            self.log(f"{what}: STILL FAILING after {(now - seen['since']) / 60:.0f} min "
+                     f"({seen['count']} times), same error: {msg[-500:]}")
+
+    def note_ok(self, step: str) -> None:
+        """The step worked: say so if it had been failing."""
+        if seen := self.errors.pop(step, None):
+            self.log(f"{step} works again after {(time.time() - seen['since']) / 60:.0f} min "
+                     f"({seen['count']} failure(s))")
 
     def cap_cache(self) -> None:
         """Keep the slots' build and temp dirs under `cache_max_gb` (runs once per sync).
@@ -1372,8 +1525,11 @@ class Pipeline:
                 problems.append(f"the gate `{self.t.test}` fails on {self.base_ref()}: {g.tail(500)}")
         return problems
 
-    def schedule(self) -> None:
-        """Fill free implementer, reviewer and merge slots from GitHub's current state."""
+    def schedule(self, agents: bool = True) -> None:
+        """Fill free implementer, reviewer and merge slots from GitHub's current state.
+
+        Without ``agents`` (a usage pause) no implement, revise or review job starts; merges and
+        the label housekeeping here use no tokens and go on."""
         if not self.env_ok:
             return
         # Read the handoff files again here, not only at the top of tick: a preflight or sync
@@ -1453,13 +1609,15 @@ class Pipeline:
                                       self.rank_of(k),
                                       impl_order.index(status_from_labels(issues[k]["labels"])),
                                       key_sort(k)))
-        for key in queue:
+        for key in queue if agents else ():
             if not free_impl:
                 break
             status = status_from_labels(issues[key]["labels"])
             kind = "revise" if status is Status.CHANGES_REQUESTED else "implement"
             if kind == "revise" and key not in prs:
                 continue
+            if kind == "implement" and self.rating_due(key):
+                continue  # the next sync rates it; until then its blockers would be a guess
             if kind == "implement" and (waits := self.ticket_waits_for(key)):
                 # Link the named tasks that have an open issue, so their merge releases this.
                 # A task without one (not created yet, or closed but not yet ticked) is
@@ -1497,7 +1655,8 @@ class Pipeline:
             if not free_rev:
                 break
             pr = prs.get(key)
-            if pr and self.needs_review(pr, issues[key]["number"]):
+            # Asked while paused too: a review already posted is applied without an agent.
+            if pr and self.needs_review(pr, issues[key]["number"]) and agents:
                 self.start("review", key, free_rev.pop(0), issues[key], pr)
         if not merging:
             # Oldest approval first, not milestone order: merging is cheap and releases the files
@@ -1834,10 +1993,13 @@ class Pipeline:
 
     def needs_review(self, pr: dict, issue: int) -> bool:
         """True unless this head was reviewed already. A review moves the issue off pending
-        review, so a reviewed head still labelled pending review was set back after its review:
-        by hand, or by a revise that changed no code. Review it again then, rather than leaving
-        it to wait for a new commit that never comes."""
+        review, so a reviewed head still labelled pending review is one of two things. The
+        label was set after the review, by hand or by a revise that changed no code: review it
+        again, rather than leaving it to wait for a new commit that never comes. Or the label
+        predates the review: the dispatcher posted the verdict and died before relabelling, so
+        the verdict on GitHub is applied now (it used to wait for a hand relabel forever)."""
         n, sha = pr["number"], pr["headRefOid"]
+        history = None
         if self.reviewed.get(n) != sha:
             history = review.review_history(self.gh.comments(n))
             if not history or history[-1]["sha"] != sha:
@@ -1846,14 +2008,53 @@ class Pipeline:
             self.review_at[n] = history[-1]["at"]
         at = self.gh.label_added_at(issue, Status.PENDING_REVIEW.label)
         if at and at > self.review_at.get(n, ""):
-            self.log(f"PR #{pr['number']} was set to pending review after its last review of this "
-                     "commit; reviewing it again")
+            if self.held.get(f"review#{n}") != f"{sha}@{at}":  # once, also while a pause starts no review
+                self.held[f"review#{n}"] = f"{sha}@{at}"
+                self.log(f"PR #{pr['number']} was set to pending review after its last review of this "
+                         "commit; reviewing it again")
             return True
-        if self.held.get(f"review#{n}") != sha:
-            self.held[f"review#{n}"] = sha
-            self.log(f"PR #{n} is pending review, but commit {sha[:10]} was already reviewed and "
-                     "the label predates that review; set the label again to have it re-reviewed")
+        if history is None:
+            # Reviewed by this process: GitHub's record decides, not the memory of having posted.
+            history = review.review_history(self.gh.comments(n))
+            if not history or history[-1]["sha"] != sha:
+                self.reviewed.pop(n, None)
+                return True
+        last = history[-1]
+        if at and at > last["at"]:  # the job's clock ran ahead of GitHub's
+            self.review_at[n] = last["at"]
+            return True
+        key = task_key_from_body(pr.get("body", ""))
+        self.log(f"PR #{n}: the review of {sha[:10]} ({last['verdict']}) was posted but the issue was never "
+                 "relabelled; applying its verdict")
+        self.apply_verdict(key, issue, n, last["verdict"], review.rounds_used(history), None)
         return False
+
+    def apply_verdict(self, key: str | None, issue: int, pr: int, verdict: str, rounds: int,
+                      gated: dict | None) -> None:
+        """Move an issue on from pending review as a posted review says. ``rounds`` are the
+        counted rounds used, that review included. Shared by the review job and by
+        ``needs_review``, which finishes a review whose relabel never happened."""
+        if verdict == review.APPROVE:
+            # For the merge job: approvals merge oldest first, and a gate that passed on this
+            # head merged with this base (``gated``) makes a second one needless while the base
+            # stays. A verdict taken from GitHub afterwards knows no such gate.
+            if key:
+                st = self.state.task(key)
+                st["approved_at"] = time.time()
+                st["gated"] = gated
+                self.state.save()
+            self.gh.set_status(issue, Status.APPROVED, Status.PENDING_REVIEW)
+        elif verdict == review.CONFLICT:
+            # As merge_conflict leaves it: back to the implementer, ahead of the queue.
+            self.gh.set_status(issue, Status.CHANGES_REQUESTED, Status.PENDING_REVIEW)
+            if key:
+                self.state.task(key)["conflict_update"] = time.time()
+                self.state.save()
+        elif rounds >= self.cfg.max_rounds:
+            self.to_decision(issue, Status.PENDING_REVIEW,
+                             f"The reviewer rejected PR #{pr} {rounds} times; see the PR.")
+        else:
+            self.gh.set_status(issue, Status.CHANGES_REQUESTED, Status.PENDING_REVIEW)
 
     def to_decision(self, number: int, old: Status | None, why: str) -> None:
         self.gh.set_status(number, Status.NEEDS_DECISION, old)
@@ -1941,12 +2142,18 @@ class Pipeline:
                     self.log("stop cancelled: running again")
                 try:
                     self.tick()
-                except proc.CommandError as e:
-                    # GitHub out of reach even after gh's retries: a blip mustn't kill the
-                    # dispatcher (2026-11-09, TLS handshake timeout); the next tick tries again.
-                    if not github_mod.is_network(str(e)):
-                        raise
-                    self.log(f"GitHub unreachable, trying again next tick: {str(e)[-200:]}")
+                except Exception as e:
+                    # Nothing a tick raises may end a dispatcher that runs unattended: its jobs
+                    # go on, and the next tick reaps them and tries again. KeyboardInterrupt
+                    # isn't an Exception and stops it as before.
+                    if isinstance(e, proc.CommandError) and github_mod.is_network(str(e)):
+                        # GitHub out of reach even after gh's retries (2026-11-09, TLS
+                        # handshake timeout).
+                        self.log(f"GitHub unreachable, trying again next tick: {str(e)[-200:]}")
+                    else:
+                        self.note_error("tick", e, "tick failed, trying again next tick; running jobs go on")
+                else:
+                    self.note_ok("tick")
                 if self.handing_off:
                     self.update_handoff()
                 if (once or self.stopping) and not self.jobs:
@@ -2740,19 +2947,9 @@ class Pipeline:
             # The review ran to its verdict: an earlier crash no longer counts toward "failed twice".
             if self.state.task(t.key).pop("fail_review", None) is not None:
                 self.state.save()
-            if v["verdict"] == review.APPROVE:
-                # For the merge job: approvals merge oldest first, and the gate just passed on this
-                # head merged with this base, so an unchanged base needs no second gate.
-                st = self.state.task(t.key)
-                st["approved_at"] = time.time()
-                st["gated"] = {"head": sha, "base": gated_base} if gated_base else None
-                self.state.save()
-                self.gh.set_status(issue, Status.APPROVED, Status.PENDING_REVIEW)
-            elif round_ >= self.cfg.max_rounds:
-                self.to_decision(issue, Status.PENDING_REVIEW,
-                                 f"The reviewer rejected PR #{pr['number']} {round_} times; see the PR.")
-            else:
-                self.gh.set_status(issue, Status.CHANGES_REQUESTED, Status.PENDING_REVIEW)
+            # The gate just passed on this head merged with this base (see apply_verdict).
+            self.apply_verdict(t.key, issue, pr["number"], v["verdict"], round_,
+                               {"head": sha, "base": gated_base} if gated_base else None)
         finally:
             self.git.worktree_remove(rv)
 
@@ -3388,3 +3585,7 @@ class Pipeline:
 
 class LimitHit(RuntimeError):
     """Claude reported a usage or capacity limit; the dispatcher pauses."""
+
+
+class PlanDeferred(PlanError):
+    """tasks.md needs the planner, which may not run now (a usage pause)."""

@@ -156,7 +156,9 @@ def test_a_reviewed_head_set_back_to_pending_review_is_reviewed_again(pl):
                            "created_at": "2026-11-08T00:27:10Z"}]
     gh.label_times = {(n, S.PENDING_REVIEW.label): "2026-11-08T00:20:00Z"}  # set before the review
     p.tick()
-    assert p.started == []
+    # The label never followed that review: its verdict is applied, not reviewed again.
+    assert p.started == [] and S.CHANGES_REQUESTED.label in gh.issues[n]["labels"]
+    gh.set_status(n, S.PENDING_REVIEW, None)
     gh.label_times = {(n, S.PENDING_REVIEW.label): "2026-11-08T09:00:00Z"}  # set again afterwards
     p.tick()
     assert p.started == [("review", "c/1.1", "review-0")]
@@ -816,15 +818,23 @@ def test_github_outage_in_a_tick_does_not_crash_the_dispatcher(pl):
     assert len(ticks) >= 2 and lines[-1].endswith("stopped")
 
 
-def test_other_command_errors_still_crash_the_dispatcher(pl):
+def test_other_command_errors_do_not_crash_the_dispatcher_either(pl):
     p, gh = pl
+    p.cfg.poll_seconds = 0
+    lines, ticks = [], []
+    p._log = lines.append
 
     def tick():
-        raise proc_mod.CommandError(["gh", "pr", "merge"], proc_mod.Result(1, "", "HTTP 422: not mergeable"))
+        ticks.append(1)
+        if len(ticks) == 3:
+            p.stop_file.write_text("", encoding="utf-8")
+        if len(ticks) < 3:
+            raise proc_mod.CommandError(["gh", "pr", "merge"], proc_mod.Result(1, "", "HTTP 422: not mergeable"))
 
     p.tick = tick
-    with pytest.raises(proc_mod.CommandError):
-        p.run_forever()
+    p.run_forever()
+    assert sum("tick failed" in l and "HTTP 422" in l for l in lines) == 1  # logged once, not per tick
+    assert len(ticks) >= 3 and lines[-1].endswith("stopped")
 
 
 def test_no_linked_watcher_means_no_watcher_stop(pl):
