@@ -87,6 +87,12 @@ release branch.
 | `status: approved` | Being merged | dispatcher |
 | `status: finished` | Merged, issue closed | — |
 
+**Merges that were never finished:** if a PR merged but the follow-up didn't run (the
+dispatcher was killed, GitHub failed midway), the dispatcher finds the merged PR of an issue
+still in `pending review`, `changes requested` or `approved` and finishes it: closes the
+issue, ticks the task, removes the branch and worktree. Each sync also ticks any task whose
+issue is closed as completed but unticked in tasks.md (not one closed as not planned).
+
 **Answering a decision:** comment on the issue, then set `status: pending implementation`.
 Every non-pipeline comment on the issue and its PR is given to the agent as
 authoritative input. The planner's "needs decision" verdict stays overridden after that.
@@ -123,7 +129,9 @@ watching. Unblocking tickets hold at most `unblocking_slots` implementer slots a
 ## The review gate
 
 Before the reviewer runs, the target's `test` command must pass on the PR head
-(failure is an automatic rejection, no tokens spent). The reviewer then checks spec
+(failure is an automatic rejection, no tokens spent). Every gate (handoff, review, merge,
+and the first gate of a merge batch) runs once more when it fails, since some tests are
+load-sensitive; the log says `(flaky)` when the second run passes. The reviewer then checks spec
 conformance, cut corners, duplication (it searches for existing code the diff
 re-implements), architecture, tests-of-implementation, and happy-path-only coverage,
 and makes at least three deliberate breaks in the code to see whether the tests catch
