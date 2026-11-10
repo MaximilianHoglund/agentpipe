@@ -44,6 +44,9 @@ class FakeGitHub:
     def list_prs(self):
         return self.prs
 
+    def merged_pr(self, branch):
+        return next((p for p in getattr(self, "merged", []) if p["headRefName"] == branch), None)
+
     def create_issue(self, title, body, status, extra_labels=()):
         return self.add(body, status, title, extra=extra_labels)
 
@@ -1547,8 +1550,9 @@ def test_a_failed_batch_is_bisected_and_its_passing_front_merges(pl, tmp_path, m
     # c/1.3 breaks the build; everything before it is fine.
     order, seen = train_setup(p, gh, tmp_path, monkeypatch, FOUR, gate_ok=lambda files: "c.rs" not in files)
     assert p.merge_train(order, "merge") == "merged"
-    # Whole batch fails, then the first half passes, then the first three fail: c/1.3 is it.
-    assert [len([f for f in g if f in "a.rs b.rs c.rs d.rs"]) for g in seen["gates"]] == [4, 2, 3]
+    # Whole batch fails (twice: the full-batch gate gets one retry), then the first half passes,
+    # then the first three fail: c/1.3 is it.
+    assert [len([f for f in g if f in "a.rs b.rs c.rs d.rs"]) for g in seen["gates"]] == [4, 4, 2, 3]
     assert seen["merged"] == [20, 21] and seen["finished"] == ["c/1.1", "c/1.2"]
     assert p.state.task("c/1.3")["batch_culprit"] == order[2][2]["headRefOid"]
     assert (p.logs / "merge-batch-20-21-22.log").read_text() == "gate output"
@@ -1577,7 +1581,8 @@ def test_a_batch_whose_first_pr_fails_merges_nothing(pl, tmp_path, monkeypatch):
     singles = []
     monkeypatch.setattr(p, "merge_one", lambda t, issue, pr, slot: singles.append(t.key))
     p.job_merge(*order[0], "merge")
-    assert len(seen["gates"]) == 2 and seen["merged"] == [] and singles == ["c/1.1"]
+    # The full batch, its one retry, then the first PR alone.
+    assert len(seen["gates"]) == 3 and seen["merged"] == [] and singles == ["c/1.1"]
     assert p.state.task("c/1.1")["batch_culprit"] == order[0][2]["headRefOid"]
 
 

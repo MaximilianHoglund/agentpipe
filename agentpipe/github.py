@@ -84,12 +84,21 @@ class GitHub:
                      "--description", desc, "--force")
 
     # -- issues -----------------------------------------------------------
+<<<<<<< HEAD
     def list_issues(self, state: str = "all") -> list[dict]:
         """Pipeline issues: number, state, title, body, labels (names). ``state`` is "all" (open
         and closed; the closed set only grows, so only sync asks for it) or "open"."""
         items = self._json("issue", "list", "-R", self.repo, "--label", PIPELINE_LABEL,
                            "--state", state, "--limit", "5000",
                            "--json", "number,state,title,body,labels") or []
+=======
+    def list_issues(self) -> list[dict]:
+        """Every pipeline issue, open and closed: number, state, title, body, labels (names),
+        and stateReason (for a closed one, "COMPLETED" or "NOT_PLANNED")."""
+        items = self._json("issue", "list", "-R", self.repo, "--label", PIPELINE_LABEL,
+                           "--state", "all", "--limit", "5000",
+                           "--json", "number,state,stateReason,title,body,labels") or []
+>>>>>>> review/merge-hardening
         for it in items:
             it["labels"] = [l["name"] for l in it["labels"]]
         return items
@@ -166,6 +175,15 @@ class GitHub:
     def list_prs(self) -> list[dict]:
         return self._json("pr", "list", "-R", self.repo, "--label", PIPELINE_LABEL, "--state", "open",
                           "--limit", "500", "--json", "number,headRefName,headRefOid,body,title,files,mergeable") or []
+
+    def merged_pr(self, branch: str) -> dict | None:
+        """The pipeline PR from ``branch`` that was merged (the latest, if several), or None:
+        number, headRefName, headRefOid, body, title, mergedAt."""
+        items = self._json("pr", "list", "-R", self.repo, "--label", PIPELINE_LABEL, "--state", "merged",
+                           "--head", branch, "--limit", "20",
+                           "--json", "number,headRefName,headRefOid,body,title,mergedAt") or []
+        items = [p for p in items if p.get("headRefName") == branch and p.get("mergedAt")]
+        return max(items, key=lambda p: p["mergedAt"], default=None)
 
     def create_pr(self, branch: str, base: str, title: str, body: str) -> int:
         url = self._gh("pr", "create", "-R", self.repo, "--head", branch, "--base", base,

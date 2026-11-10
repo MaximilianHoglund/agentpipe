@@ -55,6 +55,19 @@ UNFINISHED_REQUEUES = 2
 UNBLOCKS_RULE = 2  # "incomplete" runs in a row requeued automatically before asking Max
 MERGE_ATTEMPTS = 3  # tries to bring a behind branch up to date and merge it
 MERGE_RETRY_SECONDS = 15  # lets GitHub finish computing mergeability after a push
+BASE_MOVED = "the base branch moved"
+
+
+def merge_refusal(err: str) -> str | None:
+    """Why a failed `gh pr merge` is worth another try, or None when it is a real error.
+
+    GitHub says "not mergeable" while it still computes mergeability after a push, and "Base
+    branch was modified. Review and try the merge again." when the base moved while it computed
+    the merge (14 of the 24 merge-job crashes up to 2026-11-10)."""
+    low = err.lower()
+    if "base branch was modified" in low:
+        return BASE_MOVED
+    return "not mergeable yet" if "not mergeable" in low else None
 
 
 VERDICT_WORDS = {review.APPROVE: "APPROVED", review.REQUEST_CHANGES: "REJECTED, changes requested",
@@ -838,6 +851,9 @@ class Pipeline:
         self.tasks = {t.key: t for t in tasks}
         self.plan = plan
         issues = self.issues_by_key(gh.list_issues())
+        if self.tick_closed(gh, tasks, issues):
+            tasks = self.load_tasks()
+            self.tasks = {t.key: t for t in tasks}
         st = self.state
         play = milestones.play_tags(self.t.milestones)
         released = self.git.remote_tags() if play else set()
@@ -861,6 +877,66 @@ class Pipeline:
         self.rate_tickets(issues)
         self.last_sync = time.time()
         return actions
+
+    def tick_closed(self, gh: GitHub, tasks: list[Task], issues: dict[str, dict]) -> bool:
+        """Tick tasks whose issue is closed as completed while tasks.md still lists them open.
+
+        ``syncplan.compute`` counts a closed issue as done for its dependents, but nothing ticked
+        the task, so the milestone holding it never completed (fixed by hand, Nov 2026). It
+        happens when a PR's "Closes #n" closed the issue and the dispatcher died before
+        ``finish_merge`` ticked it, when the tick's push failed, or when someone closed the issue
+        by hand. Issues closed as not planned are left alone, and so is a task a job holds: a
+        merge job closes the issue just before it ticks. True if tasks.md changed.
+
+        An issue closed with its PR still in flight by its label, whose PR was merged, misses
+        the whole follow-up (labels, batch followers, worktree, branches), so it gets
+        ``finish_merge``: under the base lock, and only while no merge job runs."""
+        dry = isinstance(gh, github_mod.DryRunGitHub)
+        held = set(self.merging) | set(self.foreign_keys)
+        for k in list(self.jobs):
+            held.update([k, *self.state.data["tasks"].get(k, {}).get("batch", [])])
+        merge_running = any(j.kind == "merge" for j in self.jobs.values())
+        by_change: dict[str, list[Task]] = {}
+        ticked = False
+        for t in tasks:
+            i = issues.get(t.key)
+            if not (i and not t.done and t.key not in held and i["state"].upper() == "CLOSED"
+                    and (i.get("stateReason") or "").upper() == "COMPLETED"):
+                continue
+            if status_from_labels(i["labels"]) in syncplan.AGENT_OWNED and not dry:
+                if merge_running:
+                    continue  # the next sync looks again
+                try:
+                    if pr := self.merged_unfinished(t.key):
+                        self.log(f"{self.what(t.key)}: #{i['number']} is closed, but its merged PR "
+                                 f"#{pr['number']} was never finished; finishing it")
+                        with self.base_lock:
+                            self.finish_merge(t, i["number"], pr, cur=None)
+                        ticked = True
+                        continue
+                except Exception as e:  # never worth a dispatcher crash; the next sync tries again
+                    self.log(f"could not finish the merged PR of {t.key}: {str(e)[-300:]}")
+                    continue
+            by_change.setdefault(t.change, []).append(t)
+        for change, group in by_change.items():
+            keys = ", ".join(x.key for x in group)
+            if dry:
+                self.log(f"[dry-run] tick {keys} in tasks.md: closed as completed but unticked")
+                continue
+            try:
+                if not self.commit_to_base(group, f"Tick {keys} in tasks.md (issues closed as completed)"):
+                    continue
+                ticked = True
+                self.log(f"ticked {keys} in tasks.md: " + ", ".join(f"#{issues[x.key]['number']}" for x in group)
+                         + " closed as completed, but the task was never ticked")
+                for x in group:
+                    cur = status_from_labels(issues[x.key]["labels"])
+                    if cur is not Status.FINISHED:
+                        gh.set_status(issues[x.key]["number"], Status.FINISHED, cur)
+                self.archive_if_finished(change)
+            except Exception as e:  # never worth a dispatcher crash; the next sync tries again
+                self.log(f"could not tick {keys} (closed as completed): {str(e)[-300:]}")
+        return ticked
 
     def apply(self, gh: GitHub, a, issues: dict) -> None:
         st = self.state
@@ -1315,6 +1391,18 @@ class Pipeline:
                     self.gh.set_status(issues[key]["number"], Status.PROPOSED, None)
                     issues[key]["labels"] = [Status.PROPOSED.label]
                     self.log(f"{self.what(key)}: no PR and never worked on, so it is a proposal")
+                    continue
+                # Its PR may be merged with only the follow-up missing (dispatcher killed, a batch
+                # merge that raised midway, a network error after the merge request was sent).
+                # Finishing runs git in the shared base worktree, so it is a job on the merge
+                # slot; while that is busy, the question waits for a later tick.
+                if merging:
+                    continue
+                if pr := self.merged_unfinished(key):
+                    self.log(f"{self.what(key)}: status is `{s.value}` with no open PR, but PR #{pr['number']} "
+                             "was merged and never finished; finishing it")
+                    self.start("merge", key, "merge", issues[key], pr)
+                    merging = True
                     continue
                 self.to_decision(issues[key]["number"], s, f"Status is `{s.value}` but no open PR was found.")
         self.record_awaiting(raw)
@@ -2507,13 +2595,10 @@ class Pipeline:
         what = "before review" if m == "current" else f"after merging {self.base_ref()}, before review"
         for attempt in range(SYNC_FIXES + 1):
             self.log(f"phase {t.key}: test gate ({what})")
-            g = self.run_gate(wt / self.t.project_dir, slot, self.t.test, self.t.test_timeout)
-            if not g.ok and attempt == 0:
-                # arpg's gate has load-sensitive tests (#618): a failure an agent can't fix costs a run.
+            if attempt == 0:
+                g = self.gate_retrying(wt / self.t.project_dir, slot, f"handoff {self.what(t.key)}")
+            else:
                 g = self.run_gate(wt / self.t.project_dir, slot, self.t.test, self.t.test_timeout)
-                if g.ok:
-                    self.log(f"{self.what(t.key)}: the gate failed once after merging {self.base_ref()}, "
-                             "then passed (flaky)")
             if g.ok:
                 self.state.task(t.key)["handoff_gated"] = self.git.head(wt)
                 self.state.save()
@@ -2543,6 +2628,19 @@ class Pipeline:
     def run_gate(self, cwd: Path, slot: str, cmd: str, timeout: int) -> proc.Result:
         self.clean_workspace_crates(cwd, slot)
         return proc.run(cmd, cwd, env=self.env(slot), timeout=timeout, check=False, shell=True)
+
+    def gate_retrying(self, cwd: Path, slot: str, what: str) -> proc.Result:
+        """The test gate, run once more when it fails: some targets' gates have load-sensitive
+        tests (arpg #618), and a flaky failure otherwise costs an agent run or a review round.
+        Shared by the handoff, review, merge and batch gates. Returns the last run's result."""
+        g = self.run_gate(cwd, slot, self.t.test, self.t.test_timeout)
+        if g.ok:
+            return g
+        self.log(f"{what}: the gate failed; running it once more")
+        g = self.run_gate(cwd, slot, self.t.test, self.t.test_timeout)
+        if g.ok:
+            self.log(f"{what}: the gate failed once, then passed (flaky)")
+        return g
 
     def clean_workspace_crates(self, cwd: Path, slot: str) -> None:
         """Drop the workspace's own crates from the slot's shared target dir (see config)."""
@@ -2596,7 +2694,7 @@ class Pipeline:
                              f"{self.base_ref()})")
                     gate = proc.Result(0, "", "")
                 else:
-                    gate = self.run_gate(pdir, slot, self.t.test, self.t.test_timeout)
+                    gate = self.gate_retrying(pdir, slot, f"review {self.what(t.key)}")
             except BaseException:
                 if mutation:
                     mutation.kill()
@@ -2617,6 +2715,9 @@ class Pipeline:
             self.reviewed[pr["number"]] = sha
             self.review_at[pr["number"]] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             self.log(review_line(self.what(t.key), pr["number"], v, round_, self.cfg.max_rounds))
+            # The review ran to its verdict: an earlier crash no longer counts toward "failed twice".
+            if self.state.task(t.key).pop("fail_review", None) is not None:
+                self.state.save()
             if v["verdict"] == review.APPROVE:
                 # For the merge job: approvals merge oldest first, and the gate just passed on this
                 # head merged with this base, so an unchanged base needs no second gate.
@@ -2769,10 +2870,35 @@ class Pipeline:
 
     def job_merge(self, t: Task, issue: int, pr: dict, slot: str) -> None:
         order = self.merge_order
-        if (not self.broke_a_batch(t, pr) and len(order) > 1 and order[0][0].key == t.key
-                and self.merge_train(order, slot) == "merged"):
-            return
-        self.merge_one(t, issue, pr, slot)
+        if pr.get("mergedAt"):
+            # Already merged on GitHub, but never finished (see merged_unfinished).
+            self.finish_merge(t, issue, pr, cur=None)
+        elif (self.broke_a_batch(t, pr) or len(order) <= 1 or order[0][0].key != t.key
+              or self.merge_train(order, slot) != "merged"):
+            self.merge_one(t, issue, pr, slot)
+        # The job ran to its end: an earlier crash no longer counts toward "failed twice".
+        # (A finished merge has dropped the task's state entry altogether.)
+        with self.state.lock:
+            st = self.state.data["tasks"].get(t.key)
+            cleared = bool(st) and st.pop("fail_merge", None) is not None
+        if cleared:
+            self.state.save()
+
+    def merged_unfinished(self, key: str) -> dict | None:
+        """The merged PR of a task whose issue says its PR is still in flight, or None.
+
+        The merge landed but ``finish_merge`` never ran or never ended: the dispatcher was killed,
+        a batch merge raised midway, or the network failed after the merge request was sent.
+        Not an older PR from the same branch (a task reopened by hand): then the branch has
+        moved on from the head that was merged."""
+        t = self.tasks[key]
+        pr = self.gh.merged_pr(t.branch)
+        if not pr or task_key_from_body(pr.get("body")) != key:
+            return None
+        ref = self.git.git("rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{t.branch}", check=False)
+        if ref.ok and ref.out.strip() != pr.get("headRefOid"):
+            return None
+        return pr
 
     def broke_a_batch(self, t: Task, pr: dict) -> bool:
         """True if a batch bisect found that this PR, at this head, fails the gate. It then
@@ -2825,17 +2951,30 @@ class Pipeline:
             tree = self.git.rev(train, "HEAD^{tree}")
             self.merging.update(t.key for t, _, _ in members)
             merged = []
+            failed = None
             for t, issue, pr in members:
-                if not self.squash_merge(t, pr):
+                try:
+                    landed = self.squash_merge(t, pr)
+                except Exception as e:
+                    # The PRs before this one are merged on GitHub: they are finished below
+                    # before this is raised. (If this one landed after all, a network error
+                    # after the request was sent, the scheduler finds it merged and finishes it.)
+                    self.log(f"merge batch: merging PR #{pr['number']} ({t.key}) failed; the rest wait for "
+                             f"the next merge: {str(e)[-300:]}")
+                    failed = e
+                    break
+                if not landed:
                     self.log(f"merge batch: GitHub won't merge PR #{pr['number']} yet; the rest wait for the next merge")
                     break
                 merged.append((t, issue, pr))
-            self.git.fetch()
-            if len(merged) == len(members) and self.git.rev(train, f"{self.base_ref()}^{{tree}}") != tree:
-                self.log(f"merge batch {prs}: WARNING {self.base_ref()} doesn't match the gated tree; "
-                         "the next gate on it will tell")
+            try:
+                self.git.fetch()
+                if len(merged) == len(members) and self.git.rev(train, f"{self.base_ref()}^{{tree}}") != tree:
+                    self.log(f"merge batch {prs}: WARNING {self.base_ref()} doesn't match the gated tree; "
+                             "the next gate on it will tell")
+            except Exception as e:  # only a check: it mustn't keep the merged PRs from being finished
+                self.log(f"merge batch {prs}: could not compare {self.base_ref()} with the gated tree: {str(e)[-300:]}")
             # Each PR is already merged on GitHub: one failing follow-up mustn't skip the rest.
-            failed = None
             for t, issue, pr in merged:
                 try:
                     self.finish_merge(t, issue, pr)
@@ -2854,7 +2993,7 @@ class Pipeline:
         whole batch passes). Binary search over prefixes, assuming the base itself passes: a
         bad PR costs about log2(n) extra gates instead of n single merges, and a failing gate
         is usually quick (it stops at the first failing check)."""
-        if self.gate_batch(train, members, slot):
+        if self.gate_batch(train, members, slot, retry=True):  # the bisect steps below aren't retried
             return len(members)
         good, bad = 0, len(members)  # prefix `good` passes (the base), prefix `bad` fails
         while bad - good > 1:
@@ -2866,10 +3005,13 @@ class Pipeline:
                 bad = mid
         return good
 
-    def gate_batch(self, train: Path, members: list, slot: str) -> bool:
+    def gate_batch(self, train: Path, members: list, slot: str, retry: bool = False) -> bool:
         prs = ", ".join(f"#{pr['number']}" for _, _, pr in members)
         self.log(f"phase merge batch: test gate on {len(members)} PR(s) together ({prs})")
-        gate = self.run_gate(train / self.t.project_dir, slot, self.t.test, self.t.test_timeout)
+        if retry:
+            gate = self.gate_retrying(train / self.t.project_dir, slot, f"merge batch {prs}")
+        else:
+            gate = self.run_gate(train / self.t.project_dir, slot, self.t.test, self.t.test_timeout)
         if not gate.ok:
             out = self.logs / f"merge-batch-{'-'.join(str(pr['number']) for _, _, pr in members)}.log"
             out.parent.mkdir(parents=True, exist_ok=True)
@@ -2887,9 +3029,9 @@ class Pipeline:
                 self.gh.merge_pr(pr["number"], pr["headRefOid"])
                 return True
             except proc.CommandError as e:
-                if "not mergeable" not in str(e).lower():
+                if not (why := merge_refusal(str(e))):
                     raise
-                self.log(f"merge {self.what(t.key)} PR #{pr['number']}: not mergeable yet (attempt {attempt + 1}); retrying")
+                self.log(f"merge {self.what(t.key)} PR #{pr['number']}: {why} (attempt {attempt + 1}); retrying")
         return False
 
     def merge_one(self, t: Task, issue: int, pr: dict, slot: str) -> None:
@@ -2921,7 +3063,7 @@ class Pipeline:
                     gate = proc.Result(0, "", "")
                 else:
                     self.log(f"phase {t.key}: test gate (after merging {self.base_ref()})")
-                    gate = self.run_gate(wt / self.t.project_dir, slot, self.t.test, self.t.test_timeout)
+                    gate = self.gate_retrying(wt / self.t.project_dir, slot, f"merge {self.what(t.key)}")
                 if not gate.ok and m == "auto":
                     # The dispatcher's own resolution broke it: nobody's fault, no round used.
                     self.git.git("reset", "--hard", pr["headRefOid"], cwd=wt)
@@ -2941,22 +3083,33 @@ class Pipeline:
                 self.gh.merge_pr(pr["number"], self.git.head(wt))
                 break
             except proc.CommandError as e:
-                if "not mergeable" not in str(e).lower():
+                if not (why := merge_refusal(str(e))):
                     raise
-                self.log(f"merge {self.what(t.key)} PR #{pr['number']}: not mergeable yet (attempt {attempt + 1}); retrying")
+                self.log(f"merge {self.what(t.key)} PR #{pr['number']}: {why} (attempt {attempt + 1}); retrying")
         else:
+            if why == BASE_MOVED:
+                # Not a conflict, so nothing for the implementer: it stays approved, and the
+                # next merge job tries again from the base as it is then.
+                self.log(f"merge {self.what(t.key)} PR #{pr['number']}: the base branch moved during each of "
+                         f"{MERGE_ATTEMPTS} attempts; it stays approved for the next merge")
+                return
             return self.merge_conflict(issue, pr, f"GitHub still reports the branch as not mergeable after "
                                                   f"{MERGE_ATTEMPTS} attempts to bring it up to date with "
                                                   f"`{self.base_ref()}`; rebase it onto `{self.base_ref()}` "
                                                   f"and resolve the conflicts.")
         self.finish_merge(t, issue, pr)
 
-    def finish_merge(self, t: Task, issue: int, pr: dict) -> None:
-        """After a PR merged: close its issues, release what waited on it, tick tasks.md."""
+    def finish_merge(self, t: Task, issue: int, pr: dict, cur: Status | None = Status.APPROVED) -> None:
+        """After a PR merged: close its issues, release what waited on it, tick tasks.md.
+
+        Safe to run again when part of it already happened (the reconciling of a merge that was
+        never finished does): closing a closed issue, ticking a ticked task and removing a
+        missing worktree or branch all do nothing. ``cur`` is the issue's status label to
+        replace, None for whichever it has."""
         wt = self.wt(t)
         tasks = self.batch(t)
         self.log(f"merged PR #{pr['number']}: {', '.join(self.what(x.key) for x in tasks)}")
-        self.gh.set_status(issue, Status.FINISHED, Status.APPROVED)
+        self.gh.set_status(issue, Status.FINISHED, cur)
         self.gh.close_issue(issue)  # "Closes #n" normally does this; harmless if already closed
         for k, n in self.state.task(t.key).get("batch_issues", {}).items():
             self.gh.set_status(n, Status.FINISHED, Status.BLOCKED_BY_TASK)
@@ -2988,26 +3141,31 @@ class Pipeline:
             self.state.task(key)["conflict_update"] = time.time()
             self.state.save()
 
-    def commit_to_base(self, tasks: list[Task], message: str) -> None:
-        """Tick ``tasks`` (all of one change: a batch never mixes changes) in one commit."""
+    def commit_to_base(self, tasks: list[Task], message: str) -> bool:
+        """Tick ``tasks`` (all of one change: a batch never mixes changes) in one commit.
+        True if it pushed a tick; False when they were ticked already, the change's tasks.md
+        is gone (archived once all of it was ticked), or the push failed."""
         t = tasks[0]
         rel = self.t.changes_dir / t.change / "tasks.md"
         with self.base_lock:
             for _ in range(3):
                 self.refresh_base()
                 path = self.base_wt / rel
+                if not path.exists():
+                    return False
                 text = path.read_text(encoding="utf-8")
                 new = text
                 for x in tasks:
                     new = mark_done(new, x.id)
                 if new == text:
-                    return
+                    return False
                 path.write_text(new, encoding="utf-8")
                 self.git.git("add", str(rel).replace("\\", "/"), cwd=self.base_wt)
                 self.git.git("commit", "-m", message, cwd=self.base_wt)
                 if self.git.git("push", "origin", f"HEAD:refs/heads/{self.t.base}", cwd=self.base_wt, check=False).ok:
-                    return
-        self.log(f"could not push the tick for {t.key}; the next sync will retry via Close")
+                    return True
+        self.log(f"could not push the tick for {t.key}; the next sync retries it once the issue is closed")
+        return False
 
     def archive_if_finished(self, change: str) -> None:
         """Archive ``change`` once every task of it is ticked on the base branch.
