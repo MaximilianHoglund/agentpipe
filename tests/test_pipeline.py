@@ -1947,5 +1947,13 @@ def test_the_session_lock_frees_when_its_holder_dies(tmp_path):
     finally:
         child.kill()
         child.wait()
-    with handoff.held_lock(lock):
-        pass
+    # Windows frees a dead process's locks shortly after it exits, not at once.
+    deadline = time.time() + 10
+    while True:
+        try:
+            with handoff.held_lock(lock):
+                break
+        except handoff.Busy:
+            if time.time() > deadline:
+                raise
+            time.sleep(0.1)

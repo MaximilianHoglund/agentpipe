@@ -35,3 +35,10 @@ def test_a_program_only_the_env_path_has_is_found(tmp_path):
         prog.chmod(0o755)
     env = {**os.environ, "PATH": str(bin_dir)}
     assert proc.run(["envonly"], env=env).out.strip() == "found"
+
+
+def test_tail_keeps_stdouts_end_when_stderr_is_long():
+    from agentpipe.proc import Result
+    r = Result(101, "build ok\ntest foo ... FAILED\ncheck failed: tests", "Compiling x\n" * 2000)
+    t = r.tail(600)
+    assert t.endswith("check failed: tests") and "test foo ... FAILED" in t and len(t) <= 602

@@ -25,7 +25,14 @@ class Result:
         return self.code == 0
 
     def tail(self, chars: int = 6000) -> str:
-        text = (self.out + ("\n" + self.err if self.err else "")).strip()
+        """The end of the output, stdout last. Cut from one string with stderr appended, a long
+        stderr (cargo's build lines) filled the whole tail and dropped the verdict, which
+        scripts print on stdout: arpg's step-1 release failure (#722) named no failing test."""
+        out, err = self.out.strip(), self.err.strip()
+        if len(out) + len(err) + 1 > chars and err:
+            keep = max(chars // 4, chars - len(out))  # stderr gets a quarter, or what stdout leaves
+            err = err if len(err) <= keep else "…\n" + err[-keep:]
+        text = (err + "\n" + out).strip() if err else out
         return text if len(text) <= chars else "…\n" + text[-chars:]
 
 
