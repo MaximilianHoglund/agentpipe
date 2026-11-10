@@ -326,8 +326,9 @@ repo_root = "~/arpg-manager"
 # (Max, 2026-11-08: fewer agents there).
 max_implementers = 3
 max_reviewers = 2
-# The laptop's C: holds the WSL disk; 40 GB leaves room for riftbound-data and the rest.
-cache_max_gb = 40
+# The laptop's C: holds the WSL disk, which never shrinks. 30 GB (40 until 2026-11-10) leaves C:
+# about 27 GB free overnight; at 40 it neared the overnight watchdog's low-disk line.
+cache_max_gb = 30
 # DISPLAY: the windowed Godot tests draw on Xvfb :99 (software Vulkan), which preflight starts
 # with ~/bin/ensure-xvfb.sh; WSLg's display restarted under the tests' load and hung them
 # (2026-11-09). WAYLAND_DISPLAY is blanked so Godot doesn't pick WSLg's Wayland.
