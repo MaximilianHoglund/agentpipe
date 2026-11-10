@@ -40,6 +40,14 @@ max_batch = 4
 # (python -c "os.system(...)") still gets past them.
 # Agents never need any of this: the dispatcher pushes, opens PRs, merges, tags and
 # manages worktrees and branches; agents commit on the branch they are given.
+#
+# env_guard (default true): a second layer that doesn't depend on how a command is phrased
+# (`git -C . push`, a script that calls gh). Agent runs, and only those (not gates, mutation
+# runs or the dispatcher's own calls), get an environment where gh is logged out (an invalid
+# GH_TOKEN, GH_CONFIG_DIR at an empty folder) and a push to any network URL fails (git's
+# url.<x>.pushInsteadOf, set through GIT_CONFIG_* variables). Fetch, commit and pushes to a
+# local path still work. Tested live 2026-11-10.
+env_guard = true
 deny = [
   # GitHub and remotes: gh is logged in as Max, so it could close, merge or delete.
   "Bash(gh:*)", "PowerShell(gh:*)",

@@ -209,7 +209,9 @@ builds there): code in `~/agentpipe`, work dir `~/pipeline-work`, launched by
 - Agents run as headless `claude -p` on your subscription, with `--permission-mode
   dontAsk` and the tool allowlists in `pipeline.toml`. They can edit and commit in
   their worktree but cannot push, call `gh`, or touch other branches; the dispatcher
-  does all of that.
+  does all of that. Besides the deny rules, agent runs get an environment in which `gh`
+  is logged out and `git push` to a network URL fails, however the command is phrased
+  (`env_guard` under `[permissions]`, on by default).
 - Work dirs: `E:\Source\.pipeline\<target>\` holds `base\` (a clean checkout of
   `origin/main`), `wt\<task>\` (implementer worktrees), `review\` (disposable PR
   checkouts), `target\<slot>\` (cargo target dirs, reused per slot), `logs\` (every
