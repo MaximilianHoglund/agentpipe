@@ -485,6 +485,10 @@ class Pipeline:
     def wt(self, task: Task) -> Path:
         return self.t.work_dir / "wt" / task.slug
 
+    def session_lock(self, task: Task) -> Path:
+        """Held while an agent session runs in ``task``'s worktree (outside it, so no agent commits it)."""
+        return self.t.work_dir / "locks" / f"{task.slug}.lock"
+
     def agent_def(self, role: str) -> Agent:
         """The shared agent definition, plus this target's extra tools for agents that edit or test."""
         a = self.cfg.agents[role]
@@ -1635,6 +1639,9 @@ class Pipeline:
             exc = job.future.exception()
             if isinstance(exc, LimitHit):
                 self.pause(str(exc))
+            elif isinstance(exc, handoff.Busy):
+                # Not a failure: its status is unchanged, so it starts again once the other ends.
+                self.log(f"{job.kind} {key} not started: another agent session still runs in its worktree")
             elif isinstance(exc, proc.CommandError) and github_mod.is_network(str(exc)):
                 # GitHub out of reach isn't the job's fault: no failure count, so two blips
                 # can't send the task to needs decision. Its status is unchanged, so it resumes.
@@ -2125,10 +2132,13 @@ class Pipeline:
         st["runs"] = n
         self.clean_workspace_crates(self.wt(t) / self.t.project_dir, slot)
         resume = self.resumable(t, tag)
-        res = self.claude.run(prompt, self.wt(t) / self.t.project_dir,
-                              replace(self.agent_def("implementer"), model=model),
-                              review.IMPLEMENTER_SCHEMA, log_name=f"{t.slug}-{tag}-{n}",
-                              resume=resume, env=self.env(slot))
+        # One agent session per worktree, across dispatchers too: a handover once started a
+        # second implementer in a worktree whose session was still running (arpg #673, #675).
+        with handoff.held_lock(self.session_lock(t)):
+            res = self.claude.run(prompt, self.wt(t) / self.t.project_dir,
+                                  replace(self.agent_def("implementer"), model=model),
+                                  review.IMPLEMENTER_SCHEMA, log_name=f"{t.slug}-{tag}-{n}",
+                                  resume=resume, env=self.env(slot))
         if res.session_id:
             st.update(session=res.session_id, session_at=time.time(), session_model=model)
         self.state.save()

@@ -1885,3 +1885,47 @@ def test_an_exclusive_change_name_covers_the_changes_own_tasks(pl):
     assert p.is_exclusive("c/1.1")
     p.t.exclusive = ["other"]
     assert not p.is_exclusive("c/1.1")
+
+
+def test_no_second_agent_session_starts_in_a_worktree_whose_session_still_runs(pl):
+    # arpg #673/#675: a handed-over dispatcher started an implementer beside a live one.
+    from agentpipe import handoff
+    p, gh = pl
+    t = p.tasks["c/1.1"]
+    calls = []
+    p.clean_workspace_crates = lambda *a: None
+    p.resumable = lambda *a: None
+    p.claude = type("C", (), {"run": lambda self, *a, **k: calls.append(a)})()
+    with handoff.held_lock(p.session_lock(t)):  # the other session
+        with pytest.raises(handoff.Busy):
+            p.run_agent(t, "go", "impl-0", "impl", "m")
+    assert calls == []
+
+
+def test_a_busy_worktree_is_not_counted_as_a_failure(pl):
+    from agentpipe import handoff
+    p, gh = pl
+    issue = task_issue(gh, "c/1.1", S.IN_PROGRESS)
+    fut = type("F", (), {"done": lambda self: True, "exception": lambda self: handoff.Busy("x")})()
+    p.jobs["c/1.1"] = type("J", (), {"kind": "implement", "future": fut})()
+    p.reap()
+    assert "fail_implement" not in p.state.task("c/1.1") and S.IN_PROGRESS.label in gh.issues[issue]["labels"]
+
+
+def test_the_session_lock_frees_when_its_holder_dies(tmp_path):
+    import subprocess, sys
+    from agentpipe import handoff
+    lock = tmp_path / "locks" / "x.lock"
+    code = ("import sys,time; from pathlib import Path; from agentpipe import handoff\n"
+            "with handoff.held_lock(Path(sys.argv[1])):\n print('held', flush=True); time.sleep(60)\n")
+    child = subprocess.Popen([sys.executable, "-c", code, str(lock)], stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == "held"
+        with pytest.raises(handoff.Busy):
+            with handoff.held_lock(lock):
+                pass
+    finally:
+        child.kill()
+        child.wait()
+    with handoff.held_lock(lock):
+        pass

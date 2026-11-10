@@ -61,6 +61,42 @@ def live(work_dir: Path, own_pid: int | None = None) -> dict[int, dict[str, dict
     return out
 
 
+class Busy(RuntimeError):
+    """Another live process holds the lock."""
+
+
+@contextmanager
+def held_lock(path: Path):
+    """An OS lock on ``path`` for as long as the block runs, taken without waiting.
+
+    Raises ``Busy`` if another process holds it. The operating system frees it when the holder
+    dies, so a crashed run never blocks it for good (unlike ``file_lock``'s stale timer, which
+    can't tell a long run from a dead one)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR)
+    try:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            raise Busy(str(path)) from e
+        os.ftruncate(fd, 0)
+        os.write(fd, str(os.getpid()).encode())
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                import msvcrt
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    finally:
+        os.close(fd)
+
+
 @contextmanager
 def file_lock(path: Path, stale: float = 30.0):
     """A lock shared between processes: the file exists while it is held.
