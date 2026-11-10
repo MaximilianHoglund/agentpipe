@@ -357,6 +357,7 @@ class Pipeline:
         self.conflict_checked: dict[tuple[str, str], bool] = {}  # (PR head, base) -> conflicts
         # Whether `exclusive` work holds everything else back; assumed until a schedule has looked.
         self.exclusive_on = bool(target.exclusive)
+        self.released_tags: set[str] | None = None  # origin's tags, as the last release check read them
         self.exclusive_state: tuple | None = None  # what was last logged about the hold
         self.successor_stopped = False
         # Threads start lazily, so a generous cap costs nothing and lets a config reload
@@ -1551,6 +1552,15 @@ class Pipeline:
         merging = any(j.kind == "merge" for j in self.jobs.values()) or bool(self.restart_for)
 
         only = self.exclusive_work(issues)
+        # A due release starts before any merge (Max, 2026-11-10). It used to start only after a
+        # sync, so the schedule that lifted an exclusive hold started a merge first; then new code
+        # landed, and the handoff held the release ~13 min behind that merge (step-1, 13:49-14:02).
+        if (self.t.milestones and only is None and RELEASE_KEY not in self.jobs
+                and not self.restart_for):
+            try:
+                self.check_milestones(refresh=False)
+            except Exception as e:  # never let a release check stop scheduling; a sync's check retries
+                self.note_error("release check", e, "release check failed; scheduling goes on")
 
         def by_status(s: Status) -> list[str]:
             return sorted((k for k, i in issues.items()
@@ -3502,13 +3512,17 @@ class Pipeline:
         with self.state.lock:
             return self.state.data.setdefault("releases", {}).setdefault(m.tag, {"tried": []})
 
-    def check_milestones(self) -> None:
+    def check_milestones(self, refresh: bool = True) -> None:
         """Start a release when the next milestone's changes are all done on the base branch.
 
         It is cut from the commit that ticked the milestone's last task, so later work that
         landed afterwards stays out. If that fails, the base branch head is tried once it moves.
+        ``refresh=False`` reuses the tags the last check read from origin (``schedule`` checks
+        every tick; a stale list only re-finds a release already tried, which starts nothing).
         """
-        m = milestones.next_due(self.t.milestones, self.git.remote_tags(), self.base_wt)
+        if refresh or self.released_tags is None:
+            self.released_tags = self.git.remote_tags()
+        m = milestones.next_due(self.t.milestones, self.released_tags, self.base_wt)
         if m is None:
             return
         cut = self.git.git("log", "-1", "--format=%H", self.base_ref(), "--",

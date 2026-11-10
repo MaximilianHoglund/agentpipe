@@ -175,3 +175,22 @@ def test_a_milestone_does_not_wait_for_deferred_tasks(tmp_path: Path):
     m = Milestone("step-1", "Step 1", ["a"], deferred=["a/1.2"])
     assert milestones.next_due([m], set(), tmp_path) is m
     assert milestones.play_tags([m]) == {}  # deferred tasks don't wait for the release
+
+
+def test_schedule_starts_a_due_release_without_waiting_for_a_sync(repo):
+    # Max, 2026-11-10: step-1 waited ~13 min because only a sync's check could start it.
+    tmp_path, work, origin, cut = repo
+    p, gh = make(tmp_path, work)
+    p.schedule()
+    job = p.jobs.pop(RELEASE_KEY, None)
+    assert job is not None
+    job.future.result()
+    assert gh.releases and gh.releases[0][0] == "m1"
+
+
+def test_schedule_starts_no_release_while_an_exclusive_hold_is_on(repo):
+    tmp_path, work, origin, cut = repo
+    p, gh = make(tmp_path, work)
+    p.exclusive_work = lambda issues: {"b/1.1"}
+    p.schedule()
+    assert RELEASE_KEY not in p.jobs
