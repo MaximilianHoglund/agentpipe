@@ -364,6 +364,7 @@ class Pipeline:
         # raise the slot counts without replacing the pool.
         self.pool = ThreadPoolExecutor(max_workers=64)
         self.stopping = False
+        self.had_watcher = False
         # Set by `agentpipe run` so edits to pipeline.toml apply without a restart.
         self.config_path: Path | None = None
         self.overrides: dict[str, object] = {}  # command-line settings that beat the file
@@ -1371,6 +1372,8 @@ class Pipeline:
                 self.check_environment()
             except LimitHit as e:
                 return self.pause(str(e))
+            if self.stop_arrived():
+                return
         if time.time() - self.last_sync >= self.cfg.sync_seconds or not self.tasks:
             try:
                 self.sync(on_ready=lambda: self.schedule(**off), **off)
@@ -1386,6 +1389,8 @@ class Pipeline:
                     return  # nothing known yet: scheduling would see no task at all
             else:
                 self.note_ok("sync")
+                if self.stop_arrived():
+                    return
                 # No release while new code waits to take over: the handoff waits for it to end.
                 if (self.t.milestones and RELEASE_KEY not in self.jobs and not self.restart_for
                         and not self.exclusive_on):
@@ -1531,7 +1536,7 @@ class Pipeline:
 
         Without ``agents`` (a usage pause) no implement, revise or review job starts; merges and
         the label housekeeping here use no tokens and go on."""
-        if not self.env_ok:
+        if not self.env_ok or self.stop_arrived():
             return
         # Read the handoff files again here, not only at the top of tick: a preflight or sync
         # in between can take minutes, and work an old dispatcher finished meanwhile must not
@@ -2110,6 +2115,20 @@ class Pipeline:
             return "watcher window closed"
         return None
 
+    def halt(self, reason: str) -> None:
+        self.stopping = True
+        self.log(f"{reason}: starting nothing new, waiting for {len(self.jobs)} running job(s)")
+
+    def stop_arrived(self) -> bool:
+        """True once the dispatcher is stopping, noticing a stop that came in during this tick.
+
+        The loop checks for a stop only between ticks, and one tick can run a preflight and a
+        sync that take minutes: a stop sent meanwhile used to be seen only after that tick had
+        started jobs (2026-11-11). Tick and schedule call this before starting anything."""
+        if not self.stopping and (reason := self.stop_reason()):
+            self.halt(reason)
+        return self.stopping
+
     def run_forever(self, once: bool = False) -> None:
         self.stop_file.unlink(missing_ok=True)  # a stale request must not stop a new run
         self.stopped_file.unlink(missing_ok=True)
@@ -2145,8 +2164,7 @@ class Pipeline:
                         self.hand_off()
                 reason = self.stop_reason()
                 if reason and not self.stopping:
-                    self.stopping = True
-                    self.log(f"{reason}: starting nothing new, waiting for {len(self.jobs)} running job(s)")
+                    self.halt(reason)
                 elif not reason and self.stopping:
                     # `start` while draining removes the stop file and opens a watcher: keep going.
                     self.stopping = False

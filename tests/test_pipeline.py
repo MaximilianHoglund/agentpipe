@@ -454,6 +454,38 @@ def test_stop_file_drains_running_jobs_then_exits(pl):
     assert not p.stop_file.exists() and not p.pid_file.exists()
 
 
+def test_stop_sent_during_preflight_starts_nothing(pl):
+    p, gh = pl
+    task_issue(gh, "c/1.1", S.PENDING_IMPLEMENTATION)
+    p.env_ok = False
+    lines = []
+    p._log = lines.append
+
+    def preflight():  # takes minutes for real; `agentpipe stop` arrives meanwhile
+        p.stop_file.write_text("", encoding="utf-8")
+        p.env_ok = True
+
+    p.check_environment = preflight
+    p.tick()
+    assert p.started == [] and p.stopping
+    assert any("stop requested" in l for l in lines)
+
+
+def test_stop_sent_during_sync_starts_nothing(pl):
+    p, gh = pl
+    task_issue(gh, "c/1.1", S.PENDING_IMPLEMENTATION)
+    p.last_sync = 0
+    real = p.sync
+
+    def sync(**kw):
+        p.stop_file.write_text("", encoding="utf-8")
+        return real(**kw)
+
+    p.sync = sync
+    p.tick()
+    assert p.started == [] and p.stopping
+
+
 def test_removing_the_stop_file_while_draining_cancels_the_stop(pl):
     p, gh = pl
     p.cfg.poll_seconds = 0
