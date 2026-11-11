@@ -88,40 +88,12 @@ class GitHub:
         """Pipeline issues: number, state, title, body, labels (names), and stateReason (for a
         closed one, "COMPLETED" or "NOT_PLANNED"). ``state`` is "all" (open and closed; the
         closed set only grows, so only sync asks for it) or "open"."""
-        base = ("issue", "list", "-R", self.repo, "--label", PIPELINE_LABEL, "--state", state,
-                "--limit", "5000", "--json")
-        items = None
-        if not getattr(self, "no_state_reason", False):
-            try:
-                items = self._json(*base, "number,state,stateReason,title,body,labels") or []
-            except proc.CommandError as e:
-                if "Unknown JSON field" not in str(e) or "stateReason" not in str(e):
-                    raise
-                # gh before 2.47 has no stateReason field (the laptop's apt gh is 2.45, and
-                # every sync failed there on 2026-11-11). Ask REST for closed issues' reasons.
-                self.no_state_reason = True
-        if items is None:
-            items = self._json(*base, "number,state,title,body,labels") or []
-            if state != "open":
-                reasons = self.close_reasons()
-                for it in items:
-                    if it["state"].upper() == "CLOSED":
-                        it["stateReason"] = reasons.get(it["number"])
+        items = self._json("issue", "list", "-R", self.repo, "--label", PIPELINE_LABEL,
+                           "--state", state, "--limit", "5000",
+                           "--json", "number,state,stateReason,title,body,labels") or []
         for it in items:
             it["labels"] = [l["name"] for l in it["labels"]]
         return items
-
-    def close_reasons(self) -> dict[int, str]:
-        """Closed pipeline issue number -> close reason in `gh issue list`'s spelling
-        ("COMPLETED", "NOT_PLANNED"), read from REST for a gh too old to give stateReason."""
-        out = self._gh("api", f"repos/{self.repo}/issues?labels={PIPELINE_LABEL}&state=closed&per_page=100",
-                       "--paginate", "--jq", ".[] | select(.pull_request == null) | {number, state_reason}")
-        reasons = {}
-        for line in out.splitlines():
-            if line.strip():
-                r = json.loads(line)
-                reasons[r["number"]] = (r.get("state_reason") or "").upper() or None
-        return reasons
 
     def create_issue(self, title: str, body: str, status: Status, extra_labels: tuple = ()) -> int:
         labels = [a for l in (PIPELINE_LABEL, status.label, *extra_labels) for a in ("--label", l)]
