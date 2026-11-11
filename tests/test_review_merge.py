@@ -370,6 +370,27 @@ def test_list_issues_asks_for_the_close_reason():
     assert "stateReason" in calls[0][calls[0].index("--json") + 1].split(",")
 
 
+def test_list_issues_on_a_gh_without_state_reason_reads_reasons_from_rest():
+    calls = []
+    listing = json.dumps([{"number": 1, "state": "CLOSED", "title": "t", "body": "b", "labels": []},
+                          {"number": 2, "state": "OPEN", "title": "u", "body": "c", "labels": []}])
+
+    def run(cmd, cwd, input=None, **kw):
+        calls.append(cmd)
+        if cmd[1] == "issue" and "stateReason" in cmd[-1]:
+            raise proc.CommandError(cmd, proc.Result(1, "", 'Unknown JSON field: "stateReason"'))
+        if cmd[1] == "api":
+            return proc.Result(0, '{"number":1,"state_reason":"not_planned"}\n', "")
+        return proc.Result(0, listing, "")
+
+    gh = GitHub("o/r", run=run)
+    items = gh.list_issues()
+    assert items[0]["stateReason"] == "NOT_PLANNED" and "stateReason" not in items[1]
+    gh.list_issues(state="open")  # remembers: no second failing call, and no REST call for open
+    assert sum(1 for c in calls if "stateReason" in c[-1]) == 1
+    assert sum(1 for c in calls if c[1] == "api") == 1
+
+
 def test_merged_pr_is_the_latest_merged_pr_from_that_branch():
     older = dict(merged_pr("c/1.1", 5), mergedAt="2026-11-01T10:00:00Z")
     other = dict(merged_pr("c/1.1", 9), headRefName="pipeline/c/1.10", mergedAt="2026-11-11T10:00:00Z")
