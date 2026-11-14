@@ -329,9 +329,10 @@ repo_root = "~/dota2-draft-helper"
 [machines.laptop.target.arpg]
 repo_root = "~/arpg-manager"
 # The laptop has 12 threads and 12 GB for WSL, against [run]'s 5+3 sized for the desktop
-# (Max, 2026-11-08: fewer agents there).
-max_implementers = 3
-max_reviewers = 2
+# (Max, 2026-11-08: fewer agents there). 3+2 -> 2+1 on 2026-11-14 (Max): each slot keeps an
+# ~8 GB build dir, and 3+2 peaked near 50 GB, filling C: through the WSL disk in 35 min.
+max_implementers = 2
+max_reviewers = 1
 # The laptop's C: holds the WSL disk, which never shrinks. 30 GB (40 until 2026-11-10) leaves C:
 # about 27 GB free overnight; at 40 it neared the overnight watchdog's low-disk line.
 cache_max_gb = 30
