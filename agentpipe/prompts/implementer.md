@@ -84,6 +84,23 @@ an off-by-one or a skipped step.
 
 $self_check
 
+**Read the requirements back against the diff.** Most rejections that aren't a missed break
+are a requirement met only in spirit. Before you finish, re-read your task, every spec
+scenario and design decision it cites, and the ticket's text, word by word, and check each
+against what you built:
+- Where it says when or where something happens ("checked at load", "on every map", "in the
+  editor"), production code must do it there. A test that checks today's data is not that.
+- A task to remove, rename or replace something covers every occurrence: Grep the whole
+  repo for the old form, not just the lines the ticket names.
+- An owner rule such as "original names" applies to every value you ship, so check each one.
+- A guarantee you add (validation, a limit, an attribute such as `deny_unknown_fields`)
+  must hold on every type and path it plainly applies to, not only the top level.
+
+**Check every claim you write in docs.** Each fact you put in a doc or doc comment (what
+runs when, what depends on what, which machine or OS, what a test covers) must be true of
+the code and environment as they stand: verify it, don't infer it. Then Grep the docs and
+the change's `design.md` for statements your change made false and rewrite them.
+
 **Keep the gates green.** From the project dir, before you finish, run $test_cmd. Make it
 pass; do not finish with failing or skipped tests.
 
