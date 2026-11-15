@@ -130,6 +130,27 @@ def test_code_that_does_not_import_is_still_refused_and_docs_on_top_do_not_hide_
     assert sum("doesn't import" in l for l in lines) == 2 and not any("no code change" in l for l in lines)
 
 
+def test_a_commit_that_failed_its_import_is_checked_again_once_its_dependency_is_installed(coded, monkeypatch):
+    p, repo, lines = coded
+    p.code_imports = lambda: "ModuleNotFoundError: No module named 'anyio'"  # pulled, not yet synced
+    new = commit(repo, "agentpipe/pipeline.py", "needs a new dependency\n")
+    now = [1000.0]
+    monkeypatch.setattr("agentpipe.pipeline.time.time", lambda: now[0])
+    p.last_code_check = 0.0
+    p.check_code()
+    assert p.bad_rev == new and p.restart_for is None
+    p.code_imports = lambda: ""  # uv sync has run
+    now[0] += 120
+    p.last_code_check = 0.0
+    p.check_code()  # too soon: still taken as bad
+    assert p.restart_for is None
+    now[0] += p.IMPORT_RETRY_SECONDS
+    p.last_code_check = 0.0
+    p.check_code()
+    assert p.restart_for == new and p.import_retry_at == 0.0
+    assert sum("doesn't import" in l for l in lines) == 1
+
+
 # ------------------------------------------------------------------ 2. open-only and single-issue reads
 def gh_recording(out="[]"):
     calls = []

@@ -373,6 +373,10 @@ class Pipeline:
         # Self-restart on new agentpipe code (see check_code); on only under `agentpipe run`.
         self.code_rev: str | None = None
         self.bad_rev: str | None = None  # a commit whose code failed the import check
+        # When a commit that failed only its import check is checked again (0: never). A commit
+        # that adds a dependency fails until `uv sync` has run, and the dispatcher can look in
+        # between the pull and the sync (f542efa on the laptop, 2026-11-15).
+        self.import_retry_at = 0.0
         self.restart_for: str | None = None  # new code to hand over to, once no merge runs
         self.last_code_check = 0.0
         self.handing_off = False  # handed over: only finishing the jobs already running
@@ -402,6 +406,7 @@ class Pipeline:
 
     CODE_DIR = Path(__file__).resolve().parent.parent
     CODE_CHECK_SECONDS = 60
+    IMPORT_RETRY_SECONDS = 600
 
     def read_code_rev(self) -> str | None:
         """The agentpipe checkout's HEAD commit, or None when it isn't a git checkout."""
@@ -450,7 +455,8 @@ class Pipeline:
             return
         self.last_code_check = time.time()
         rev = self.read_code_rev()
-        if not rev or rev == self.code_rev or rev == self.bad_rev:
+        retrying = rev == self.bad_rev and bool(self.import_retry_at) and time.time() >= self.import_retry_at
+        if not rev or rev == self.code_rev or (rev == self.bad_rev and not retrying):
             return
         if not self.code_changed(self.code_rev, rev):
             self.log(f"agentpipe {rev[:7]} committed: no code change, no handover")
@@ -458,8 +464,12 @@ class Pipeline:
             return
         if err := self.code_imports():
             self.bad_rev = rev
-            self.log(f"agentpipe {rev[:7]} doesn't import ({err}); not restarting onto it")
+            self.import_retry_at = time.time() + self.IMPORT_RETRY_SECONDS
+            if not retrying:
+                self.log(f"agentpipe {rev[:7]} doesn't import ({err}); not restarting onto it, "
+                         f"checking again every {self.IMPORT_RETRY_SECONDS // 60} min")
             return
+        self.import_retry_at = 0.0
         self.restart_for = rev
         busy = [f"{j.kind} {k}" for k, j in self.jobs.items() if j.kind in ("merge", "release")]
         self.log(f"agentpipe {rev[:7]} committed: handing over "
@@ -2270,7 +2280,7 @@ class Pipeline:
             pid = service.start(self.t.name, self.t.work_dir, self.config_path, handed_over=self.env_ok)
         except Exception as e:
             handoff.remove(self.t.work_dir, os.getpid())
-            self.bad_rev, self.restart_for = self.restart_for, None
+            self.bad_rev, self.restart_for, self.import_retry_at = self.restart_for, None, 0.0
             self.log(f"could not start a dispatcher on the new code, carrying on: {e!r}")
             return
         self.state.own_only = {k for j in jobs.values() for k in j["batch"]} | set(jobs)
@@ -2300,7 +2310,7 @@ class Pipeline:
         self.handed_jobs = {}
         self.last_sync = 0.0  # its view of the issues is stale
         if deaths >= 2:
-            self.bad_rev, self.restart_for = rev, None
+            self.bad_rev, self.restart_for, self.import_retry_at = rev, None, 0.0
         self.log(f"the dispatcher on agentpipe {rev[:7]} died; taking the target back (pid {os.getpid()}), "
                  + ("staying on this code until the next commit" if deaths >= 2 else "handing over again")
                  + f"; {len(self.jobs)} job(s) still running here")
