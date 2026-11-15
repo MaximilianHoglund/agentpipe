@@ -3603,6 +3603,13 @@ class Pipeline:
                            *milestones.task_paths(m)).out.strip()
         head = self.git.git("rev-parse", self.base_ref()).out.strip()
         rs = self.release_state(m)
+        if not self.t.cut_releases:
+            if rs.get("left_for") != cut:
+                rs["left_for"] = cut
+                self.state.save()
+                self.log(f"milestone {m.tag} complete at {cut[:8]}; this machine doesn't cut releases "
+                         f"(cut_releases = false), so release it from one that does")
+            return
         sha = next((s for s in (cut, head) if s and s not in rs["tried"]), None)
         if sha is None:
             return

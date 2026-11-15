@@ -210,3 +210,50 @@ def test_schedule_starts_no_release_while_an_exclusive_hold_is_on(repo):
     p.exclusive_work = lambda issues: {"b/1.1"}
     p.schedule()
     assert RELEASE_KEY not in p.jobs
+
+
+def test_a_machine_that_doesnt_cut_releases_logs_a_due_one_once_and_starts_nothing(repo):
+    # arpg on the laptop, 2026-11-15: no GPU for the frame-rate test and no Windows export, so
+    # step-2-gear failed 8 times in 3 h, one try per merge, until pipewatch stopped the dispatcher.
+    tmp_path, work, origin, cut = repo
+    p, gh = make(tmp_path, work)
+    p.t.cut_releases = False
+    logs = []
+    p._log = logs.append
+    assert not release(p) and not release(p)
+    p.schedule()
+    assert RELEASE_KEY not in p.jobs and not gh.releases
+    said = [m for m in logs if "doesn't cut releases" in m]
+    assert len(said) == 1 and cut[:8] in said[0]
+    assert "m1" not in git(origin, "tag").split()
+
+
+def test_cut_releases_is_read_per_machine(tmp_path):
+    cfg = tmp_path / "p.toml"
+    cfg.write_text(f'''
+[agents.planner]
+model = "m"
+[agents.implementer]
+model = "m"
+[agents.reviewer]
+model = "m"
+[targets.t]
+repo_root = "{tmp_path.as_posix()}"
+github_repo = "o/r"
+base = "dev"
+test = "exit 0"
+release_branch = "main"
+milestones = [{{ tag = "m1", changes = ["a"] }}]
+[machines.here]
+hostnames = ["x"]
+targets = ["t"]
+[machines.here.target.t]
+cut_releases = false
+''', encoding="utf-8")
+    import os
+    from agentpipe import config as config_mod
+    os.environ["AGENTPIPE_MACHINE"] = "here"
+    try:
+        assert config_mod.load(cfg).targets["t"].cut_releases is False
+    finally:
+        del os.environ["AGENTPIPE_MACHINE"]

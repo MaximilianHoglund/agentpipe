@@ -86,6 +86,10 @@ class Target:
     # The release's gate, if not `test`: e.g. one that also runs tests the per-PR gate leaves out.
     release_test: str = ""
     release_assets: list[str] = field(default_factory=list)  # globs (project-relative) to attach
+    # False on a machine that can't build or check a release (arpg on the laptop: no GPU for the
+    # frame-rate test, no Windows export): a due release is logged once and left for a machine
+    # that can, by hand. Milestones still order the queue.
+    cut_releases: bool = True
     # Checked before any agent runs (dispatcher start, then each sync while failing):
     # each command must exit 0 from the dispatcher's shell and from an agent's Bash tool.
     preflight: list[str] = field(default_factory=list)
@@ -283,6 +287,7 @@ def load(path: Path) -> Config:
             clean_workspace_crates=bool(t.get("clean_workspace_crates", False)),
             cache_max_gb=float(t.get("cache_max_gb", 0)),
             release_branch=t.get("release_branch", ""),
+            cut_releases=bool(t.get("cut_releases", True)),
             milestones=[Milestone(m["tag"], m.get("title", m["tag"]), list(m["changes"]),
                                   list(m.get("play", [])), list(m.get("deferred", [])))
                         for m in t.get("milestones", [])],

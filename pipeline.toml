@@ -354,3 +354,7 @@ env = { GODOT = "/home/max/godot/4.7.2/Godot_v4.7.2-stable_linux.x86_64", DISPLA
 preflight = ["/home/max/bin/ensure-xvfb.sh", "cargo --version", 'pwsh -NoProfile -Command "exit 0"',
              "/home/max/godot/4.7.2/Godot_v4.7.2-stable_linux.x86_64 --headless --version"]
 test_timeout = 7200
+# No releases here (2026-11-15): llvmpipe can't hold viewer_performance's 60 fps and Linux can't
+# build the Windows export, so step-2-gear failed 8 times in 3 h, one try per merge. Cut them on
+# the desktop by hand (Claude/.scratch/release_from_desktop.py).
+cut_releases = false
