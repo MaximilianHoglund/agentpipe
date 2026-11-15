@@ -1719,6 +1719,17 @@ def test_front_tasks_take_only_front_slots_and_engine_tasks_only_the_others(pl):
                                  ("implement", "c/1.4", "impl-1")]  # c/1.2 waits for the front slot
 
 
+def test_a_front_split_that_takes_every_slot_shares_them_instead(pl):
+    p, gh = pl
+    p.t.front_paths, p.t.front_implementers = ["game/*"], 2
+    p.cfg.max_implementers = 1
+    touching(p, **{"1_1": ["crates/sim/src/a.rs"], "1_2": ["game/ui.gd"]})
+    task_issue(gh, "c/1.1", S.IN_PROGRESS)
+    task_issue(gh, "c/1.2", S.IN_PROGRESS)
+    p.tick()
+    assert p.started == [("implement", "c/1.1", "impl-0")]  # the engine task is not locked out
+
+
 def test_without_a_split_every_task_shares_the_slots(pl):
     p, gh = pl
     touching(p, **{"1_1": ["game/ui.gd"], "1_2": ["game/menu.gd"]})

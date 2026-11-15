@@ -1780,7 +1780,7 @@ class Pipeline:
     def track_of(self, key: str) -> str:
         """`front` or `engine` (see `front_paths`); `engine` for everything without a split. A
         task can carry its own (`track` in state.json), as the dev gate's tickets do."""
-        if not self.t.front_implementers:
+        if not self.front_slots():
             return "engine"
         if track := self.state.data["tasks"].get(key, {}).get("track"):
             return track
@@ -1791,10 +1791,19 @@ class Pipeline:
                 return "front"
         return "engine"
 
-    def slot_track(self, slot: str) -> str:
-        """The track an implementer slot serves: the last `front_implementers` are the front's."""
+    def front_slots(self) -> int:
+        """Implementer slots kept for the front: `front_implementers`, but never all of them.
+        With every slot the front's, engine work never ran (laptop at 1 implementer with
+        front_implementers = 2, 2026-11-15: #549 and #859 sat idle all night), so when the split
+        would leave the engine nothing, the slots form one shared pool instead."""
         n = self.implementers()
-        front = min(max(self.t.front_implementers, 0), n)
+        front = max(self.t.front_implementers, 0)
+        return front if front < n else 0
+
+    def slot_track(self, slot: str) -> str:
+        """The track an implementer slot serves: the last `front_slots()` are the front's."""
+        n = self.implementers()
+        front = self.front_slots()
         if not front or not slot.startswith("impl-"):
             return "engine"
         return "front" if int(slot.split("-", 1)[1]) >= n - front else "engine"
