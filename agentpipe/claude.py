@@ -1,12 +1,28 @@
-"""Run headless Claude Code (`claude -p`) with structured output."""
+"""Run Claude Code agents through the Claude Agent SDK, with structured output.
+
+The SDK starts the same Claude Code CLI that `claude -p` did (``claude_bin``), so prompts, tools,
+settings, skills and transcripts are unchanged. What it adds over the bare CLI are hooks the
+dispatcher answers in-process: deletes outside the agent's checkout are denied
+(:func:`delete_guard`), and an agent near its turn cap is told to wrap up (:class:`RunState`).
+Every stream-json line the CLI prints is still logged to ``logs/<run>.out.json`` as before, since
+``denials``, ``tools/friction.py`` and ``tools/reviews.py`` read those files.
+"""
 
 from __future__ import annotations
 
 import json
 import os
 import re
-from dataclasses import dataclass, field
+import shlex
+import signal
+import subprocess
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Any, Callable
+
+import anyio
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKError, HookMatcher, ProcessError, query
+from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
 from agentpipe import proc
 from agentpipe.config import Agent
@@ -159,8 +175,300 @@ def guard_env(env: dict | None, no_gh_dir: Path) -> dict:
     return env
 
 
+# ------------------------------------------------------------------ deletes outside the checkout
+
+_BASH_DELETE = {"rm", "rmdir", "unlink", "shred"}
+_PS_DELETE = {"remove-item", "rm", "rmdir", "del", "erase", "rd", "ri"}
+_CD = {"cd", "pushd", "set-location", "sl", "chdir"}
+# PowerShell parameters of Remove-Item that take a value which is not a path.
+_PS_VALUED = {"-erroraction", "-ea", "-include", "-exclude", "-filter", "-stream", "-credential"}
+_PS_PATH = {"-path", "-literalpath", "-lp"}
+_SEPARATORS = re.compile(r"&&|\|\||[;|\n]")
+_UNKNOWN = re.compile(r"[$%`(){}]")  # variables, subexpressions: can't tell where they point
+
+
+def checkout_root(cwd: Path) -> Path:
+    """The git checkout ``cwd`` is in (a worktree has a ``.git`` file), else ``cwd`` itself."""
+    cwd = Path(os.path.abspath(cwd))
+    for d in (cwd, *cwd.parents):
+        if (d / ".git").exists():
+            return d
+    return cwd
+
+
+def _resolve(token: str, cwd: Path | None) -> Path | None:
+    """Where a path argument points, or None when that can't be known."""
+    if not token or _UNKNOWN.search(token):
+        return None
+    token = re.split(r"[*?\[]", token, maxsplit=1)[0] or "."  # a glob: the folder it starts in
+    if os.name == "nt":
+        m = re.match(r"^/([a-zA-Z])(?:/|$)(.*)", token)  # Git Bash: /e/Source -> E:/Source
+        if m:
+            token = f"{m.group(1).upper()}:/{m.group(2)}"
+        elif token.startswith("/"):
+            return Path(token)  # /tmp and friends: Git Bash's own tree, never the checkout
+    p = Path(os.path.expanduser(token))
+    if not p.is_absolute():
+        if cwd is None:
+            return None
+        p = cwd / p
+    return Path(os.path.normpath(p))
+
+
+def _inside(p: Path, root: Path) -> bool:
+    a, b = os.path.normcase(str(p)), os.path.normcase(str(root))
+    try:
+        return os.path.commonpath([a, b]) == b
+    except ValueError:  # different drives
+        return False
+
+
+def _words(segment: str, posix: bool) -> list[str]:
+    try:
+        return shlex.split(segment, posix=posix)
+    except ValueError:
+        return segment.split()
+
+
+def delete_targets(command: str, tool: str, cwd: Path) -> list[Path]:
+    """The paths a shell command deletes that can be resolved, following ``cd`` along the way.
+
+    A heuristic, like the deny rules: it reads rm/rmdir/unlink (Bash) and Remove-Item and its
+    aliases (PowerShell), and skips arguments built from variables."""
+    ps = tool == "PowerShell"
+    here: Path | None = cwd
+    out: list[Path] = []
+    for segment in _SEPARATORS.split(command):
+        words = [w.strip("'\"") if ps else w for w in _words(segment.strip(), posix=not ps)]
+        while words and re.match(r"^\w+=", words[0]):  # FOO=1 rm ...
+            words = words[1:]
+        if words and words[0] in ("sudo", "command", "builtin", "&"):
+            words = words[1:]
+        if not words:
+            continue
+        verb = words[0].lower() if ps else words[0]
+        if os.path.basename(verb) in _CD or verb in _CD:
+            target = words[1] if len(words) > 1 else "~"
+            here = _resolve(target, here)
+            continue
+        if verb not in (_PS_DELETE if ps else _BASH_DELETE):
+            continue
+        args, skip, opts_done = words[1:], False, False
+        for i, w in enumerate(args):
+            if skip:
+                skip = False
+                continue
+            lw = w.lower()
+            if ps and lw.startswith("-"):
+                skip = lw in _PS_VALUED or lw in _PS_PATH
+                if lw in _PS_PATH and i + 1 < len(args):
+                    out += [p for p in (_resolve(a, here) for a in args[i + 1].split(",")) if p]
+                continue
+            if not ps and not opts_done and w.startswith("-"):
+                opts_done = w == "--"
+                continue
+            for part in (w.split(",") if ps else [w]):
+                if (p := _resolve(part, here)) is not None:
+                    out.append(p)
+    return out
+
+
+def delete_guard(command: str, tool: str, cwd: Path, root: Path) -> str | None:
+    """Why this command may not run (it deletes outside ``root``), or None."""
+    outside = [p for p in delete_targets(command, tool, cwd) if not _inside(p, root)]
+    if not outside:
+        return None
+    return (f"Deleting outside your checkout ({root}) is not allowed: {', '.join(map(str, outside))}. "
+            "Delete only inside your working directory; leave scratch in git-ignored folders there.")
+
+
+# ------------------------------------------------------------------ one run's hooks
+
+WRAP_UP = ("You have used {used} of your {cap} turns; the run stops at {cap}. Stop starting new work. "
+           "Commit what you have, then give your final answer in the structured output now. If the "
+           "work isn't finished, say exactly what remains (an implementer returns status "
+           "\"incomplete\" with notes for the next run), rather than running out of turns.")
+LAST_CALL = ("{left} turns left before the run is cut off with nothing reported. Give your final "
+             "structured output on your next turn.")
+
+
+@dataclass
+class RunState:
+    """What one agent run's hooks share with its message stream."""
+    cwd: Path
+    root: Path
+    cap: int
+    wrap_up: int  # turns before the cap at which the agent is told to finish; 0: never
+    turns: int = 0
+    warned: int = 0  # notes sent: 1 the wrap-up, 2 the last call
+    hook_denials: list[dict] = field(default_factory=list)
+    _ids: set = field(default_factory=set)
+
+    def see(self, msg: dict) -> dict:
+        """Counts the agent's own turns (one per API message), and adds the hook's denials to the
+        result so `agentpipe denials` lists them beside the deny rules'."""
+        kind = msg.get("type")
+        if kind == "assistant" and not msg.get("parent_tool_use_id"):
+            mid = (msg.get("message") or {}).get("id") or msg.get("uuid")
+            if mid not in self._ids:
+                self._ids.add(mid)
+                self.turns += 1
+        elif kind == "result" and self.hook_denials:
+            # The CLI lists a hook's denial itself (without saying why); tag that entry, and add
+            # any it left out.
+            ours = {d["tool_use_id"]: d for d in self.hook_denials}
+            listed = []
+            for d in msg.get("permission_denials") or []:
+                hook = ours.pop(d.get("tool_use_id"), None)
+                listed.append({**d, "agentpipe_hook": hook["agentpipe_hook"]} if hook else d)
+            msg = {**msg, "permission_denials": [*listed, *ours.values()]}
+        return msg
+
+    def note(self) -> str | None:
+        """The wrap-up text due after the current tool call, at most once per stage."""
+        if not self.wrap_up:
+            return None
+        left = self.cap - self.turns
+        if self.warned < 2 and left <= 2:
+            self.warned = 2
+            return LAST_CALL.format(left=max(left, 0))
+        if self.warned < 1 and left <= self.wrap_up:
+            self.warned = 1
+            return WRAP_UP.format(used=self.turns, cap=self.cap)
+        return None
+
+    def hooks(self) -> dict:
+        async def pre(inp, tool_use_id, _ctx):
+            tool = inp.get("tool_name", "")
+            command = str((inp.get("tool_input") or {}).get("command") or "")
+            reason = delete_guard(command, tool, Path(inp.get("cwd") or self.cwd), self.root) if command else None
+            if not reason:
+                return {}
+            self.hook_denials.append({"tool_name": tool, "tool_use_id": tool_use_id,
+                                      "tool_input": inp.get("tool_input"), "agentpipe_hook": "delete outside checkout"})
+            return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                           "permissionDecisionReason": reason}}
+
+        async def post(_inp, _tool_use_id, _ctx):
+            text = self.note()
+            if not text:
+                return {}
+            return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": text}}
+
+        return {"PreToolUse": [HookMatcher(matcher="Bash|PowerShell", hooks=[pre])],
+                "PostToolUse": [HookMatcher(hooks=[post])]}
+
+
+# ------------------------------------------------------------------ the SDK session
+
+_CONTROL = {"control_request", "control_response", "control_cancel_request"}
+
+
+class _TeeTransport(SubprocessCLITransport):
+    """The SDK's own transport, also handing every raw stream-json message to ``on_message`` (for
+    the run's log, unchanged from the `claude -p` days) and able to kill the CLI with everything
+    it started (a gate or cargo-mutants run by the agent), which the SDK's terminate doesn't."""
+
+    def __init__(self, prompt, options, on_message: Callable[[dict], None]):
+        super().__init__(prompt=prompt, options=options)
+        self._on_message = on_message
+
+    async def _tee(self):
+        async for data in super().read_messages():
+            if data.get("type") not in _CONTROL:
+                self._on_message(data)
+            yield data
+
+    def read_messages(self):
+        return self._tee()
+
+    def kill_tree(self) -> None:
+        p = getattr(self, "_process", None)
+        if p is None or p.returncode is not None:
+            return
+        kill_pid_tree(p.pid)
+
+
+def kill_pid_tree(pid: int) -> None:
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True)
+        return
+    for child in [*_descendants(pid), pid]:
+        try:
+            os.kill(child, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def _descendants(pid: int) -> list[int]:
+    """Every process below ``pid``, from /proc (the CLI isn't started in its own process group)."""
+    children: dict[int, list[int]] = {}
+    for d in Path("/proc").glob("[0-9]*"):
+        try:
+            ppid = int((d / "stat").read_text().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        children.setdefault(ppid, []).append(int(d.name))
+    out, todo = [], [pid]
+    while todo:
+        for c in children.get(todo.pop(), []):
+            out.append(c)
+            todo.append(c)
+    return out
+
+
+KILL_GRACE = 60  # seconds a killed run gets to wind down before its session is abandoned
+
+
+def sdk_run(options: ClaudeAgentOptions, *, input: str, timeout: int | None,
+            on_message: Callable[[dict], Any] | None = None) -> proc.Result:
+    """Run one agent session; the result looks like `proc.run`'s did for `claude -p`: stdout is
+    the stream-json lines, a timeout kills the whole process tree and exits TIMEOUT_CODE."""
+    lines: list[str] = []
+    errs: list[str] = []
+
+    def keep(d: dict) -> None:
+        if on_message:
+            d = on_message(d) or d
+        lines.append(json.dumps(d, ensure_ascii=False))
+
+    options = replace(options, stderr=errs.append)
+    code = 0
+    timed_out = False
+
+    async def main() -> None:
+        nonlocal code, timed_out
+        transport = _TeeTransport(input, options, keep)
+        async with anyio.create_task_group() as tg:
+            async def watchdog() -> None:
+                nonlocal timed_out
+                await anyio.sleep(timeout)
+                timed_out = True
+                transport.kill_tree()  # ends the stream; the SDK then closes up
+                await anyio.sleep(KILL_GRACE)
+                tg.cancel_scope.cancel()
+
+            if timeout:
+                tg.start_soon(watchdog)
+            try:
+                async for _ in query(prompt=input, options=options, transport=transport):
+                    pass
+            except ProcessError as e:
+                code = e.exit_code if e.exit_code not in (None, 0) else 1
+            except ClaudeSDKError as e:
+                code = 1
+                errs.append(str(e))
+            finally:
+                tg.cancel_scope.cancel()
+
+    anyio.run(main)
+    if timed_out:
+        return proc.Result(proc.TIMEOUT_CODE, "\n".join(lines), f"timed out after {timeout}s")
+    return proc.Result(code, "\n".join(lines), "\n".join(errs))
+
+
 class Claude:
-    def __init__(self, bin: str, log_dir: Path, timeout: int, run=proc.run, on_denials=None,
+    def __init__(self, bin: str, log_dir: Path, timeout: int, run=sdk_run, on_denials=None,
                  mcp_config: Path | None = None, on_rate=None, guard=None):
         self.bin = bin
         # Called with each run's env (None: inherit) and returns the env to use: the place for
@@ -175,24 +483,35 @@ class Claude:
         self.timeout = timeout
         self._run = run
 
+    def options(self, cwd: Path, agent: Agent, schema: dict, resume: str | None, env, hooks) -> ClaudeAgentOptions:
+        """What `claude -p` got as flags. The SDK's defaults differ from the CLI's in two places,
+        both set back here: no system prompt (the preset is Claude Code's own) and, depending on
+        the version, no settings files (agents need the target's CLAUDE.md, permissions and skills)."""
+        return ClaudeAgentOptions(
+            cli_path=os.path.expanduser(self.bin),
+            cwd=str(cwd),
+            model=agent.model,
+            system_prompt={"type": "preset", "preset": "claude_code"},
+            setting_sources=["user", "project", "local"],
+            permission_mode="dontAsk",
+            max_turns=agent.max_turns,
+            output_format={"type": "json_schema", "schema": schema},
+            resume=resume,
+            mcp_servers=str(self.mcp_config) if self.mcp_config else {},
+            strict_mcp_config=bool(self.mcp_config),
+            allowed_tools=list(agent.tools),
+            disallowed_tools=list(agent.deny),
+            env=dict(env) if env else {},  # merged over this process's environment
+            hooks=hooks,
+        )
+
     def run(self, prompt: str, cwd: Path, agent: Agent, schema: dict, *, log_name: str,
             resume: str | None = None, env=None) -> ClaudeResult:
-        # stream-json (needs --verbose) is the only output that carries the usage windows.
-        cmd = [self.bin, "-p", "--output-format", "stream-json", "--verbose", "--model", agent.model,
-               "--permission-mode", "dontAsk", "--max-turns", str(agent.max_turns),
-               "--json-schema", json.dumps(schema)]
-        if resume:
-            cmd += ["--resume", resume]
-        if self.mcp_config:
-            cmd += ["--strict-mcp-config", "--mcp-config", str(self.mcp_config)]
-        if agent.deny:
-            cmd += ["--disallowedTools", *agent.deny]
-        if agent.tools:
-            cmd += ["--allowedTools", *agent.tools]
         if self.guard:
             env = self.guard(env)
-        # The prompt goes on stdin: --allowedTools is variadic and would swallow it.
-        r = self._run(cmd, cwd, input=prompt, env=env, timeout=self.timeout, check=False)
+        state = RunState(Path(cwd), checkout_root(Path(cwd)), agent.max_turns, agent.wrap_turns())
+        opts = self.options(cwd, agent, schema, resume, env, state.hooks())
+        r = self._run(opts, input=prompt, timeout=self.timeout, on_message=state.see)
         # Windows treats ':' in a file name as an alternate data stream; keep names plain.
         log_name = safe_name(log_name)
         self.log_dir.mkdir(parents=True, exist_ok=True)

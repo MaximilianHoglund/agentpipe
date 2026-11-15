@@ -18,6 +18,14 @@ class Agent:
     deny: list[str] = field(default_factory=list)
     # A cheaper model for the light jobs (see Pipeline.model_for); "" runs everything on `model`.
     light_model: str = ""
+    # Turns before max_turns at which the agent is told to commit and report (claude.RunState);
+    # None: 15% of max_turns, at least 3. 0 turns the note off.
+    wrap_up: int | None = None
+
+    def wrap_turns(self) -> int:
+        if self.wrap_up is not None:
+            return max(0, self.wrap_up)
+        return max(3, self.max_turns * 15 // 100)
 
 
 @dataclass
@@ -243,7 +251,7 @@ def load(path: Path) -> Config:
     shared_deny = list(data.get("permissions", {}).get("deny", []))
     agents = {
         name: Agent(a["model"], a.get("max_turns", 100), list(a.get("tools", [])),
-                    shared_deny + list(a.get("deny", [])), a.get("light_model", ""))
+                    shared_deny + list(a.get("deny", [])), a.get("light_model", ""), a.get("wrap_up"))
         for name, a in data.get("agents", {}).items()
     }
     for required in ("planner", "implementer", "reviewer"):

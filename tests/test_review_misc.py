@@ -278,8 +278,8 @@ def claude_envs(p):
     """Run the pipeline's Claude with a recorded process; returns the envs it was started with."""
     envs = []
 
-    def fake_run(cmd, cwd, **kw):
-        envs.append(kw.get("env"))
+    def fake_run(options, **kw):
+        envs.append(options.env or None)  # {}: the dispatcher's own environment
         return proc.Result(0, '{"type": "result", "subtype": "success", "result": "", "structured_output": {}}', "")
 
     p.claude._run = fake_run
@@ -319,8 +319,8 @@ def test_env_guard_off_leaves_agent_runs_their_plain_env(pl, monkeypatch):  # no
 def test_a_claude_without_a_guard_passes_env_through(tmp_path):
     seen = []
 
-    def fake_run(cmd, cwd, **kw):
-        seen.append(kw.get("env"))
+    def fake_run(options, **kw):
+        seen.append(options.env)
         return proc.Result(0, "{}", "")
 
     from agentpipe.config import Agent

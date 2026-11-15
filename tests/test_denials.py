@@ -46,7 +46,7 @@ def test_claude_run_reports_denials_and_writes_plain_log_names(tmp_path):
     result = {"subtype": "success", "result": "", "structured_output": {},
               "permission_denials": [{"tool_name": "Bash", "tool_input": {"command": "git push"}}]}
     seen = []
-    c = Claude("claude", tmp_path, 60, run=lambda cmd, cwd, **kw: proc.Result(0, json.dumps(result), ""),
+    c = Claude("claude", tmp_path, 60, run=lambda options, **kw: proc.Result(0, json.dumps(result), ""),
                on_denials=lambda name, ds: seen.append((name, ds)))
     res = c.run("p", tmp_path, Agent("m", 1, []), {}, log_name="plan-abc:x,y-0")
     assert res.denials == result["permission_denials"]

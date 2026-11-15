@@ -26,16 +26,30 @@ def test_shared_deny_reaches_every_agent_and_the_claude_command(tmp_path):
     assert c.agents["implementer"].deny == ["Bash(git push:*)", "Bash(cargo publish:*)"]
     seen = {}
 
-    def fake_run(cmd, cwd, **kw):
-        seen["cmd"] = cmd
+    def fake_run(options, **kw):
+        seen["options"] = options
         return proc.Result(0, '{"subtype": "success", "result": "", "structured_output": {}}', "")
 
     Claude("claude", tmp_path / "logs", 60, run=fake_run).run(
         "hi", tmp_path, c.agents["implementer"], {}, log_name="x")
-    cmd = seen["cmd"]
-    i = cmd.index("--disallowedTools")
-    assert cmd[i + 1:i + 3] == ["Bash(git push:*)", "Bash(cargo publish:*)"]
-    assert cmd[i + 3] == "--allowedTools"
+    o = seen["options"]
+    assert o.disallowed_tools == ["Bash(git push:*)", "Bash(cargo publish:*)"]
+    assert o.allowed_tools == c.agents["implementer"].tools
+    assert o.permission_mode == "dontAsk" and o.max_turns == c.agents["implementer"].max_turns
+    # The SDK's defaults would drop Claude Code's system prompt and the target's settings files.
+    assert o.system_prompt == {"type": "preset", "preset": "claude_code"}
+    assert o.setting_sources == ["user", "project", "local"]
+    assert o.hooks and set(o.hooks) == {"PreToolUse", "PostToolUse"}
+
+
+def test_wrap_up_defaults_to_fifteen_percent_of_the_cap(tmp_path):
+    p = tmp_path / "pipeline.toml"
+    p.write_text(TOML.replace("[agents.implementer]", "[agents.implementer]\nwrap_up = 0"), encoding="utf-8")
+    c = config.load(p)
+    assert c.agents["implementer"].wrap_turns() == 0
+    assert config.Agent("m", 100, []).wrap_turns() == 15
+    assert config.Agent("m", 60, []).wrap_turns() == 9
+    assert config.Agent("m", 10, []).wrap_turns() == 3
 
 
 def test_shipped_config_denies_pushing_and_gh_for_all_agents():

@@ -82,7 +82,9 @@ def scan(logs: Path, deny: list[str], since: float = 0.0, allowed: set[str] = fr
             inp = d.get("tool_input") or {}
             command = str(inp.get("command") or inp.get("file_path") or inp.get("url") or json.dumps(inp))
             rule = matching_rule(tool, command, deny)
-            if rule:
+            if d.get("agentpipe_hook"):  # denied by the dispatcher's own hook (claude.RunState)
+                reason = f"hook: {d['agentpipe_hook']}"
+            elif rule:
                 reason = f"deny rule {rule}"
             elif tool not in allowed:
                 reason = "not allowed"

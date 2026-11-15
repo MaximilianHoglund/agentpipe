@@ -219,12 +219,18 @@ builds there): code in `~/agentpipe`, work dir `~/pipeline-work`, launched by
 
 ## What runs where
 
-- Agents run as headless `claude -p` on your subscription, with `--permission-mode
-  dontAsk` and the tool allowlists in `pipeline.toml`. They can edit and commit in
-  their worktree but cannot push, call `gh`, or touch other branches; the dispatcher
-  does all of that. Besides the deny rules, agent runs get an environment in which `gh`
-  is logged out and `git push` to a network URL fails, however the command is phrased
-  (`env_guard` under `[permissions]`, on by default).
+- Agents run Claude Code (`claude_bin`) through the Claude Agent SDK on your subscription,
+  with permission mode `dontAsk` and the tool allowlists in `pipeline.toml`. They can edit
+  and commit in their worktree but cannot push, call `gh`, or touch other branches; the
+  dispatcher does all of that. Besides the deny rules, agent runs get an environment in
+  which `gh` is logged out and `git push` to a network URL fails, however the command is
+  phrased (`env_guard` under `[permissions]`, on by default).
+- The SDK lets the dispatcher answer hooks in-process (`agentpipe/claude.py`): a Bash or
+  PowerShell delete whose path resolves outside the agent's checkout is denied (listed by
+  `agentpipe denials` as `hook: delete outside checkout`), and an agent `wrap_up` turns
+  before its `max_turns` (default 15%) is told to commit and report, returning
+  `incomplete` with notes rather than being cut off. Raw stream-json still goes to
+  `logs/<run>.out.json`.
 - Work dirs: `E:\Source\.pipeline\<target>\` holds `base\` (a clean checkout of
   `origin/main`), `wt\<task>\` (implementer worktrees), `review\` (disposable PR
   checkouts), `target\<slot>\` (cargo target dirs, reused per slot), `logs\` (every
