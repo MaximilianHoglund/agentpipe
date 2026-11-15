@@ -57,6 +57,15 @@ def test_rendered_review_round_trips_its_marker_and_counts_rounds():
     assert review.rounds_used(history) == 1  # conflicts don't use up a round
 
 
+def test_a_conflict_after_an_approval_starts_a_fresh_round_count():
+    h = [{"verdict": v} for v in ("request_changes", "request_changes", "approve", "conflict",
+                                  "request_changes")]
+    assert review.rounds_used(h) == 1  # the update's rejection is round 1 of a fresh count
+    assert review.rounds_used(h[:3]) == 2
+    # A conflict before any approval resets nothing.
+    assert review.rounds_used([{"verdict": v} for v in ("request_changes", "conflict", "tests_failed")]) == 2
+
+
 def test_human_comments_exclude_pipeline_comments():
     comments = [{"body": review.bot("x")}, {"body": "please use the existing parser"},
                 {"body": review.render_review(raw(), "abc", 1, 3)}]

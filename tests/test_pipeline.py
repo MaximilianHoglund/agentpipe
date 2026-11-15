@@ -1730,6 +1730,18 @@ def test_a_front_split_that_takes_every_slot_shares_them_instead(pl):
     assert p.started == [("implement", "c/1.1", "impl-0")]  # the engine task is not locked out
 
 
+def test_free_slots_that_start_nothing_say_why_once(pl):
+    p, gh = pl
+    lines = []
+    p.log = lines.append
+    task_issue(gh, "c/1.1", S.PENDING_IMPLEMENTATION)
+    p.rating_due = lambda key: True  # held back until a sync rates it
+    p.schedule()
+    p.schedule()  # unchanged, so not logged again
+    idle = [m for m in lines if m.startswith("idle:")]
+    assert len(idle) == 1 and "c/1.1 (not rated yet)" in idle[0]
+
+
 def test_without_a_split_every_task_shares_the_slots(pl):
     p, gh = pl
     touching(p, **{"1_1": ["game/ui.gd"], "1_2": ["game/menu.gd"]})

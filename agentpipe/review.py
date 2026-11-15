@@ -189,7 +189,15 @@ def review_history(comments: list[dict]) -> list[dict]:
 
 
 def rounds_used(history: list[dict]) -> int:
-    return sum(1 for h in history if h["verdict"] in COUNTED and h.get("counts", True))
+    """Rejections counted against `max_rounds`. An approved PR that then conflicts with the base
+    starts a fresh count: what its update gets rejected for is fallout from the merge, not the
+    work the earlier rounds judged, and counting it sent approved work to a decision
+    (2026-11-15: save-system/1.4 approved, then rejected at round 2/3 for its merge from dev)."""
+    start = 0
+    for i, h in enumerate(history):
+        if h["verdict"] == CONFLICT and last_approval(history[:i]) is not None:
+            start = i
+    return sum(1 for h in history[start:] if h["verdict"] in COUNTED and h.get("counts", True))
 
 
 def last_approval(history: list[dict]) -> int | None:

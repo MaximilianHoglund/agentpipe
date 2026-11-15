@@ -354,6 +354,7 @@ class Pipeline:
         self.touches_tried: set[str] = set()  # task keys sent to backfill_touches this run
         self.tiers_tried: set[str] = set()  # ticket keys sent to rate_tickets this run
         self.held: dict[str, str] = {}  # task key -> why it waits for another's files (logged once)
+        self.idle_note: str | None = None  # the last "idle: ..." line logged (see report_idle)
         self.conflict_checked: dict[tuple[str, str], bool] = {}  # (PR head, base) -> conflicts
         # Whether `exclusive` work holds everything else back; assumed until a schedule has looked.
         self.exclusive_on = bool(target.exclusive)
@@ -1624,14 +1625,18 @@ class Pipeline:
                                       self.rank_of(k),
                                       impl_order.index(status_from_labels(issues[k]["labels"])),
                                       key_sort(k)))
+        idle = {}  # task key -> why it didn't start although an implementer slot was free
+        started = False
         for key in queue if agents else ():
             if not free_impl:
                 break
             status = status_from_labels(issues[key]["labels"])
             kind = "revise" if status is Status.CHANGES_REQUESTED else "implement"
             if kind == "revise" and key not in prs:
+                idle[key] = "changes requested but no open PR"
                 continue
             if kind == "implement" and self.rating_due(key):
+                idle[key] = "not rated yet"
                 continue  # the next sync rates it; until then its blockers would be a guess
             if kind == "implement" and (waits := self.ticket_waits_for(key)):
                 # Link the named tasks that have an open issue, so their merge releases this.
@@ -1644,6 +1649,7 @@ class Pipeline:
                     except proc.CommandError as e:
                         self.log(f"{self.what(key)}: could not register its wait; retrying next tick: "
                                  f"{str(e)[-200:]}")
+                idle[key] = "waits for " + ", ".join(waits)
                 continue
             # Only fresh starts wait: work already under way resumes, or two waiting on each
             # other would never run. A task with a PR or earlier runs is under way even when
@@ -1657,15 +1663,20 @@ class Pipeline:
                 if self.held.get(key) != why:
                     self.held[key] = why
                     self.log(f"{self.what(key)} {why}")
+                idle[key] = why
                 continue
             if self.unblocking(key) and self.unblocking_running() >= self.t.unblocking_slots:
+                idle[key] = "unblocking-ticket slots full"
                 continue  # capped: milestone work keeps the other slots
             slot = next((s for s in free_impl if self.slot_track(s) == self.track_of(key)), None)
             if slot is None:
+                idle[key] = f"no free {self.track_of(key)} slot"
                 continue  # its track's slots are busy; the other track's stay its own
             self.held.pop(key, None)
             free_impl.remove(slot)
             self.start(kind, key, slot, issues[key], prs.get(key))
+            started = True
+        self.report_idle(free_impl, queue, idle, agents, started)
         for key in by_status(Status.PENDING_REVIEW):
             if not free_rev:
                 break
@@ -1790,6 +1801,25 @@ class Pipeline:
             if any(fnmatch.fnmatch(p, g) for p in (path, rel) for g in self.t.front_paths):
                 return "front"
         return "engine"
+
+    def report_idle(self, free_impl: list[str], queue: list[str], idle: dict[str, str],
+                    agents: bool, started: bool) -> None:
+        """Log once, when it changes, why free implementer slots started nothing. An idle
+        dispatcher looked the same whether the queue was empty or a bug held everything back
+        (2026-11-15: 6 h idle, every engine task without a slot, and nobody could tell)."""
+        if started or not free_impl or not agents:
+            self.idle_note = None
+            return
+        if not queue:
+            note = f"idle: {len(free_impl)} implementer slot(s) free, no implementer work queued"
+        else:
+            whys = [f"{k} ({idle.get(k, 'not reached')})" for k in queue]
+            more = f"; and {len(whys) - 8} more" if len(whys) > 8 else ""
+            note = (f"idle: {len(free_impl)} implementer slot(s) free, {len(queue)} queued task(s), "
+                    f"none startable: " + "; ".join(whys[:8]) + more)
+        if note != self.idle_note:
+            self.idle_note = note
+            self.log(note)
 
     def front_slots(self) -> int:
         """Implementer slots kept for the front: `front_implementers`, but never all of them.
@@ -2603,11 +2633,17 @@ class Pipeline:
                 f"({self.spec_ref(t)}). `{self.base_ref()}` has moved on and is being merged into your "
                 "branch; the merge is in progress in this worktree and conflicts. Resolve every conflict "
                 "keeping both sides' intent (the base's changes are merged work: keep them), change "
-                f"nothing the merge doesn't need, {check}, and commit the merge. Don't run the full "
+                "nothing the merge doesn't need. What the merge needs includes more than the "
+                "conflicted hunks; check each before committing: (1) code the base brought in that "
+                "calls or uses something your branch renamed or changed; (2) numbers both sides "
+                "bumped, such as a format or schema version: yours takes the next one after the "
+                "base's, with its migration step after the base's; (3) docs (design, decisions, "
+                "specs) whose text either side's change now makes false. Reviews rejected merged "
+                f"branches for each of these (2026-11-15). Then {check}, and commit the merge. Don't run the full "
                 f"`{self.t.test}`: the pipeline runs it on this merge next. `git checkout` is denied: take "
                 "one side of a file with `git restore --theirs <file>` (or `--ours`). Then return the "
                 "structured output with status `done`; in `summary`, say how you resolved each "
-                "conflicted file.")
+                "conflicted file and what you found for each of (1)-(3).")
 
     def resolve_conflict(self, t: Task, slot: str) -> ClaudeResult:
         """A conflict run for the merge in progress in ``t``'s worktree. A light run that ends
