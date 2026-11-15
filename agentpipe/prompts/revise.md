@@ -12,6 +12,9 @@ find it. Most PRs that went back a second time were rejected for a new gap of th
 
 $self_check
 
+If a repo skill's description matches a finding (writing tests that catch breaks, for one),
+invoke it with the Skill tool before you fix the finding.
+
 Address every **blocking** finding. Do not paper over a finding (renaming a duplicate
 instead of removing it, adding an assertion that restates the implementation, adding
 a test that would pass with the code deleted). Nits are optional but cheap ones are

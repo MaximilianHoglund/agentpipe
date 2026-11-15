@@ -120,7 +120,9 @@ tools = ["Read", "Glob", "Grep", "Bash", "PowerShell"]
 model = "claude-opus-5-5"
 light_model = "claude-sonnet-5-5"
 max_turns = 100
-tools = ["Read", "Edit", "Write", "Glob", "Grep", "Bash", "PowerShell"]
+# Skill: the target repo's own skills (.claude/skills) for recurring kinds of change, such as
+# arpg's save-format-change (pilot from 2026-11-15; compare review rejection categories after).
+tools = ["Read", "Edit", "Write", "Glob", "Grep", "Bash", "PowerShell", "Skill"]
 
 [agents.reviewer]
 model = "claude-opus-5-5"

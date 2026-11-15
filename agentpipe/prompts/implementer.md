@@ -17,6 +17,8 @@ $batch_section
 - $spec_ref
 - Also read: $context_list
 - The repo's CLAUDE.md files apply and override general habits.
+- The repo's skills (listed for the Skill tool) hold its procedures for recurring kinds of
+  change. Before you start, invoke each one whose description matches your task, and follow it.
 - Do **not** edit `tasks.md`; the pipeline ticks it after merge.
 
 ## Keep the docs current
