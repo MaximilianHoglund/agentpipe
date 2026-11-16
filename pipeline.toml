@@ -210,6 +210,7 @@ project_dir = "."
 # failed about half of all first gate runs on the busy laptop, and sent skill-gems/3.2 back a round
 # for a failure that wasn't its own. The dev gate (-Full) and releases still run it, and a slowdown
 # there files a ticket. A step added to check.ps1 later must be added to this list too.
+# The laptop has its own copy of this and of `mutation`, with $ escaped for /bin/sh (#973).
 test = '''pwsh -NoProfile -Command "if (Test-Path scripts/check.ps1) { & ./scripts/check.ps1 -Steps 'line endings','file modes','setup tests','check tests','rustfmt','clippy','rustdoc','tests','release clean','release tests'; exit $LASTEXITCODE } elseif (Test-Path Cargo.toml) { cargo test --workspace; exit $LASTEXITCODE } else { Write-Output 'No Cargo.toml or scripts/check.ps1 yet: nothing to gate.'; exit 0 }"'''
 # Releases run every test; the per-PR gate leaves out tooling tests whose files didn't change
 # (scripts/check.ps1, $toolingTests; Max, 2026-11-07). -Performance: since godot-thin-tests 3.5
@@ -361,6 +362,11 @@ env = { GODOT = "/home/max/godot/4.7.2/Godot_v4.7.2-stable_linux.x86_64", DISPLA
 preflight = ["/home/max/bin/ensure-xvfb.sh", "cargo --version", 'pwsh -NoProfile -Command "exit 0"',
              "/home/max/godot/4.7.2/Godot_v4.7.2-stable_linux.x86_64 --headless --version"]
 test_timeout = 7200
+# The shared test and mutation commands with $ escaped (#973, 2026-11-16): commands run through
+# /bin/sh here, which expanded "$LASTEXITCODE" to nothing, so `exit` returned 0 and every per-PR
+# gate passed. cmd.exe on the desktop leaves $ alone. Keep these in step with the shared ones.
+test = '''pwsh -NoProfile -Command "if (Test-Path scripts/check.ps1) { & ./scripts/check.ps1 -Steps 'line endings','file modes','setup tests','check tests','rustfmt','clippy','rustdoc','tests','release clean','release tests'; exit \$LASTEXITCODE } elseif (Test-Path Cargo.toml) { cargo test --workspace; exit \$LASTEXITCODE } else { Write-Output 'No Cargo.toml or scripts/check.ps1 yet: nothing to gate.'; exit 0 }"'''
+mutation = '''pwsh -NoProfile -Command "if (Test-Path scripts/mutants.ps1) { & ./scripts/mutants.ps1 -Diff '{diff}'; exit \$LASTEXITCODE } elseif (Test-Path Cargo.toml) { Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue; cargo mutants -j 6 --in-diff '{diff}' --baseline skip --timeout 120 --no-shuffle -- -- --skip checkouts_sharing_a_target_directory } else { Write-Output 'No Cargo.toml yet: no mutation run.' }"'''
 # No releases here (2026-11-15): llvmpipe can't hold viewer_performance's 60 fps and Linux can't
 # build the Windows export, so step-2-gear failed 8 times in 3 h, one try per merge. Cut them on
 # the desktop by hand (Claude/.scratch/release_from_desktop.py).
