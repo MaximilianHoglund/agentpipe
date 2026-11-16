@@ -192,11 +192,12 @@ release_branch = "main"
 # 742/389/733/369 had merged and were removed.
 # Max, 2026-11-16: ARPG work pauses so engine-split lands alone (it moves most files), then the
 # MMO's mmo-first-playable. engine-split merged 2026-11-16 23:09; `exclusive` switched to
-# mmo-first-playable on 2026-11-17.
+# mmo-first-playable on 2026-11-17. engine-split stays listed so the tickets it filed (origin
+# engine-split, e.g. #1071 shared Godot scripts) keep running; remove it once they're closed.
 # Max, 2026-11-16: ARPG entries removed from `priority` (853, 838, 792, 784, 798,
 # items-and-equipment, loot-filter, save-system), so ARPG work ranks as ordinary work.
 priority = ["engine-split", "mmo-first-playable"]
-exclusive = ["mmo-first-playable"]
+exclusive = ["mmo-first-playable", "engine-split"]
 # Each release carries the playable build. project-foundation 4.1 (in step 1) adds the script,
 # so it exists by the first release.
 release_build = "pwsh -NoProfile -File scripts/export.ps1"
