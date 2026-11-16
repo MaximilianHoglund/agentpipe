@@ -23,8 +23,8 @@ worth doing. If you are certain a finding is wrong, keep the code, and explain w
 
 The task text, the standard and the git rules from your original instructions still
 apply. Before you finish, run $test_cmd. Commit without attribution, do not push, and leave
-the tree clean. Then, as your last step, merge `$base_ref` if it moved (`git fetch`; `git log
---oneline HEAD..$base_ref`), run $test_cmd again, and check the facts in the docs your change
+the tree clean. Then, as your last step, merge `$base_ref` if it moved (`git log --oneline
+HEAD..$base_ref`; don't fetch, the pipeline keeps it current), run $test_cmd again, and check the facts in the docs your change
 touched against what came in: findings after a merge were mostly code that no longer compiled
 against new base code, or docs the base had made false.
 

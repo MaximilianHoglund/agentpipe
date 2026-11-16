@@ -114,9 +114,9 @@ pass; do not finish with failing or skipped tests.
 a quarter of review findings came from what a merge with the base broke: code that no longer
 compiles (a function this branch renamed that new base code still calls, a new enum variant a
 `match` doesn't cover), and docs the base made false (a raised format version, a removed
-function). So as your last step, after committing: `git fetch`, then if `git log --oneline
-HEAD..$base_ref` lists anything, `git merge $base_ref`, resolving any conflict so both sides'
-changes survive. Then run $test_cmd again, read what came in (`git log --stat HEAD^1..HEAD^2`),
+function). So as your last step, after committing: if `git log --oneline HEAD..$base_ref`
+lists anything, `git merge $base_ref`, resolving any conflict so both sides' changes survive.
+Don't `git fetch`: agents have no GitHub credentials, and the pipeline keeps `$base_ref` current. Then run $test_cmd again, read what came in (`git log --stat HEAD^1..HEAD^2`),
 and check every fact in the docs and doc comments your change touched against it. Commit the
 merge and any fixes.
 
