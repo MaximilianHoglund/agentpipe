@@ -190,9 +190,12 @@ release_branch = "main"
 # Max, 2026-11-14: the tickets the Step 2 playtest needs to equip gear (853 worn gear into a run,
 # 838 worn gear in the save, 792 stash remove/replace, 784 Gear button, 798 attack speed);
 # 742/389/733/369 had merged and were removed.
-priority = ["ticket/853", "ticket/838", "ticket/792", "ticket/784", "ticket/798",
+# Max, 2026-11-16: ARPG work pauses so engine-split lands alone (it moves most files), then the
+# MMO's mmo-first-playable. When engine-split is done, switch `exclusive` to mmo-first-playable.
+priority = ["engine-split", "mmo-first-playable",
+            "ticket/853", "ticket/838", "ticket/792", "ticket/784", "ticket/798",
             "items-and-equipment", "loot-filter", "save-system"]
-exclusive = []
+exclusive = ["engine-split"]
 # Each release carries the playable build. project-foundation 4.1 (in step 1) adds the script,
 # so it exists by the first release.
 release_build = "pwsh -NoProfile -File scripts/export.ps1"
