@@ -82,7 +82,11 @@ origin or with more than one unit. For each one, break it on purpose, run the te
 add a test when none fails. Undo each break with `git restore <file>` only after committing
 your work (see Git below). Pick test inputs that tell the rules apart: a unit at the origin,
 weights that are all equal or a value that matches the default can't catch a swapped sign,
-an off-by-one or a skipped step.
+an off-by-one or a skipped step. Report each probe in `probes` (the rule, the break, the test
+that caught it): a `done` with fewer than 3 is sent back to you before it reaches review. The
+breaks reviewers found most often: a rule stated only in docs (what is captured when, such as
+modifiers taken at launch versus the user's live state; which value wins; the order of steps),
+and error paths (every new error, report or refusal branch needs a test that takes it).
 
 $self_check
 
@@ -105,6 +109,16 @@ the change's `design.md` for statements your change made false and rewrite them.
 
 **Keep the gates green.** From the project dir, before you finish, run $test_cmd. Make it
 pass; do not finish with failing or skipped tests.
+
+**Merge `$base_ref` last, then check again.** Other PRs merge while you work. In Nov 2026 over
+a quarter of review findings came from what a merge with the base broke: code that no longer
+compiles (a function this branch renamed that new base code still calls, a new enum variant a
+`match` doesn't cover), and docs the base made false (a raised format version, a removed
+function). So as your last step, after committing: `git fetch`, then if `git log --oneline
+HEAD..$base_ref` lists anything, `git merge $base_ref`, resolving any conflict so both sides'
+changes survive. Then run $test_cmd again, read what came in (`git log --stat HEAD^1..HEAD^2`),
+and check every fact in the docs and doc comments your change touched against it. Commit the
+merge and any fixes.
 
 ## Tickets for things outside your scope
 
@@ -182,5 +196,8 @@ Return the structured output:
 - `tests`: the behaviours and edge cases your tests cover.
 - `docs`: each doc you updated and what it now records, or `none` and why nothing needed
   recording.
+- `probes`: each deliberate break you made: `rule`, `break` (file:line and the change) and
+  `caught_by` (the test that failed). At least 3 with `done`. Only when your change states no
+  rule a test could catch (docs or config only), leave it empty and say why in `no_probes`.
 - `question`: when `needs_decision`, the precise question(s) and the options you see,
   with your recommendation. Commit whatever finished work you have first.

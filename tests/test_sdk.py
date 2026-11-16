@@ -95,6 +95,33 @@ def test_hook_denials_reach_the_result(wt):
     assert [d.get("agentpipe_hook") for d in res["permission_denials"]] == ["delete outside checkout"]
 
 
+def _report_hook(s):
+    return next(m.hooks[0] for m in s.hooks()["PreToolUse"] if m.matcher == "StructuredOutput")
+
+
+def test_a_report_the_check_refuses_goes_back_once_in_the_same_session(wt):
+    s = RunState(wt, wt, cap=60, wrap_up=0, check_report=lambda out: None if out.get("ok") else "add probes")
+    report = _report_hook(s)
+    out = asyncio.run(report({"tool_name": "StructuredOutput", "tool_input": {"ok": False}}, "tu1", {}))
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert out["hookSpecificOutput"]["permissionDecisionReason"] == "add probes"
+    # The second report goes out whatever it holds: one send-back per run, never a loop.
+    assert asyncio.run(report({"tool_name": "StructuredOutput", "tool_input": {"ok": False}}, "tu2", {})) == {}
+    res = s.see({"type": "result", "permission_denials": [{"tool_name": "StructuredOutput", "tool_use_id": "tu1"}]})
+    assert [d.get("agentpipe_hook") for d in res["permission_denials"]] == ["report check"]
+
+
+def test_a_report_near_the_turn_cap_goes_out_unchecked(wt):
+    s = RunState(wt, wt, cap=10, wrap_up=0, check_report=lambda out: "add probes")
+    for i in range(7):
+        s.see({"type": "assistant", "message": {"id": f"m{i}"}})
+    assert asyncio.run(_report_hook(s)({"tool_input": {}}, "tu", {})) == {}
+
+
+def test_without_a_check_there_is_no_report_hook(wt):
+    assert all(m.matcher != "StructuredOutput" for m in RunState(wt, wt, cap=10, wrap_up=0).hooks()["PreToolUse"])
+
+
 # A stand-in for the Claude Code CLI that speaks the SDK's stream-json control protocol.
 FAKE_CLI = r'''
 import json, sys, time

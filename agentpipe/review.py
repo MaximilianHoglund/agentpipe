@@ -54,9 +54,64 @@ IMPLEMENTER_SCHEMA = {
         "docs": {"type": "string",
                  "description": "Docs updated and what each now records, or 'none' and why nothing needed it"},
         "tickets": TICKETS_PROPERTY,
+        "probes": {
+            "type": "array",
+            "description": "Deliberate breaks you made in your own change, each caught by a test",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "rule": {"type": "string", "description": "The rule the break tests, as the docs or spec state it"},
+                    "break": {"type": "string", "description": "file:line and what you changed"},
+                    "caught_by": {"type": "string", "description": "The test that failed, by name"},
+                },
+                "required": ["rule", "break", "caught_by"],
+            },
+        },
+        "no_probes": {"type": "string",
+                      "description": "Only when the change states no rule a test could catch: why"},
     },
     "required": ["status", "summary", "tests", "docs"],
 }
+
+# Probes an implementer reports before its `done` goes to review (claude.RunState's report check).
+# 2026-11-16: 22 of 36 blocking findings in a day were reviewer breaks no test caught, though the
+# prompt already asked implementers to probe; reporting them makes the probing checkable.
+MIN_PROBES = 3
+
+
+def probe_gap(out: dict) -> str | None:
+    """Why an implementer's `done` report may not go out yet (too few probes with the test that
+    caught each, and no reason given for having none), or None."""
+    if not isinstance(out, dict) or out.get("status") != "done":
+        return None
+    if str(out.get("no_probes") or "").strip():
+        return None
+    probes = [p for p in out.get("probes") or [] if isinstance(p, dict)]
+    caught = [p for p in probes if str(p.get("caught_by") or "").strip() and str(p.get("break") or "").strip()]
+    if len(caught) >= MIN_PROBES:
+        return None
+    missing = [str(p.get("rule") or p.get("break") or "?") for p in probes if p not in caught]
+    return (
+        f"Not yet: your report lists {len(caught)} deliberate-break probe(s) with the test that caught "
+        f"each, and review expects at least {MIN_PROBES}. Reviewers reject about 4 PRs in 10, mostly "
+        "for a break no test catches: a rule the docs, design or doc comments state (which value "
+        "wins, what is captured when, such as a snapshot taken at launch versus live state, the "
+        "order of steps), and error paths (every new error or report branch). Commit your work, "
+        "then for each such rule in your change break it, run the tests, add a test when none "
+        "fails, `git restore` the break, and list it in `probes`. "
+        + (f"These have no catching test yet: {'; '.join(missing)}. " if missing else "")
+        + "If your change states no rule a test could catch (docs or config only), give the reason "
+        "in `no_probes` instead. Then return the structured output again.")
+
+
+def probe_section(out: dict) -> str:
+    """The PR body's account of the implementer's probes, for the reviewer."""
+    probes = [p for p in out.get("probes") or [] if isinstance(p, dict)]
+    if not probes:
+        reason = str(out.get("no_probes") or "").strip()
+        return f"none: {reason}" if reason else "none reported"
+    return "\n".join(f"- {p.get('rule', '?')}: broke `{p.get('break', '?')}`, caught by "
+                     f"`{p.get('caught_by') or 'nothing'}`" for p in probes)
 
 REVIEW_SCHEMA = {
     "type": "object",

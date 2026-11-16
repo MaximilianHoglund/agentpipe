@@ -77,9 +77,9 @@ def test_prompts_render_without_missing_variables():
     common = dict(key="k", text="t", test_cmd="cargo test", context_list="x", spec_ref="s",
                   open_tickets="none", project_dir=".")
     review.prompt("implementer", **common, section="s", issue=1, blockers="none", worktree="w", human_input="",
-                  batch_section="", prior_work="", self_check="")
+                  batch_section="", prior_work="", self_check="", base_ref="origin/main")
     review.prompt("revise", key="k", round=1, max_rounds=3, feedback="f", merge_note="", test_cmd="c",
-                  self_check="")
+                  self_check="", base_ref="origin/main")
     review.prompt("reviewer", **common, pr=1, head="h", base_ref="origin/main", diffstat="d",
                   pr_summary="p", mutation_section="", prior_section="", batch_section="")
     review.prompt("planner", repo_root="r", target="t", project_dir=".", context_list="c",
@@ -127,3 +127,24 @@ def test_parse_output_reads_stream_json_and_its_usage_windows():
     res = parse_output(stream, "", 0)
     assert (res.ok, res.session_id, res.structured) == (True, "s9", {"a": 1})
     assert res.rate["five_hour"]["utilization"] == 0.82
+
+
+def _probe(rule="r", brk="a.rs:1 > to >=", caught="t"):
+    return {"rule": rule, "break": brk, "caught_by": caught}
+
+
+def test_a_done_report_needs_three_caught_probes_or_a_reason():
+    assert review.probe_gap({"status": "done", "probes": [_probe()] * 3}) is None
+    gap = review.probe_gap({"status": "done", "probes": [_probe(), _probe(rule="cap", caught="")]})
+    assert "1 deliberate-break probe" in gap and "no catching test yet: cap" in gap
+    assert "no_probes" in review.probe_gap({"status": "done"})
+    assert review.probe_gap({"status": "done", "no_probes": "docs only"}) is None
+    # Only `done` goes to review; unfinished work and questions aren't held up.
+    assert review.probe_gap({"status": "incomplete"}) is None
+    assert review.probe_gap({"status": "needs_decision"}) is None
+
+
+def test_the_pr_body_lists_the_probes_or_why_there_are_none():
+    assert "caught by `t`" in review.probe_section({"probes": [_probe()]})
+    assert review.probe_section({"no_probes": "docs only"}) == "none: docs only"
+    assert review.probe_section({}) == "none reported"

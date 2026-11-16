@@ -288,6 +288,8 @@ WRAP_UP = ("You have used {used} of your {cap} turns; the run stops at {cap}. St
            "Commit what you have, then give your final answer in the structured output now. If the "
            "work isn't finished, say exactly what remains (an implementer returns status "
            "\"incomplete\" with notes for the next run), rather than running out of turns.")
+# The tool Claude Code gives the agent for its final answer when a run has an output schema.
+STRUCTURED_OUTPUT = "StructuredOutput"
 LAST_CALL = ("{left} turns left before the run is cut off with nothing reported. Give your final "
              "structured output on your next turn.")
 
@@ -299,7 +301,10 @@ class RunState:
     root: Path
     cap: int
     wrap_up: int  # turns before the cap at which the agent is told to finish; 0: never
+    # Agent.check_report: why the structured output may not go out yet, or None.
+    check_report: Callable[[dict], str | None] | None = None
     turns: int = 0
+    reports_sent_back: int = 0
     warned: int = 0  # notes sent: 1 the wrap-up, 2 the last call
     hook_denials: list[dict] = field(default_factory=list)
     _ids: set = field(default_factory=set)
@@ -355,8 +360,32 @@ class RunState:
                 return {}
             return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": text}}
 
-        return {"PreToolUse": [HookMatcher(matcher="Bash|PowerShell", hooks=[pre])],
-                "PostToolUse": [HookMatcher(hooks=[post])]}
+        async def report(inp, tool_use_id, _ctx):
+            reason = self.report_gap(inp.get("tool_input") or {})
+            if not reason:
+                return {}
+            self.hook_denials.append({"tool_name": STRUCTURED_OUTPUT, "tool_use_id": tool_use_id,
+                                      "tool_input": inp.get("tool_input"), "agentpipe_hook": "report check"})
+            return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                           "permissionDecisionReason": reason}}
+
+        hooks = {"PreToolUse": [HookMatcher(matcher="Bash|PowerShell", hooks=[pre])],
+                 "PostToolUse": [HookMatcher(hooks=[post])]}
+        if self.check_report:
+            hooks["PreToolUse"].append(HookMatcher(matcher=STRUCTURED_OUTPUT, hooks=[report]))
+        return hooks
+
+    def report_gap(self, out: dict) -> str | None:
+        """Why the agent's final report goes back to it, or None. A denied StructuredOutput call
+        keeps the session going with its cache warm (a Stop hook can't: the result is final by
+        then, checked 2026-11-16). Once per run, and never near the turn cap, so a run that can't
+        satisfy the check still reports rather than being cut off with nothing."""
+        if not self.check_report or self.reports_sent_back >= 1 or self.cap - self.turns <= 3:
+            return None
+        reason = self.check_report(out)
+        if reason:
+            self.reports_sent_back += 1
+        return reason
 
 
 # ------------------------------------------------------------------ the SDK session
@@ -509,7 +538,8 @@ class Claude:
             resume: str | None = None, env=None) -> ClaudeResult:
         if self.guard:
             env = self.guard(env)
-        state = RunState(Path(cwd), checkout_root(Path(cwd)), agent.max_turns, agent.wrap_turns())
+        state = RunState(Path(cwd), checkout_root(Path(cwd)), agent.max_turns, agent.wrap_turns(),
+                         check_report=agent.check_report)
         opts = self.options(cwd, agent, schema, resume, env, state.hooks())
         r = self._run(opts, input=prompt, timeout=self.timeout, on_message=state.see)
         # Windows treats ':' in a file name as an alternate data stream; keep names plain.

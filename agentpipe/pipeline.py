@@ -2488,7 +2488,7 @@ class Pipeline:
             spec_ref=self.spec_ref(t), context_list=self.context_list(),
             human_input=self.human_input(issue, pr), test_cmd=self.agent_check(), open_tickets=self.open_tickets(),
             batch_section=self.batch_section(t), prior_work=self.prior_work(t, pr, run),
-            self_check=self.self_check(t))
+            self_check=self.self_check(t), base_ref=self.base_ref())
 
     def agent_check(self) -> str:
         """What implementer and revise prompts tell the agent to run before finishing (`$test_cmd`).
@@ -2553,8 +2553,10 @@ class Pipeline:
         # One agent session per worktree, across dispatchers too: a handover once started a
         # second implementer in a worktree whose session was still running (arpg #673, #675).
         with handoff.held_lock(self.session_lock(t)):
+            # impl and revise runs report probes before review; conflict, sync and fix runs don't.
+            check = review.probe_gap if tag in ("impl", "revise") else None
             res = self.claude.run(prompt, self.wt(t) / self.t.project_dir,
-                                  replace(self.agent_def("implementer"), model=model),
+                                  replace(self.agent_def("implementer"), model=model, check_report=check),
                                   review.IMPLEMENTER_SCHEMA, log_name=f"{t.slug}-{tag}-{n}",
                                   resume=resume, env=self.env(slot))
         if res.session_id:
@@ -2705,7 +2707,7 @@ class Pipeline:
         prompt = review.prompt(
             "revise", key=t.key, round=review.rounds_used(history), max_rounds=self.cfg.max_rounds,
             feedback=last["body"] if last else "(no review found)", merge_note=merge_note,
-            test_cmd=self.agent_check(), self_check=self.self_check(t))
+            test_cmd=self.agent_check(), self_check=self.self_check(t), base_ref=self.base_ref())
         if not merge_note and self.light_task(t) and self.cfg.agents["implementer"].light_model:
             self.escalate(t, "the reviewer rejected its PR")
         if not self.resumable(t, "revise"):
@@ -2842,9 +2844,12 @@ class Pipeline:
         nums = self.state.task(t.key).get("batch_issues", {})
         closes = "\n".join([f"Closes #{issue}"] + [f"Closes #{nums[x.key]}" for x in tasks[1:] if x.key in nums])
         listing = "\n".join(f"**{x.key}** — {x.text}" for x in tasks)
+        reported = "probes" in out or "no_probes" in out
+        probes = review.probe_section(out) if reported else ""
         body = (f"{TASK_MARKER.format(key=t.key)}\n{closes}\n\n{listing}\n\n"
                 f"## Summary\n\n{out['summary']}\n\n## Tests\n\n{out['tests']}\n\n"
-                f"## Docs\n\n{out.get('docs') or 'none'}\n")
+                f"## Docs\n\n{out.get('docs') or 'none'}\n"
+                + (f"\n## Implementer's probes\n\n{probes}\n" if reported else ""))
         if pr is None:
             title = (f"{t.key}: {t.text}" if len(tasks) == 1 else
                      f"{t.change} {', '.join(x.id for x in tasks)}: {t.text}")
@@ -2852,7 +2857,8 @@ class Pipeline:
             self.log(f"PR #{n} opened for {self.what(t.key)}" +(f" (batch of {len(tasks)})" if len(tasks) > 1 else ""))
         else:
             self.gh.comment(pr["number"], review.bot(f"**Revised.**\n\n{out['summary']}\n\n**Tests:** {out['tests']}"
-                                                  f"\n\n**Docs:** {out.get('docs') or 'none'}"))
+                                                  f"\n\n**Docs:** {out.get('docs') or 'none'}"
+                                                  + (f"\n\n**Implementer's probes:**\n\n{probes}" if reported else "")))
         self.gh.set_status(issue, Status.PENDING_REVIEW, cur)
         st = self.state.task(t.key)
         for k in ("fail_implement", "fail_revise", "unfinished", "unfinished_runs"):

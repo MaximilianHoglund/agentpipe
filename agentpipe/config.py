@@ -7,6 +7,7 @@ import socket
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 
 @dataclass
@@ -21,6 +22,9 @@ class Agent:
     # Turns before max_turns at which the agent is told to commit and report (claude.RunState);
     # None: 15% of max_turns, at least 3. 0 turns the note off.
     wrap_up: int | None = None
+    # Checks the agent's structured output before it goes out: returns why it may not yet (the
+    # agent is told and continues in the same session, once per run), or None (claude.RunState).
+    check_report: Callable[[dict], str | None] | None = field(default=None, compare=False, repr=False)
 
     def wrap_turns(self) -> int:
         if self.wrap_up is not None:
