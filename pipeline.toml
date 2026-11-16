@@ -206,7 +206,11 @@ project_dir = "."
 # Gate, first match wins: scripts/check.ps1 once project-foundation 3.3 adds it (Rust and
 # Godot checks); else cargo test once 1.1 creates the workspace; else pass, so tasks
 # merged before the workspace exists (e.g. 1.2's setup scripts) aren't failed for it.
-test = '''pwsh -NoProfile -Command "if (Test-Path scripts/check.ps1) { & ./scripts/check.ps1; exit $LASTEXITCODE } elseif (Test-Path Cargo.toml) { cargo test --workspace; exit $LASTEXITCODE } else { Write-Output 'No Cargo.toml or scripts/check.ps1 yet: nothing to gate.'; exit 0 }"'''
+# The per-PR gate names every step but `benchmark` (Max, 2026-11-16, #998): its wall-clock budgets
+# failed about half of all first gate runs on the busy laptop, and sent skill-gems/3.2 back a round
+# for a failure that wasn't its own. The dev gate (-Full) and releases still run it, and a slowdown
+# there files a ticket. A step added to check.ps1 later must be added to this list too.
+test = '''pwsh -NoProfile -Command "if (Test-Path scripts/check.ps1) { & ./scripts/check.ps1 -Steps 'line endings','file modes','setup tests','check tests','rustfmt','clippy','rustdoc','tests','release clean','release tests'; exit $LASTEXITCODE } elseif (Test-Path Cargo.toml) { cargo test --workspace; exit $LASTEXITCODE } else { Write-Output 'No Cargo.toml or scripts/check.ps1 yet: nothing to gate.'; exit 0 }"'''
 # Releases run every test; the per-PR gate leaves out tooling tests whose files didn't change
 # (scripts/check.ps1, $toolingTests; Max, 2026-11-07). -Performance: since godot-thin-tests 3.5
 # the frame rate check (viewer_performance) runs only with that switch, once per release.
