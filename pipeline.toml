@@ -191,11 +191,12 @@ release_branch = "main"
 # 838 worn gear in the save, 792 stash remove/replace, 784 Gear button, 798 attack speed);
 # 742/389/733/369 had merged and were removed.
 # Max, 2026-11-16: ARPG work pauses so engine-split lands alone (it moves most files), then the
-# MMO's mmo-first-playable. When engine-split is done, switch `exclusive` to mmo-first-playable.
+# MMO's mmo-first-playable. engine-split merged 2026-11-16 23:09; `exclusive` switched to
+# mmo-first-playable on 2026-11-17.
 # Max, 2026-11-16: ARPG entries removed from `priority` (853, 838, 792, 784, 798,
 # items-and-equipment, loot-filter, save-system), so ARPG work ranks as ordinary work.
 priority = ["engine-split", "mmo-first-playable"]
-exclusive = ["engine-split"]
+exclusive = ["mmo-first-playable"]
 # Each release carries the playable build. project-foundation 4.1 (in step 1) adds the script,
 # so it exists by the first release.
 release_build = "pwsh -NoProfile -File scripts/export.ps1"
