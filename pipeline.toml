@@ -198,10 +198,11 @@ release_branch = "main"
 # items-and-equipment, loot-filter, save-system), so ARPG work ranks as ordinary work.
 # Max, 2026-11-18, MMO playtest feedback: #1150 (heals never reach the life bars, so bars read 0
 # while nobody dies) goes first, and the tickets he filed by hand from the playtest, which have no
-# origin, run with the MMO work: #1190 party of four, #1192 zoom, #1193 pushing, #1194 tank damage.
+# origin, run with the MMO work: #1190 party of four, #1192 zoom, #1193 pushing, #1194 tank damage,
+# #1195 the casting model (an OpenSpec change, `mmo-casting`, also listed so its tasks run).
 priority = ["ticket/1150", "engine-split", "mmo-first-playable"]
-exclusive = ["mmo-first-playable", "engine-split",
-             "ticket/1190", "ticket/1192", "ticket/1193", "ticket/1194"]
+exclusive = ["mmo-first-playable", "engine-split", "mmo-casting",
+             "ticket/1190", "ticket/1192", "ticket/1193", "ticket/1194", "ticket/1195"]
 # Each release carries the playable build. project-foundation 4.1 (in step 1) adds the script,
 # so it exists by the first release.
 release_build = "pwsh -NoProfile -File scripts/export.ps1"
