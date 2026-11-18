@@ -1608,6 +1608,13 @@ class Pipeline:
                     self.start("merge", key, "merge", issues[key], pr)
                     merging = True
                     continue
+                # The list above comes from GitHub's search index, which lags a just-opened PR.
+                # Look the branch up directly before calling it missing.
+                pr = self.gh.open_pr(self.tasks[key].branch)
+                if pr and task_key_from_body(pr.get("body")) == key:
+                    self.log(f"{self.what(key)}: PR #{pr['number']} is open but not yet in the PR list")
+                    prs[key] = pr
+                    continue
                 self.to_decision(issues[key]["number"], s, f"Status is `{s.value}` but no open PR was found.")
         self.record_awaiting(raw)
         # An approved PR that already conflicts with the base is sent to its update now, not when

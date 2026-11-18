@@ -197,6 +197,21 @@ def test_an_issue_without_an_open_pr_waits_while_a_merge_runs_then_is_looked_up(
     assert looked == ["pipeline/c/1.1"] and S.NEEDS_DECISION.label in gh.issues[n]["labels"]
 
 
+def test_a_just_opened_pr_missing_from_the_list_is_not_flagged(pl):
+    """arpg #1043: the label-filtered PR list lagged a PR opened 9 s before."""
+    p, gh = pl
+    n = task_issue(gh, "c/1.1", S.PENDING_REVIEW)
+    other = task_issue(gh, "c/1.2", S.PENDING_REVIEW)
+    gh.unlisted = [dict(merged_pr("c/1.1", number=31, head="sha1"), mergedAt=None),
+                   # c/1.2's branch has a PR, but for another task: still missing
+                   dict(merged_pr("c/1.2", number=32, head="sha2"), mergedAt=None,
+                        body=TASK_MARKER.format(key="c/1.3"))]
+    p.tick()
+    assert S.PENDING_REVIEW.label in gh.issues[n]["labels"] and gh.comments(n) == []
+    assert ("review", "c/1.1", "review-0") in p.started  # and its review starts this tick
+    assert S.NEEDS_DECISION.label in gh.issues[other]["labels"]
+
+
 def test_a_merged_pr_of_another_task_or_an_older_head_does_not_count(pl):
     p, gh = pl
     n = task_issue(gh, "c/1.1", S.APPROVED)

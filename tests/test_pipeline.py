@@ -47,6 +47,9 @@ class FakeGitHub:
     def merged_pr(self, branch):
         return next((p for p in getattr(self, "merged", []) if p["headRefName"] == branch), None)
 
+    def open_pr(self, branch):
+        return next((p for p in getattr(self, "unlisted", []) if p["headRefName"] == branch), None)
+
     def create_issue(self, title, body, status, extra_labels=()):
         return self.add(body, status, title, extra=extra_labels)
 

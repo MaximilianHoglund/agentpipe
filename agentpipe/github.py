@@ -168,6 +168,17 @@ class GitHub:
         return self._json("pr", "list", "-R", self.repo, "--label", PIPELINE_LABEL, "--state", "open",
                           "--limit", "500", "--json", "number,headRefName,headRefOid,body,title,files,mergeable") or []
 
+    def open_pr(self, branch: str) -> dict | None:
+        """The open PR from ``branch``, or None, looked up without a label filter.
+
+        ``list_prs`` filters by label, which makes gh go through GitHub's search index, and that
+        lags a newly opened PR by seconds (arpg #1043, 2026-11-18: PR opened 04:41:57, missing from
+        the list at 04:42:06). A plain ``--head`` listing reads the PRs directly."""
+        items = self._json("pr", "list", "-R", self.repo, "--state", "open", "--head", branch,
+                           "--limit", "5",
+                           "--json", "number,headRefName,headRefOid,body,title,files,mergeable") or []
+        return next((p for p in items if p.get("headRefName") == branch), None)
+
     def merged_pr(self, branch: str) -> dict | None:
         """The pipeline PR from ``branch`` that was merged (the latest, if several), or None:
         number, headRefName, headRefOid, body, title, mergedAt."""
