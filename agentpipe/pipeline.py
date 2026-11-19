@@ -1342,13 +1342,19 @@ class Pipeline:
         """Pipeline issues belonging to this target, by task key.
 
         Tickets have no change of their own: a target owns the tickets filed while
-        it ran (recorded in state.json).
+        it ran (recorded in state.json), and any ticket its config names by key in `exclusive`
+        or `priority`, marker or not. Max files playtest tickets by hand, with no marker, and
+        names them there; arpg #1190 and five more sat a day unseen before this.
         """
         changes = set(self.t.changes(self.base_wt))
         mine = set(self.state.data.setdefault("tickets", []))
+        named = {k for k in (*self.t.exclusive, *self.t.priority) if k.startswith(TICKET_CHANGE + "/")}
         out = {}
         for i in issues:
             body = i["body"] or ""
+            if f"{TICKET_CHANGE}/{i['number']}" in named:
+                out[f"{TICKET_CHANGE}/{i['number']}"] = i
+                continue
             if TICKET_MARKER in body:
                 if i["number"] in mine:
                     out[f"{TICKET_CHANGE}/{i['number']}"] = i

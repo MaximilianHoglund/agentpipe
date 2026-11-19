@@ -380,6 +380,17 @@ def test_issues_of_other_targets_are_ignored(pl):
     assert p.started == []
 
 
+def test_a_hand_filed_ticket_the_config_names_belongs_to_the_target(pl):
+    p, gh = pl
+    n = gh.add("Owner decision: party of four", S.PENDING_IMPLEMENTATION)  # no marker, not filed here
+    other = gh.add("Owner note, not named anywhere", S.PENDING_IMPLEMENTATION)
+    p.t.priority = [f"ticket/{n}"]
+    assert set(p.issues_by_key(gh.list_issues())) == {f"ticket/{n}"}
+    p.t.priority, p.t.exclusive = [], [f"ticket/{n}"]
+    assert set(p.issues_by_key(gh.list_issues())) == {f"ticket/{n}"}
+    assert f"ticket/{other}" not in p.issues_by_key(gh.list_issues())
+
+
 def test_paused_pipeline_starts_nothing(pl):
     p, gh = pl
     task_issue(gh, "c/1.1", S.PENDING_IMPLEMENTATION)
