@@ -143,6 +143,11 @@ REVIEW_SCHEMA = {
                     "caught": {"type": "boolean"},
                     "equivalent": {"type": "boolean",
                                    "description": "true if the break cannot change observable behaviour"},
+                    "untested_by_design": {
+                        "type": "string",
+                        "description": "Only when the repo deliberately leaves the broken value untested: "
+                                       "the doc, decision or CLAUDE.md rule saying so, with file:line "
+                                       "(e.g. a balance number on a design's 'changes nothing' list)"},
                     "by": {"type": "string"},
                 },
                 "required": ["mutation", "caught"],
@@ -170,7 +175,9 @@ def normalize_verdict(raw: dict) -> dict:
     Any blocking finding forces request_changes. A probe (deliberate break) that the
     tests missed, and that the reviewer did not judge behaviour-preserving, is a
     coverage gap: without a blocking test-coverage finding already covering it, one
-    is added.
+    is added. A break the reviewer shows the repo leaves untested on purpose
+    (`untested_by_design` cites the rule) is not a gap: arpg #1200 used up all three
+    rounds on balance numbers that an owner decision says no test pins.
     """
     findings = [dict(f) for f in raw.get("findings", [])]
     for f in findings:
@@ -179,7 +186,8 @@ def normalize_verdict(raw: dict) -> dict:
         if f.get("severity") not in ("blocking", "nit"):
             f["severity"] = "blocking"
     probes = list(raw.get("probes", []))
-    uncaught = [p for p in probes if not p.get("caught") and not p.get("equivalent")]
+    uncaught = [p for p in probes if not p.get("caught") and not p.get("equivalent")
+                and not str(p.get("untested_by_design") or "").strip()]
     if uncaught and not any(f["category"] == "test-coverage" and f["severity"] == "blocking" for f in findings):
         findings.append({
             "severity": "blocking", "category": "test-coverage", "file": "", "line": 0,
@@ -214,8 +222,10 @@ def render_review(v: dict, sha: str, round_: int, max_rounds: int) -> str:
     if v.get("probes"):
         lines += ["<details><summary>Test probes</summary>", ""]
         for p in v["probes"]:
+            by_design = str(p.get("untested_by_design") or "").strip()
             mark = ("caught" if p.get("caught") else
-                    "not caught (behaviour-preserving)" if p.get("equivalent") else "**not caught**")
+                    "not caught (behaviour-preserving)" if p.get("equivalent") else
+                    f"not caught (untested by design: {by_design})" if by_design else "**not caught**")
             by = f" by `{p['by']}`" if p.get("by") else ""
             lines.append(f"- {p['mutation']} — {mark}{by}")
         lines += ["", "</details>"]

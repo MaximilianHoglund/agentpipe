@@ -38,7 +38,11 @@ $prior_section
    in the implementation (flip a comparison, drop a branch, return early, change a
    boundary), run the relevant tests, record whether they caught it (mark a break `equivalent` if it cannot change observable behaviour), then restore the
    file with `git restore <file>`. Do at least three probes, aimed at edge cases.
-   An uncaught break is strong evidence of a coverage gap.
+   An uncaught break is strong evidence of a coverage gap. The exception is a value the
+   repo leaves untested on purpose: an owner decision, a CLAUDE.md rule (such as "tests
+   don't pin balance") or a design doc that lists the value as changing nothing a test
+   measures. For that break, set `untested_by_design` to the rule with its file:line,
+   and don't ask for a test. Better, aim probes at behaviour the change is meant to have.
    Make each break with the Edit tool, which fails loudly when its text isn't found.
    `sed -i` exits 0 on no match, so if you use it, check `git diff --stat` shows the
    file changed before running tests; a probe with an empty diff is not a probe.

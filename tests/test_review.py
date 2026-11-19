@@ -33,6 +33,19 @@ def test_equivalent_or_caught_probes_do_not_block():
     assert review.normalize_verdict(raw(probes=probes))["verdict"] == review.APPROVE
 
 
+def test_a_break_left_untested_by_design_does_not_block_and_shows_its_reason():
+    probe = {"mutation": "Accuracy 300 -> 150", "caught": False,
+             "untested_by_design": "docs/decisions.md:638 tests don't pin boss tuning"}
+    v = review.normalize_verdict(raw(probes=[probe]))
+    assert v["verdict"] == review.APPROVE
+    assert "untested by design: docs/decisions.md:638" in review.render_review(v, "a" * 40, 1, 3)
+
+
+def test_a_blank_untested_by_design_reason_still_blocks():
+    v = review.normalize_verdict(raw(probes=[{"mutation": "a", "caught": False, "untested_by_design": " "}]))
+    assert v["verdict"] == review.REQUEST_CHANGES
+
+
 def test_uncaught_probe_already_explained_by_a_finding_is_not_duplicated():
     v = review.normalize_verdict(raw(findings=[finding(category="test-coverage")],
                                      probes=[{"mutation": "a", "caught": False}]))
