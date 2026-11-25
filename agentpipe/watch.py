@@ -158,6 +158,25 @@ def _local(ts: str) -> str:
         return "--:--:--"
 
 
+def _answer_lines(answer) -> list[str]:
+    """The agent's final structured answer as one line per field, so the watcher shows what it
+    reported (summary, tests, docs, findings, ...) and not only that it did. A list field gets one
+    line per item, an object item as ``key: value`` pairs."""
+    if not isinstance(answer, dict):
+        return []
+    lines = []
+    for key, value in answer.items():
+        if isinstance(value, list):
+            for i, item in enumerate(value, 1):
+                body = ", ".join(f"{k}: {v}" for k, v in item.items()) if isinstance(item, dict) else item
+                lines.append(f"{key} {i}/{len(value)}: {body}")
+            if not value:
+                lines.append(f"{key}: (none)")
+        elif value not in (None, ""):
+            lines.append(f"{key}: {value}")
+    return lines
+
+
 _DENIED_RE = re.compile(r"^Permission to use \w+ (?:with command .* )?has been denied")
 
 
@@ -182,6 +201,7 @@ def parse_transcript(lines: list[str]) -> Transcript:
                 tr.tool_calls += 1
                 if c.get("name") == "StructuredOutput":
                     tr.events.append(Event(when, "done", "final answer submitted"))
+                    tr.events += [Event(when, "result", line) for line in _answer_lines(c.get("input"))]
                 else:
                     tr.events.append(Event(when, "tool", _tool_summary(c.get("name", "?"), c.get("input") or {})))
             elif t == "text" and c.get("text", "").strip() and d["type"] == "assistant":
@@ -202,7 +222,7 @@ def parse_transcript(lines: list[str]) -> Transcript:
 
 
 # ---------------------------------------------------------------- rendering
-_COLORS = {"tool": "36", "text": "0", "think": "3", "error": "31", "denied": "33", "done": "32", "dim": "2", "head": "1"}
+_COLORS = {"tool": "36", "text": "0", "think": "3", "error": "31", "denied": "33", "done": "32", "result": "32", "dim": "2", "head": "1"}
 
 
 def _c(kind: str, s: str, color: bool) -> str:
@@ -414,7 +434,7 @@ def follow(work_dir: Path, project_dir: str, key: str, *, color: bool = True, po
             # Hold back a possibly half-written last line.
             complete = lines if path.read_bytes().endswith(b"\n") else lines[:-1]
             for ev in parse_transcript(complete[seen:]).events:
-                full = ev.kind in ("text", "think")
+                full = ev.kind in ("text", "think", "result")
                 print(f"{ev.when} " + _c(ev.kind, ev.text if full else _short(ev.text, 400), color))
             seen = len(complete)
         time.sleep(poll)

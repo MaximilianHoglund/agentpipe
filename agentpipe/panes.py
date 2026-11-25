@@ -32,7 +32,7 @@ def styles_for(theme) -> dict[str, str]:
     return {"tool": c(theme.primary, "cyan"), "text": "bold " + c(theme.foreground, "white"),
             "think": "italic " + c(theme.secondary, "blue"),
             "error": c(theme.error, "red"), "denied": c(theme.warning, "yellow"),
-            "done": c(theme.success, "green"), "step": "bold " + c(theme.accent, "yellow"),
+            "done": c(theme.success, "green"), "result": c(theme.success, "green"), "step": "bold " + c(theme.accent, "yellow"),
             "dim": c(theme.primary, "cyan"),  # folded tool calls: the tool colour, not grey
             "missed": "bold " + c(theme.error, "red"), "timeout": c(theme.warning, "yellow")}
 
@@ -40,7 +40,7 @@ def styles_for(theme) -> dict[str, str]:
 # A marker per kind, so thinking, messages and tool calls tell apart without colour too
 # (Max, 2026-11-09: it was "just a big grey blob").
 MARKS = {"think": "~", "text": ">", "tool": "$", "dim": "$", "error": "!", "denied": "!",
-         "done": "+", "step": "#", "missed": "!", "timeout": "!"}
+         "done": "+", "result": "=", "step": "#", "missed": "!", "timeout": "!"}
 # Prose blocks get a blank line before them, unless the line before is the same kind.
 BLOCKS = ("think", "text", "step")
 

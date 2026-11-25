@@ -55,6 +55,18 @@ def test_parse_transcript_summarises_tools_text_errors_and_ignores_partial_lines
     assert (tr.tool_calls, tr.errors) == (2, 1)
 
 
+def test_parse_transcript_shows_each_field_of_the_final_answer():
+    answer = {"status": "done", "summary": "Added the retry.", "tests": "", "tickets": [],
+              "probes": [{"rule": "retry cap", "break": "x.py:3", "caught_by": "test_cap"}]}
+    tr = watch.parse_transcript([_line("assistant", [
+        {"type": "tool_use", "name": "StructuredOutput", "input": answer}])])
+    assert [(e.kind, e.text) for e in tr.events] == [
+        ("done", "final answer submitted"),
+        ("result", "status: done"), ("result", "summary: Added the retry."),
+        ("result", "tickets: (none)"),
+        ("result", "probes 1/1: rule: retry cap, break: x.py:3, caught_by: test_cap")]
+
+
 def test_render_shows_live_agent_and_link_progress(tmp_path, monkeypatch):
     monkeypatch.setattr(watch, "PROJECTS", tmp_path / "projects")
     work = tmp_path / "work"
