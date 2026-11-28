@@ -224,6 +224,9 @@ project_dir = "."
 # there files a ticket. A step added to check.ps1 later must be added to this list too.
 # The laptop has its own copy of this and of `mutation`, with $ escaped for /bin/sh (#973).
 test = '''pwsh -NoProfile -Command "if (Test-Path scripts/check.ps1) { & ./scripts/check.ps1 -Steps 'line endings','file modes','setup tests','check tests','rustfmt','clippy','rustdoc','tests','release clean','release tests'; exit $LASTEXITCODE } elseif (Test-Path Cargo.toml) { cargo test --workspace; exit $LASTEXITCODE } else { Write-Output 'No Cargo.toml or scripts/check.ps1 yet: nothing to gate.'; exit 0 }"'''
+# A -Full gate nearly fills the 3600 s default on the desktop, and one stopped at the limit was
+# filed as a base-branch failure twice (#832, #1384). The laptop already sets 7200.
+test_timeout = 7200
 # Releases run every test; the per-PR gate leaves out tooling tests whose files didn't change
 # (scripts/check.ps1, $toolingTests; Max, 2026-11-07). -Performance: since godot-thin-tests 3.5
 # the frame rate check (viewer_performance) runs only with that switch, once per release.
