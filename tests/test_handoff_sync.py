@@ -68,6 +68,21 @@ def test_unfinished_runs_go_to_max_only_after_the_requeues_run_out(pl):
     assert "still left" in gh.comments_by[n][-1]["body"]
 
 
+def test_a_run_with_no_report_drops_its_session_and_saves_its_work(pl):
+    p, gh = pl
+    n, t = with_issue(p, gh)
+    p.state.task("c/1.1")["session"] = "s"
+    no_report = ClaudeResult(False, "success", "I'm still holding the report.", None, False)
+    try:
+        p.deliver(t, n, None, no_report, "impl-0", S.IN_PROGRESS)
+    except RuntimeError as e:
+        assert "implementer run failed" in str(e)
+    else:
+        raise AssertionError("a run with no report must fail the job")
+    assert "session" not in p.state.task("c/1.1")  # the retry doesn't resume what stalled it
+    assert p.git.commits and "ended without a report" in p.git.commits[0] and p.git.pushed
+
+
 def test_a_delivery_forgets_earlier_unfinished_runs(pl):
     p, gh = pl
     n, t = with_issue(p, gh)

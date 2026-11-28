@@ -2830,6 +2830,12 @@ class Pipeline:
         if res.subtype in CAPPED:
             return self.capped(t, issue, cur, res, "implementer")
         if not res.ok:
+            # The retry starts a fresh session from what is committed: resuming one that ended
+            # without a report resumes whatever stalled it (ticket/1368, 2026-11-28: it took
+            # two hook refusals for its owner's orders and then refused every report reminder).
+            self.state.task(t.key).pop("session", None)
+            self.state.save()
+            self.save_wip(t, "a report", how="ended without")
             raise RuntimeError(f"implementer run failed ({res.subtype}): {res.text[:1000]}")
         out = res.structured
         self.file_tickets(f"the implementer of {t.key} (#{issue})", out.get("tickets"))
